@@ -11,13 +11,13 @@ env/
 
 # 下载中间产物
 *.part
-*.part.ndm
+*.part.zdm
 
 # 构建中间目录（保留 dist 下的发布包本身）
 dist/deb_staging/
-dist/ndm-linux/
-dist/ndm-macos/
-dist/ndm-windows/
+dist/zdm-linux/
+dist/zdm-macos/
+dist/zdm-windows/
 
 # 系统
 .DS_Store

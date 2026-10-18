@@ -95,7 +95,7 @@ class CurlTransport(Transport):
         return cmd
 
     def probe(self, url, headers, timeout, proxy):
-        marker = "__NDM_META__"
+        marker = "__ZDM_META__"
         cmd = self._base(proxy) + [
             "--max-time", str(max(5, int(timeout))),
             "-r", "0-0", "-D", "-", "-o", "/dev/null",

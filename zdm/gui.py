@@ -1,7 +1,7 @@
-"""NDM desktop client (PyQt5). Talks to the local NDM service over its REST API.
+"""ZDM desktop client (PyQt5). Talks to the local ZDM service over its REST API.
 
 Run directly with any python3 that has PyQt5:
-    /usr/bin/python3 ~/.local/share/ndm/ndm/gui.py
+    /usr/bin/python3 ~/.local/share/zdm/zdm/gui.py
 """
 
 from __future__ import annotations
@@ -13,19 +13,19 @@ import sys
 import urllib.error
 import urllib.request
 
-# Make the bundled ``ndm`` package importable when run from its install dir.
+# Make the bundled ``zdm`` package importable when run from its install dir.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-from ndm import autostart  # noqa: E402
+from zdm import autostart  # noqa: E402
 
-APP_NAME = "NDM"
+APP_NAME = "ZDM"
 ICON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "extension", "icons", "icon128.png"
 )
 if not os.path.exists(ICON):
     ICON = os.path.join(
-        os.path.expanduser("~/.local/share/icons/hicolor/128x128/apps"), "ndm.png"
+        os.path.expanduser("~/.local/share/icons/hicolor/128x128/apps"), "zdm.png"
     )
 
 STATUS_TEXT = {
@@ -43,12 +43,12 @@ def default_port() -> int:
     home = os.path.expanduser("~")
     if sys.platform == "win32":
         base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
-        path = os.path.join(base, "NDM", "state.json")
+        path = os.path.join(base, "ZDM", "state.json")
     elif sys.platform == "darwin":
-        path = os.path.join(home, "Library", "Application Support", "NDM", "state.json")
+        path = os.path.join(home, "Library", "Application Support", "ZDM", "state.json")
     else:
         base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-        path = os.path.join(base, "ndm", "state.json")
+        path = os.path.join(base, "zdm", "state.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             return int(json.load(f).get("config", {}).get("port") or 9000)
@@ -308,7 +308,7 @@ class MainWindow(QMainWindow):
         self.autostart_action = None
         self.filter = "all"
 
-        self.setWindowTitle("NDM 下载管理器")
+        self.setWindowTitle("ZDM 下载管理器")
         self.setWindowIcon(QIcon(ICON))
         self.resize(1080, 640)
 
@@ -417,7 +417,7 @@ class MainWindow(QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: self.toggle_window()
                                     if reason == QSystemTrayIcon.Trigger else None)
-        self.tray.setToolTip("NDM 下载管理器")
+        self.tray.setToolTip("ZDM 下载管理器")
         self.tray.show()
 
     # ---------------- data ----------------
@@ -428,7 +428,7 @@ class MainWindow(QMainWindow):
         self.poll.start()
 
     def _on_offline(self, msg: str):
-        self.statusBar().showMessage(f"服务未连接（{msg}）— 请运行：ndm start --daemon")
+        self.statusBar().showMessage(f"服务未连接（{msg}）— 请运行：zdm start --daemon")
 
     def _on_state(self, st: dict):
         self.config = st.get("config") or {}
@@ -635,7 +635,7 @@ class MainWindow(QMainWindow):
         port.setValue(int(cfg.get("port") or 9000))
         auto = QCheckBox("重启后自动继续未完成任务")
         auto.setChecked(bool(cfg.get("auto_resume", True)))
-        autostart_cb = QCheckBox("开机自动启动 NDM 服务")
+        autostart_cb = QCheckBox("开机自动启动 ZDM 服务")
         autostart_cb.setChecked(autostart.is_enabled())
         form.addRow("下载目录", row)
         form.addRow("单任务连接数", conns)
@@ -745,7 +745,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self.tray is not None and self.tray.isVisible():
             self.hide()
-            self.tray.showMessage("NDM", "已最小化到托盘，右键托盘图标可退出",
+            self.tray.showMessage("ZDM", "已最小化到托盘，右键托盘图标可退出",
                                   QSystemTrayIcon.Information, 2500)
             e.ignore()
             return
@@ -792,10 +792,10 @@ def main(argv=None) -> int:
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
 
-    guard = SingleApp(f"ndm-gui-{port}")
+    guard = SingleApp(f"zdm-gui-{port}")
     if guard.already:
         guard.send(" ".join(rest) or "wake")
-        print("NDM 桌面端已在运行，已激活现有窗口")
+        print("ZDM 桌面端已在运行，已激活现有窗口")
         return 0
 
     api = Api(port)

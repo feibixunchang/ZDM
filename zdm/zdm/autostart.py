@@ -1,16 +1,16 @@
-"""Cross-platform login autostart toggle for NDM.
+"""Cross-platform login autostart toggle for ZDM.
 
 The desktop GUI calls these functions so the user can turn "launch on login"
 on/off at runtime, on Linux, macOS and Windows, without re-running the
 installer. The toggle manages the *same* artifacts the installers create
 (so it stays coherent with a fresh install):
 
-  - Linux   : ~/.config/autostart/ndm.desktop              (XDG autostart)
-  - macOS   : ~/Library/LaunchAgents/com.ndm.service.plist (launchd)
-  - Windows : HKCU\\...\\Run "NDM"  +  Startup "NDM Service.lnk"
+  - Linux   : ~/.config/autostart/zdm.desktop              (XDG autostart)
+  - macOS   : ~/Library/LaunchAgents/com.zdm.service.plist (launchd)
+  - Windows : HKCU\\...\\Run "ZDM"  +  Startup "ZDM Service.lnk"
 
 The running GUI always knows where it lives (``gui.py`` sits in APP_DIR), so
-we point the autostart command straight at the installed ``ndm.py``.
+we point the autostart command straight at the installed ``zdm.py``.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ IS_MAC = sys.platform == "darwin"
 
 # ----------------------------------------------------------------- helpers
 def _app_dir() -> str:
-    """Install root that contains ndm.py / gui.py (parent of the ndm package)."""
+    """Install root that contains zdm.py / gui.py (parent of the zdm package)."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -37,7 +37,7 @@ def _python() -> str:
 def _linux_path() -> str:
     home = os.path.expanduser("~")
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-    return os.path.join(base, "autostart", "ndm.desktop")
+    return os.path.join(base, "autostart", "zdm.desktop")
 
 
 def _linux_enable(app_dir: str, py: str) -> None:
@@ -46,10 +46,10 @@ def _linux_enable(app_dir: str, py: str) -> None:
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
-        "Name=NDM Service\n"
-        "Comment=NDM 下载服务后台常驻\n"
-        f'Exec={py} "{os.path.join(app_dir, "ndm.py")}" start --daemon --no-open\n'
-        "Icon=ndm\n"
+        "Name=ZDM Service\n"
+        "Comment=ZDM 下载服务后台常驻\n"
+        f'Exec={py} "{os.path.join(app_dir, "zdm.py")}" start --daemon --no-open\n'
+        "Icon=zdm\n"
         "Terminal=false\n"
         "X-GNOME-Autostart-enabled=true\n"
         "NoDisplay=true\n"
@@ -68,7 +68,7 @@ def _linux_disable() -> None:
 # ----------------------------------------------------------------- macOS
 def _mac_plist_path() -> str:
     return os.path.join(
-        os.path.expanduser("~"), "Library", "LaunchAgents", "com.ndm.service.plist"
+        os.path.expanduser("~"), "Library", "LaunchAgents", "com.zdm.service.plist"
     )
 
 
@@ -76,18 +76,18 @@ _MAC_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.ndm.service</string>
+  <key>Label</key><string>com.zdm.service</string>
   <key>ProgramArguments</key>
   <array>
     <string>{py}</string>
-    <string>{app_dir}/ndm.py</string>
+    <string>{app_dir}/zdm.py</string>
     <string>serve</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>{app_dir}/ndm.log</string>
-  <key>StandardErrorPath</key><string>{app_dir}/ndm.log</string>
+  <key>StandardOutPath</key><string>{app_dir}/zdm.log</string>
+  <key>StandardErrorPath</key><string>{app_dir}/zdm.log</string>
 </dict>
 </plist>
 """
@@ -119,7 +119,7 @@ def _win_startup_lnk() -> str:
         os.path.expanduser("~"), "AppData", "Roaming"
     )
     return os.path.join(
-        sp, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "NDM Service.lnk"
+        sp, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "ZDM Service.lnk"
     )
 
 
@@ -129,7 +129,7 @@ def _win_enabled() -> bool:
 
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _win_reg_key())
         try:
-            winreg.QueryValueEx(key, "NDM")
+            winreg.QueryValueEx(key, "ZDM")
             winreg.CloseKey(key)
             return True
         except OSError:
@@ -146,11 +146,11 @@ def _win_enable(app_dir: str, py: str) -> None:
         pyw = os.path.join(os.path.dirname(py), "pythonw.exe")
         if not os.path.exists(pyw):
             pyw = py
-        cmd = f'"{pyw}" "{os.path.join(app_dir, "ndm.py")}" serve'
+        cmd = f'"{pyw}" "{os.path.join(app_dir, "zdm.py")}" serve'
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER, _win_reg_key(), 0, winreg.KEY_SET_VALUE
         )
-        winreg.SetValueEx(key, "NDM", 0, winreg.REG_SZ, cmd)
+        winreg.SetValueEx(key, "ZDM", 0, winreg.REG_SZ, cmd)
         winreg.CloseKey(key)
     except Exception:
         # Fall back to a Startup shortcut via PowerShell if winreg is unavailable.
@@ -160,7 +160,7 @@ def _win_enable(app_dir: str, py: str) -> None:
             ps = (
                 "$ws=New-Object -ComObject WScript.Shell;"
                 f"$l=$ws.CreateShortcut('{lnk}');"
-                f"$l.TargetPath='{py}';$l.Arguments='{os.path.join(app_dir, 'ndm.py')} serve';"
+                f"$l.TargetPath='{py}';$l.Arguments='{os.path.join(app_dir, 'zdm.py')} serve';"
                 f"$l.WorkingDirectory='{app_dir}';$l.WindowStyle=7;$l.Save()"
             )
             subprocess.run(
@@ -178,7 +178,7 @@ def _win_disable() -> None:
             winreg.HKEY_CURRENT_USER, _win_reg_key(), 0, winreg.KEY_SET_VALUE
         )
         try:
-            winreg.DeleteValue(key, "NDM")
+            winreg.DeleteValue(key, "ZDM")
         except OSError:
             pass
         winreg.CloseKey(key)

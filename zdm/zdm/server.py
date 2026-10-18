@@ -39,13 +39,13 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type,X-NDM-Token")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type,X-ZDM-Token")
         self.send_header("Access-Control-Max-Age", "86400")
 
     def _auth_ok(self) -> bool:
         if not self.token:
             return True
-        if self.headers.get("X-NDM-Token") == self.token:
+        if self.headers.get("X-ZDM-Token") == self.token:
             return True
         q = self.path.split("?", 1)[1] if "?" in self.path else ""
         return f"token={self.token}" in q
@@ -291,7 +291,7 @@ def serve(
         print(f"端口 {port} 已被占用，服务可能已在运行（{e}）")
         return
     url = f"http://{host}:{port}/"
-    print(f"NDM service running at {url}  (Ctrl+C to stop)")
+    print(f"ZDM service running at {url}  (Ctrl+C to stop)")
     if open_ui:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "NDM Connector",
+  "name": "ZDM Connector",
   "version": "1.0.0",
-  "description": "接管浏览器下载，交给本机 NDM 多线程下载器加速",
+  "description": "接管浏览器下载，交给本机 ZDM 多线程下载器加速",
   "minimum_chrome_version": "100",
   "permissions": ["downloads", "downloads.open", "contextMenus", "storage", "notifications"],
   "host_permissions": ["http://127.0.0.1:*/", "http://localhost:*/"],
   "background": { "service_worker": "background.js" },
   "action": {
-    "default_title": "NDM 下载管理器",
+    "default_title": "ZDM 下载管理器",
     "default_popup": "popup.html"
   },
   "options_ui": { "page": "options.html", "open_in_tab": true },

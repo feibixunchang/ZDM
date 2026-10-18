@@ -1,4 +1,4 @@
-/* NDM Connector - background service worker */
+/* ZDM Connector - background service worker */
 
 const DEFAULTS = {
   serverUrl: "http://127.0.0.1:9000",
@@ -53,10 +53,10 @@ chrome.downloads.onCreated.addListener(async (item) => {
     if (!res.ok) throw new Error(res.error || "rejected");
     await chrome.downloads.cancel(item.id);
     await chrome.downloads.erase({ id: item.id });
-    notify("已交给 NDM", item.filename || url);
+    notify("已交给 ZDM", item.filename || url);
   } catch (e) {
     // service unreachable -> let the browser finish the download itself
-    console.warn("[NDM] handoff failed:", e);
+    console.warn("[ZDM] handoff failed:", e);
   }
 });
 
@@ -64,13 +64,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
-      id: "ndm-download",
-      title: "使用 NDM 下载",
+      id: "zdm-download",
+      title: "使用 ZDM 下载",
       contexts: ["link", "video", "audio", "image"],
     });
     chrome.contextMenus.create({
-      id: "ndm-page",
-      title: "使用 NDM 下载本页资源",
+      id: "zdm-page",
+      title: "使用 ZDM 下载本页资源",
       contexts: ["page"],
     });
   });
@@ -87,9 +87,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       dir: cfg.directory || undefined,
       headers: tab && tab.url ? { Referer: tab.url } : {},
     });
-    notify(res.ok ? "已交给 NDM" : "NDM 添加失败", res.ok ? url : res.error || "");
+    notify(res.ok ? "已交给 ZDM" : "ZDM 添加失败", res.ok ? url : res.error || "");
   } catch (e) {
-    notify("NDM 服务未启动", "请先在终端运行: ndm start --daemon");
+    notify("ZDM 服务未启动", "请先在终端运行: zdm start --daemon");
   }
 });
 

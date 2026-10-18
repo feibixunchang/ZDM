@@ -1,4 +1,4 @@
-"""Command line interface for NDM."""
+"""Command line interface for ZDM."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Optional
 from . import server
 from .manager import Manager, config_dir, load_config
 
-PID_FILE = os.path.join(config_dir(), "ndm.pid")
+PID_FILE = os.path.join(config_dir(), "zdm.pid")
 
 
 def _detached() -> dict:
@@ -70,8 +70,8 @@ def cmd_start(args) -> int:
         return 0
     if args.daemon:
         exe = sys.executable
-        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ndm.py")
-        log = os.path.join(config_dir(), "ndm.log")
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "zdm.py")
+        log = os.path.join(config_dir(), "zdm.log")
         with open(log, "a", encoding="utf-8") as lf:
             p = subprocess.Popen(
                 [exe, script, "serve", "--port", str(port)],
@@ -85,7 +85,7 @@ def cmd_start(args) -> int:
         for _ in range(40):
             time.sleep(0.15)
             if server.ping(port=port):
-                print(f"NDM started in background (pid {p.pid}) -> http://127.0.0.1:{port}/")
+                print(f"ZDM started in background (pid {p.pid}) -> http://127.0.0.1:{port}/")
                 return 0
         print(f"started (pid {p.pid}), waiting for service... check {log}")
         return 0
@@ -135,7 +135,7 @@ def cmd_status(args) -> int:
 def cmd_add(args) -> int:
     port = _resolve_port(args)
     if not server.ping(port=port):
-        print("service not running. Start it first:  ndm start --daemon")
+        print("service not running. Start it first:  zdm start --daemon")
         return 1
     payload = {"url": args.url}
     if args.dir:
@@ -249,7 +249,7 @@ def cmd_gui(args) -> int:
     if not server.ping(port=port):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         subprocess.run(
-            [sys.executable, os.path.join(root, "ndm.py"), "start", "--daemon", "--port", str(port)],
+            [sys.executable, os.path.join(root, "zdm.py"), "start", "--daemon", "--port", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=30,
@@ -269,7 +269,7 @@ def cmd_gui(args) -> int:
     log_path = os.path.join(config_dir(), "gui.log")
     log = open(log_path, "a", encoding="utf-8")
     subprocess.Popen([py, gui, str(port)], stdout=log, stderr=log, **_detached())
-    print(f"NDM 桌面端已启动 (python={py}, port={port})；若已运行则激活现有窗口")
+    print(f"ZDM 桌面端已启动 (python={py}, port={port})；若已运行则激活现有窗口")
     return 0
 
 
@@ -282,7 +282,7 @@ def cmd_open(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ndm", description="NDM download manager")
+    p = argparse.ArgumentParser(prog="zdm", description="ZDM download manager")
     p.add_argument("--port", type=int, default=0, help="service port (default 9000)")
     sub = p.add_subparsers(dest="cmd", required=True)
 

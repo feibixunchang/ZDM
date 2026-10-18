@@ -33,7 +33,7 @@ $("#test").onclick = async () => {
     $("#msg").textContent = j.ok ? "连接成功 ✓" : "连接失败";
     $("#msg").style.color = j.ok ? "#16a34a" : "#dc2626";
   } catch (e) {
-    $("#msg").textContent = "连接失败：服务未启动（终端运行 ndm start --daemon）";
+    $("#msg").textContent = "连接失败：服务未启动（终端运行 zdm start --daemon）";
     $("#msg").style.color = "#dc2626";
   }
 };

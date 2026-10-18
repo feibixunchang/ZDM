@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 
 from .core import Chunk, Download, RateLimiter, Segmenter
 
-APP_NAME = "ndm"
+APP_NAME = "zdm"
 DEFAULT_PORT = 9000
 
 
@@ -27,9 +27,9 @@ def config_dir() -> str:
     home = os.path.expanduser("~")
     if IS_WIN:
         base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
-        path = os.path.join(base, "NDM")
+        path = os.path.join(base, "ZDM")
     elif IS_MAC:
-        path = os.path.join(home, "Library", "Application Support", "NDM")
+        path = os.path.join(home, "Library", "Application Support", "ZDM")
     else:
         base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
         path = os.path.join(base, APP_NAME)

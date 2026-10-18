@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NDM installer for Linux and macOS - user level, no root required.
+# ZDM installer for Linux and macOS - user level, no root required.
 # Windows users: use install.ps1 instead.
 #
 #   ./install.sh                 # install, autostart, start service
@@ -51,59 +51,59 @@ install_pyqt() {
 
 # ---------------------------------------------------------------- Linux
 linux_uninstall() {
-  "$HOME/.local/bin/ndm" stop 2>/dev/null || true
-  rm -rf "$HOME/.local/share/ndm" "$HOME/.local/bin/ndm" \
-         "$HOME/.local/share/applications/ndm.desktop" \
-         "$HOME/.local/share/icons/hicolor/128x128/apps/ndm.png" \
-         "$HOME/.config/autostart/ndm.desktop" \
-         "$HOME/.config/systemd/user/ndm.service"
+  "$HOME/.local/bin/zdm" stop 2>/dev/null || true
+  rm -rf "$HOME/.local/share/zdm" "$HOME/.local/bin/zdm" \
+         "$HOME/.local/share/applications/zdm.desktop" \
+         "$HOME/.local/share/icons/hicolor/128x128/apps/zdm.png" \
+         "$HOME/.config/autostart/zdm.desktop" \
+         "$HOME/.config/systemd/user/zdm.service"
   systemctl --user daemon-reload 2>/dev/null || true
-  echo "已卸载（配置在 ~/.config/ndm，已下载文件保留）"
+  echo "已卸载（配置在 ~/.config/zdm，已下载文件保留）"
 }
 
 install_linux() {
   local PREFIX="${PREFIX:-$HOME/.local}"
-  local APP_DIR="$PREFIX/share/ndm"
+  local APP_DIR="$PREFIX/share/zdm"
   local BIN_DIR="$PREFIX/bin"
 
   echo "==> 安装到 $APP_DIR"
   mkdir -p "$APP_DIR" "$BIN_DIR" "$PREFIX/share/applications" \
            "$PREFIX/share/icons/hicolor/128x128/apps"
-  rm -rf "$APP_DIR/ndm" "$APP_DIR/web" "$APP_DIR/extension"
-  cp -r "$ROOT/ndm" "$ROOT/web" "$ROOT/extension" "$ROOT/ndm.py" "$ROOT/gui.py" "$APP_DIR/"
+  rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
+  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$APP_DIR/"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
-  cat > "$BIN_DIR/ndm" <<EOF
+  cat > "$BIN_DIR/zdm" <<EOF
 #!/bin/sh
-exec "$PY" "$APP_DIR/ndm.py" "\$@"
+exec "$PY" "$APP_DIR/zdm.py" "\$@"
 EOF
-  chmod +x "$BIN_DIR/ndm" "$APP_DIR/ndm.py"
-  cp "$ROOT/extension/icons/icon128.png" "$PREFIX/share/icons/hicolor/128x128/apps/ndm.png"
+  chmod +x "$BIN_DIR/zdm" "$APP_DIR/zdm.py"
+  cp "$ROOT/extension/icons/icon128.png" "$PREFIX/share/icons/hicolor/128x128/apps/zdm.png"
 
-  cat > "$PREFIX/share/applications/ndm.desktop" <<EOF
+  cat > "$PREFIX/share/applications/zdm.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=NDM 下载管理器
+Name=ZDM 下载管理器
 Comment=多线程下载管理器（浏览器扩展可接管下载）
-Exec=$BIN_DIR/ndm gui
-Icon=ndm
+Exec=$BIN_DIR/zdm gui
+Icon=zdm
 Terminal=false
 Categories=Network;FileTransfer;
-Keywords=download;ndm;下载;
+Keywords=download;zdm;下载;
 StartupNotify=true
 EOF
 
   case "$MODE" in
     autostart)
       mkdir -p "$HOME/.config/autostart"
-      cat > "$HOME/.config/autostart/ndm.desktop" <<EOF
+      cat > "$HOME/.config/autostart/zdm.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=NDM Service
-Comment=NDM 下载服务后台常驻
-Exec=$BIN_DIR/ndm start --daemon --no-open
-Icon=ndm
+Name=ZDM Service
+Comment=ZDM 下载服务后台常驻
+Exec=$BIN_DIR/zdm start --daemon --no-open
+Icon=zdm
 Terminal=false
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
@@ -112,14 +112,14 @@ EOF
       ;;
     systemd)
       mkdir -p "$HOME/.config/systemd/user"
-      cat > "$HOME/.config/systemd/user/ndm.service" <<EOF
+      cat > "$HOME/.config/systemd/user/zdm.service" <<EOF
 [Unit]
-Description=NDM download manager service
+Description=ZDM download manager service
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$BIN_DIR/ndm start --no-open
+ExecStart=$BIN_DIR/zdm start --no-open
 Restart=on-failure
 RestartSec=3
 
@@ -127,76 +127,76 @@ RestartSec=3
 WantedBy=default.target
 EOF
       systemctl --user daemon-reload || true
-      systemctl --user enable --now ndm.service || true
+      systemctl --user enable --now zdm.service || true
       echo "==> 已注册 systemd user service"
       ;;
   esac
   update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
   gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
   install_pyqt "$PY"
-  "$BIN_DIR/ndm" start --daemon >/dev/null 2>&1 || true
+  "$BIN_DIR/zdm" start --daemon >/dev/null 2>&1 || true
   EXT_DIR="$APP_DIR/extension"
 }
 
 # ---------------------------------------------------------------- macOS
 mac_uninstall() {
-  launchctl unload -w "$HOME/Library/LaunchAgents/com.ndm.service.plist" 2>/dev/null || true
-  rm -rf "$HOME/Library/Application Support/NDM" \
-         "$HOME/Library/LaunchAgents/com.ndm.service.plist" \
-         "$HOME/Applications/NDM.app" "$HOME/.local/bin/ndm"
-  echo "已卸载（配置在 ~/Library/Application Support/NDM，已下载文件保留）"
+  launchctl unload -w "$HOME/Library/LaunchAgents/com.zdm.service.plist" 2>/dev/null || true
+  rm -rf "$HOME/Library/Application Support/ZDM" \
+         "$HOME/Library/LaunchAgents/com.zdm.service.plist" \
+         "$HOME/Applications/ZDM.app" "$HOME/.local/bin/zdm"
+  echo "已卸载（配置在 ~/Library/Application Support/ZDM，已下载文件保留）"
 }
 
 install_mac() {
-  local APP_DIR="$HOME/Library/Application Support/NDM"
+  local APP_DIR="$HOME/Library/Application Support/ZDM"
   local LA="$HOME/Library/LaunchAgents"
   local APPS="$HOME/Applications"
-  local APP="$APPS/NDM.app"
+  local APP="$APPS/ZDM.app"
 
   echo "==> 安装到 $APP_DIR"
   mkdir -p "$APP_DIR" "$LA" "$APPS" "$HOME/.local/bin"
-  rm -rf "$APP_DIR/ndm" "$APP_DIR/web" "$APP_DIR/extension"
-  cp -r "$ROOT/ndm" "$ROOT/web" "$ROOT/extension" "$ROOT/ndm.py" "$ROOT/gui.py" "$APP_DIR/"
+  rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
+  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$APP_DIR/"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
   mkdir -p "$HOME/.local/bin"
-  cat > "$HOME/.local/bin/ndm" <<EOF
+  cat > "$HOME/.local/bin/zdm" <<EOF
 #!/bin/sh
-exec "$PY" "$APP_DIR/ndm.py" "\$@"
+exec "$PY" "$APP_DIR/zdm.py" "\$@"
 EOF
-  chmod +x "$HOME/.local/bin/ndm" "$APP_DIR/ndm.py"
+  chmod +x "$HOME/.local/bin/zdm" "$APP_DIR/zdm.py"
 
   # launchd agent: starts on login and restarts on crash
-  cat > "$LA/com.ndm.service.plist" <<EOF
+  cat > "$LA/com.zdm.service.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.ndm.service</string>
+  <key>Label</key><string>com.zdm.service</string>
   <key>ProgramArguments</key>
   <array>
     <string>$PY</string>
-    <string>$APP_DIR/ndm.py</string>
+    <string>$APP_DIR/zdm.py</string>
     <string>serve</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>$APP_DIR/ndm.log</string>
-  <key>StandardErrorPath</key><string>$APP_DIR/ndm.log</string>
+  <key>StandardOutPath</key><string>$APP_DIR/zdm.log</string>
+  <key>StandardErrorPath</key><string>$APP_DIR/zdm.log</string>
 </dict>
 </plist>
 EOF
-  launchctl unload -w "$LA/com.ndm.service.plist" 2>/dev/null || true
-  launchctl load -w "$LA/com.ndm.service.plist" 2>/dev/null || true
+  launchctl unload -w "$LA/com.zdm.service.plist" 2>/dev/null || true
+  launchctl load -w "$LA/com.zdm.service.plist" 2>/dev/null || true
   echo "==> 已注册 LaunchAgent（登录自启 + 崩溃重启）"
 
   # icon
-  local ICNS="$APP_DIR/ndm.icns"
+  local ICNS="$APP_DIR/zdm.icns"
   if command -v iconutil >/dev/null && command -v sips >/dev/null; then
     local ICONSET
-    ICONSET="$(mktemp -d)/ndm.iconset"
+    ICONSET="$(mktemp -d)/zdm.iconset"
     mkdir -p "$ICONSET"
     for s in 16 32 64 128 256 512; do
       sips -z "$s" "$s" "$APP_DIR/extension/icons/icon512.png" \
@@ -208,14 +208,14 @@ EOF
 
   # script based .app bundle - no compilation needed
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-  [ -f "$ICNS" ] && cp "$ICNS" "$APP/Contents/Resources/ndm.icns"
-  cat > "$APP/Contents/MacOS/NDM" <<EOF
+  [ -f "$ICNS" ] && cp "$ICNS" "$APP/Contents/Resources/zdm.icns"
+  cat > "$APP/Contents/MacOS/ZDM" <<EOF
 #!/bin/sh
 PY="$PY"
 APP_DIR="$APP_DIR"
 if ! curl -s -m 2 http://127.0.0.1:9000/api/state >/dev/null 2>&1; then
-  launchctl kickstart -k gui/\$(id -u)/com.ndm.service 2>/dev/null || true
-  nohup "\$PY" "\$APP_DIR/ndm.py" serve >/dev/null 2>&1 &
+  launchctl kickstart -k gui/\$(id -u)/com.zdm.service 2>/dev/null || true
+  nohup "\$PY" "\$APP_DIR/zdm.py" serve >/dev/null 2>&1 &
   i=0
   while [ \$i -lt 30 ]; do
     curl -s -m 1 http://127.0.0.1:9000/api/state >/dev/null 2>&1 && break
@@ -224,17 +224,17 @@ if ! curl -s -m 2 http://127.0.0.1:9000/api/state >/dev/null 2>&1; then
 fi
 exec "\$PY" "\$APP_DIR/gui.py" 9000
 EOF
-  chmod +x "$APP/Contents/MacOS/NDM"
+  chmod +x "$APP/Contents/MacOS/ZDM"
   cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>NDM</string>
-  <key>CFBundleDisplayName</key><string>NDM 下载管理器</string>
-  <key>CFBundleIdentifier</key><string>com.ndm.desktop</string>
-  <key>CFBundleExecutable</key><string>NDM</string>
-  <key>CFBundleIconFile</key><string>ndm</string>
+  <key>CFBundleName</key><string>ZDM</string>
+  <key>CFBundleDisplayName</key><string>ZDM 下载管理器</string>
+  <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>
+  <key>CFBundleExecutable</key><string>ZDM</string>
+  <key>CFBundleIconFile</key><string>zdm</string>
   <key>CFBundleVersion</key><string>1.0.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -265,8 +265,8 @@ echo "==> python: $PY ($("$PY" -V 2>&1))"
 
 if [ "$OS" = "Darwin" ]; then install_mac; else install_linux; fi
 
-DESKTOP_HINT="应用菜单里的「NDM 下载管理器」或 ndm gui"
-[ "$OS" = "Darwin" ] && DESKTOP_HINT="双击 ~/Applications/NDM.app 或 ndm gui"
+DESKTOP_HINT="应用菜单里的「ZDM 下载管理器」或 zdm gui"
+[ "$OS" = "Darwin" ] && DESKTOP_HINT="双击 ~/Applications/ZDM.app 或 zdm gui"
 
 cat <<EOF
 
@@ -274,8 +274,8 @@ cat <<EOF
 
   桌面端     : $DESKTOP_HINT
   网页界面   : http://127.0.0.1:9000/
-  命令行     : ndm add "https://example.com/file.iso" -c 16
-               ndm list / ndm pause <id> / ndm resume <id> / ndm stop
+  命令行     : zdm add "https://example.com/file.iso" -c 16
+               zdm list / zdm pause <id> / zdm resume <id> / zdm stop
 
 浏览器扩展（Chrome / Edge，三个平台步骤相同）：
   1) chrome://extensions  → 打开右上角「开发者模式」

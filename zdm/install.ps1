@@ -1,4 +1,4 @@
-﻿# NDM installer for Windows - user level, no administrator rights needed.
+﻿# ZDM installer for Windows - user level, no administrator rights needed.
 # Usage (PowerShell):
 #   .\install.ps1                 # install + autostart + launch desktop window
 #   .\install.ps1 -NoAutoStart    # install without autostart
@@ -10,10 +10,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$App = Join-Path $env:LOCALAPPDATA "NDM"
-$StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\NDM"
+$App = Join-Path $env:LOCALAPPDATA "ZDM"
+$StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\ZDM"
 $Startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
-$Agent = "com.ndm.service"
+$Agent = "com.zdm.service"
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
@@ -43,23 +43,23 @@ function Test-PyVersion($exe) {
 
 # ---------------------------------------------------------------- uninstall
 if ($Uninstall) {
-    Write-Step "Uninstalling NDM"
-    $cmd = Join-Path $App "ndm.cmd"
+    Write-Step "Uninstalling ZDM"
+    $cmd = Join-Path $App "zdm.cmd"
     if (Test-Path $cmd) { & $cmd stop }
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*ndm.py*" } |
+        Where-Object { $_.CommandLine -like "*zdm.py*" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    $pl = Join-Path $env:APPDATA "NDM"
+    $pl = Join-Path $env:APPDATA "ZDM"
     Remove-Item -Recurse -Force $App -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $StartMenu -ErrorAction SilentlyContinue
-    Remove-Item -Force (Join-Path $Startup "NDM Service.lnk") -ErrorAction SilentlyContinue
-    Remove-Item -Force (Join-Path $Startup "NDM Service.vbs") -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $Startup "ZDM Service.lnk") -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $Startup "ZDM Service.vbs") -ErrorAction SilentlyContinue
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -like "*$App*") {
         $new = ($userPath.Split(";") | Where-Object { $_ -and $_ -ne $App }) -join ";"
         [Environment]::SetEnvironmentVariable("Path", $new, "User")
     }
-    Write-Host "NDM removed. Downloads and settings under the install folder are gone," -ForegroundColor Yellow
+    Write-Host "ZDM removed. Downloads and settings under the install folder are gone," -ForegroundColor Yellow
     Write-Host "but your downloaded files stay where they are." -ForegroundColor Yellow
     exit 0
 }
@@ -85,22 +85,22 @@ Write-Host "  python: $py"
 # ---------------------------------------------------------------- files
 Write-Step "Installing to $App"
 New-Item -ItemType Directory -Force -Path $App | Out-Null
-foreach ($item in @("ndm", "web", "extension")) {
+foreach ($item in @("zdm", "web", "extension")) {
     $dst = Join-Path $App $item
     if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
     Copy-Item -Recurse -Force (Join-Path $Root $item) $dst
 }
-foreach ($f in @("ndm.py", "gui.py", "README.md")) {
+foreach ($f in @("zdm.py", "gui.py", "README.md")) {
     Copy-Item -Force (Join-Path $Root $f) (Join-Path $App $f)
 }
 Get-ChildItem -Path $App -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------- launcher
-$cmdPath = Join-Path $App "ndm.cmd"
+$cmdPath = Join-Path $App "zdm.cmd"
 Set-Content -Path $cmdPath -Encoding ASCII -Value @"
 @echo off
-"$py" "%~dp0ndm.py" %*
+"$py" "%~dp0zdm.py" %*
 "@
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -108,7 +108,7 @@ if ($userPath -notlike "*$App*") {
     [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";$App"), "User")
     $env:Path = $env:Path + ";$App"
 }
-Write-Host "  command: ndm  (restart the terminal to pick it up, or use $cmdPath)"
+Write-Host "  command: zdm  (restart the terminal to pick it up, or use $cmdPath)"
 
 # ---------------------------------------------------------------- shortcuts
 Write-Step "Creating shortcuts"
@@ -116,15 +116,15 @@ $ws = New-Object -ComObject WScript.Shell
 New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
 $icon = Join-Path $App "extension\icons\icon.ico"
 
-$lnk = $ws.CreateShortcut((Join-Path $StartMenu "NDM 下载管理器.lnk"))
+$lnk = $ws.CreateShortcut((Join-Path $StartMenu "ZDM 下载管理器.lnk"))
 $lnk.TargetPath = $cmdPath
 $lnk.Arguments = "gui"
 $lnk.WorkingDirectory = $App
 if (Test-Path $icon) { $lnk.IconLocation = $icon }
-$lnk.Description = "NDM 多线程下载管理器"
+$lnk.Description = "ZDM 多线程下载管理器"
 $lnk.Save()
 
-$lnk2 = $ws.CreateShortcut((Join-Path $StartMenu "NDM 网页界面.lnk"))
+$lnk2 = $ws.CreateShortcut((Join-Path $StartMenu "ZDM 网页界面.lnk"))
 $lnk2.TargetPath = $cmdPath
 $lnk2.Arguments = "open"
 $lnk2.WorkingDirectory = $App
@@ -135,16 +135,16 @@ $lnk2.Save()
 if (-not $NoAutoStart) {
     $pyw = Join-Path (Split-Path $py) "pythonw.exe"
     if (-not (Test-Path $pyw)) { $pyw = $py }
-    $lnk3 = $ws.CreateShortcut((Join-Path $Startup "NDM Service.lnk"))
+    $lnk3 = $ws.CreateShortcut((Join-Path $Startup "ZDM Service.lnk"))
     $lnk3.TargetPath = $pyw
-    $lnk3.Arguments = "ndm.py serve"
+    $lnk3.Arguments = "zdm.py serve"
     $lnk3.WorkingDirectory = $App
     $lnk3.WindowStyle = 7
-    $lnk3.Description = "NDM background download service"
+    $lnk3.Description = "ZDM background download service"
     $lnk3.Save()
     Write-Host "  autostart: yes (Startup folder)"
 } else {
-    Remove-Item -Force (Join-Path $Startup "NDM Service.lnk") -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $Startup "ZDM Service.lnk") -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------- PyQt5 (optional)
@@ -163,16 +163,16 @@ if ($LASTEXITCODE -ne 0) {
 
 # ---------------------------------------------------------------- start
 Write-Step "Starting service"
-Start-Process -FilePath $pyw -ArgumentList "ndm.py","serve" -WorkingDirectory $App -WindowStyle Hidden
+Start-Process -FilePath $pyw -ArgumentList "zdm.py","serve" -WorkingDirectory $App -WindowStyle Hidden
 Start-Sleep -Seconds 2
 
 Write-Host ""
-Write-Host "NDM installed." -ForegroundColor Green
+Write-Host "ZDM installed." -ForegroundColor Green
 Write-Host ""
-Write-Host "  Desktop app : NDM 下载管理器  (Start menu), or  ndm gui"
+Write-Host "  Desktop app : ZDM 下载管理器  (Start menu), or  zdm gui"
 Write-Host "  Web UI      : http://127.0.0.1:9000/"
 Write-Host "  Extension   : chrome://extensions -> Developer mode -> Load unpacked"
 Write-Host "                -> select  $App\extension"
 Write-Host ""
 Write-Host "  If Windows Firewall asks about python, allow access on private networks" -ForegroundColor Yellow
-Write-Host "  (NDM only listens on 127.0.0.1)." -ForegroundColor Yellow
+Write-Host "  (ZDM only listens on 127.0.0.1)." -ForegroundColor Yellow

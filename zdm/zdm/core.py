@@ -264,7 +264,7 @@ class Download:
 
     @property
     def meta_path(self) -> str:
-        return self.part_path + ".ndm"
+        return self.part_path + ".zdm"
 
     @property
     def target_path(self) -> str:

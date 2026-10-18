@@ -1,4 +1,4 @@
-# NDM — 本机多线程下载管理器
+# ZDM — 本机多线程下载管理器
 
 零依赖（只用 Python 标准库），带本地 Web 管理界面 + Chrome/Edge 扩展，功能对标 Neat DownloadManager。
 
@@ -7,13 +7,13 @@
 | 能力 | 说明 |
 |---|---|
 | 多连接分段下载 | HTTP Range 动态分段，最多 32 连接，连接空闲自动抢占剩余最大分片 |
-| 断点续传 | `.part` + `.part.ndm` 元数据，暂停/重启服务/崩溃后都能续传 |
+| 断点续传 | `.part` + `.part.zdm` 元数据，暂停/重启服务/崩溃后都能续传 |
 | 队列调度 | 并发任务数可配，排队自动开始 |
 | 全局限速 | token bucket，KB/s 可调 |
 | 实时界面 | SSE 推送，进度/速度/剩余时间实时刷新 |
 | 桌面客户端 | 原生 Qt 窗口（PyQt5）：任务列表、托盘、拖放链接、右键菜单、设置 |
-| 浏览器接管 | Chrome/Edge 扩展：自动接管下载、右键「使用 NDM 下载」 |
-| CLI | `ndm add/list/pause/resume/cancel/restart/remove/config` |
+| 浏览器接管 | Chrome/Edge 扩展：自动接管下载、右键「使用 ZDM 下载」 |
+| CLI | `zdm add/list/pause/resume/cancel/restart/remove/config` |
 | 无 Range 服务器 | 自动降级单连接流式下载 |
 
 ## 安装（Linux / macOS / Windows）
@@ -21,31 +21,31 @@
 三端都是**用户级安装，不需要管理员/root 权限**，装完就能用。
 
 > 想在其他电脑上安装？直接拿对应的**安装包**（见仓库根 `dist/` 目录）：
-> `ndm-linux.tar.gz`（或 `ndm_1.0.0_all.deb`）、`ndm-macos.zip`、`ndm-windows.zip`，
+> `zdm-linux.tar.gz`（或 `zdm_1.0.0_all.deb`）、`zdm-macos.zip`、`zdm-windows.zip`，
 > 解压后跑里面的安装脚本即可，无需从源码复制。
 
 ### Linux（Deepin / Ubuntu / Arch …）
 
 ```bash
-cd ndm
+cd zdm
 ./install.sh                 # 安装 + 开机自启 + 启动服务
 ./install.sh --systemd       # 改用 systemd user service 常驻
 ./install.sh --uninstall     # 卸载
 ```
 
-安装后：命令 `~/.local/bin/ndm`，应用菜单「NDM 下载管理器」。
+安装后：命令 `~/.local/bin/zdm`，应用菜单「ZDM 下载管理器」。
 
 ### macOS
 
 ```bash
-cd ndm
+cd zdm
 ./install.sh
 ```
 
-- 代码装到 `~/Library/Application Support/NDM`
-- 后台服务注册为 launchd agent（`~/Library/LaunchAgents/com.ndm.service.plist`）：登录自启、崩溃自动重启
-- 生成 `~/Applications/NDM.app`（含 icns 图标、已去除隔离属性，双击即用）
-- 命令行 `~/.local/bin/ndm`（需要把 `~/.local/bin` 加进 PATH）
+- 代码装到 `~/Library/Application Support/ZDM`
+- 后台服务注册为 launchd agent（`~/Library/LaunchAgents/com.zdm.service.plist`）：登录自启、崩溃自动重启
+- 生成 `~/Applications/ZDM.app`（含 icns 图标、已去除隔离属性，双击即用）
+- 命令行 `~/.local/bin/zdm`（需要把 `~/.local/bin` 加进 PATH）
 
 ### Windows
 
@@ -55,9 +55,9 @@ cd ndm
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-- 代码装到 `%LOCALAPPDATA%\NDM`，并把该目录加入用户 PATH（命令 `ndm`）
-- 开始菜单生成「NDM 下载管理器」「NDM 网页界面」两个快捷方式
-- 开机自启：启动文件夹里的 `NDM Service.lnk`（用 `pythonw.exe` 无黑窗）
+- 代码装到 `%LOCALAPPDATA%\ZDM`，并把该目录加入用户 PATH（命令 `zdm`）
+- 开始菜单生成「ZDM 下载管理器」「ZDM 网页界面」两个快捷方式
+- 开机自启：启动文件夹里的 `ZDM Service.lnk`（用 `pythonw.exe` 无黑窗）
 - 没有 Python 时会尝试用 `winget` 装；桌面端需要 PyQt5，脚本会自动 `pip install --user PyQt5`，
   装不上则桌面端自动回退到网页界面
 - 首次启动若 Windows 防火墙询问 python，允许「专用网络」即可（服务只监听 127.0.0.1）
@@ -72,9 +72,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 | 入口 | 命令 | 说明 |
 |---|---|---|
-| 桌面端 | `ndm gui` | 原生 Qt 窗口，关闭窗口收进托盘 |
-| 网页端 | `ndm open` 或 <http://127.0.0.1:9000/> | 浏览器里管理，适合远程/多设备 |
-| 命令行 | `ndm add/list/...` | 脚本与终端使用 |
+| 桌面端 | `zdm gui` | 原生 Qt 窗口，关闭窗口收进托盘 |
+| 网页端 | `zdm open` 或 <http://127.0.0.1:9000/> | 浏览器里管理，适合远程/多设备 |
+| 命令行 | `zdm add/list/...` | 脚本与终端使用 |
 
 三者共享同一个后台服务与任务队列，可同时打开。
 
@@ -82,9 +82,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 关闭窗口会收进系统托盘，下载继续在后台跑。
 
 托盘图标**右键菜单**：显示/隐藏、新建下载、打开下载目录、**开机自启（可勾选，实时开关）**、退出。
-「开机自启」与「退出」同样在**设置窗口**底部提供：勾选「开机自动启动 NDM 服务」即可让三端在登录时
-自动拉起后台服务（分别写入 Linux `~/.config/autostart/ndm.desktop`、macOS LaunchAgent、
-Windows 注册表 Run 键）；「退出」会干净地关闭桌面端与轮询线程（后台服务仍在，可用 `ndm start` 再拉起）。
+「开机自启」与「退出」同样在**设置窗口**底部提供：勾选「开机自动启动 ZDM 服务」即可让三端在登录时
+自动拉起后台服务（分别写入 Linux `~/.config/autostart/zdm.desktop`、macOS LaunchAgent、
+Windows 注册表 Run 键）；「退出」会干净地关闭桌面端与轮询线程（后台服务仍在，可用 `zdm start` 再拉起）。
 
 ## 浏览器扩展（三平台步骤相同）
 
@@ -93,14 +93,14 @@ Windows 注册表 Run 键）；「退出」会干净地关闭桌面端与轮询�
 
    | 平台 | 扩展目录 |
    |---|---|
-   | Linux | `~/.local/share/ndm/extension` |
-   | macOS | `~/Library/Application Support/NDM/extension` |
-   | Windows | `%LOCALAPPDATA%\NDM\extension` |
+   | Linux | `~/.local/share/zdm/extension` |
+   | macOS | `~/Library/Application Support/ZDM/extension` |
+   | Windows | `%LOCALAPPDATA%\ZDM\extension` |
 
 3. 点扩展图标 → ⚙ → 「测试连接」→ 勾选「自动接管浏览器下载」
 
 工作方式：扩展监听 `chrome.downloads.onCreated`，把 URL 发给本机 `127.0.0.1:9000`，
-然后取消浏览器自身的下载（等价于 NDM 的浏览器接管）。Chrome/Edge/Brave 等 Chromium 内核通用。
+然后取消浏览器自身的下载（等价于 ZDM 的浏览器接管）。Chrome/Edge/Brave 等 Chromium 内核通用。
 服务没启动时扩展会静默放行，浏览器照常自己下载，不会丢文件。
 
 ## 平台差异与注意
@@ -111,7 +111,7 @@ Windows 注册表 Run 键）；「退出」会干净地关闭桌面端与轮询�
 | 桌面端 | PyQt5 | PyQt5 | PyQt5 |
 | 分片写入 | `os.pwrite` | `os.pwrite` | 无 `pwrite` 时用每线程独立句柄 `lseek+write` |
 | 预分配空间 | `posix_fallocate` | 不支持 → `ftruncate` | 不支持 → `ftruncate` |
-| 配置目录 | `~/.config/ndm` | `~/Library/Application Support/NDM` | `%APPDATA%\NDM` |
+| 配置目录 | `~/.config/zdm` | `~/Library/Application Support/ZDM` | `%APPDATA%\ZDM` |
 | 打开文件位置 | `xdg-open` | `open -R` | `explorer /select,` |
 | 文件名清洗 | `/ \` | `/ :` | `\ / : * ? " < > |` 与保留名 |
 | 防火墙提示 | 无 | 无 | 首次可能被问，允许专用网络 |
@@ -119,22 +119,22 @@ Windows 注册表 Run 键）；「退出」会干净地关闭桌面端与轮询�
 ## 代理
 
 - 默认自动读取环境变量 `http_proxy` / `https_proxy` / `all_proxy`（走 CONNECT 隧道）。
-- 也可在设置界面或 `ndm config proxy http://127.0.0.1:7890` 显式指定；留空 = 走环境变量。
+- 也可在设置界面或 `zdm config proxy http://127.0.0.1:7890` 显式指定；留空 = 走环境变量。
 - 部分 CDN 只对 HTTP/2 客户端返回 200，纯标准库客户端会被 403；检测到这种情况会自动切换到
   系统 `curl` 作为传输后端（仍保持多线程分片），无需配置。
 
 ## CLI
 
 ```bash
-ndm start --daemon                       # 后台启动
-ndm status                               # 服务与任务状态
-ndm add "https://example.com/a.iso" -c 16 -o ~/Downloads
-ndm add URL -H "Referer: https://site/page" -H "Cookie: k=v"
-ndm list --json
-ndm pause <id> / ndm resume <id> / ndm restart <id> / ndm remove <id>
-ndm config connections 16
-ndm config speed_limit 2097152          # 2 MB/s
-ndm stop
+zdm start --daemon                       # 后台启动
+zdm status                               # 服务与任务状态
+zdm add "https://example.com/a.iso" -c 16 -o ~/Downloads
+zdm add URL -H "Referer: https://site/page" -H "Cookie: k=v"
+zdm list --json
+zdm pause <id> / zdm resume <id> / zdm restart <id> / zdm remove <id>
+zdm config connections 16
+zdm config speed_limit 2097152          # 2 MB/s
+zdm stop
 ```
 
 ## HTTP API
@@ -152,9 +152,9 @@ ndm stop
 ## 默认配置
 
 不限速（`speed_limit = 0`）、单任务 8 连接、同时 3 个任务、下载目录 `~/Downloads`。
-需要限速时在桌面端「设置」里填 KB/s，或用 `ndm config speed_limit 2097152`（2 MB/s）。
+需要限速时在桌面端「设置」里填 KB/s，或用 `zdm config speed_limit 2097152`（2 MB/s）。
 
-## 配置项（`~/.config/ndm/state.json`）
+## 配置项（`~/.config/zdm/state.json`）
 
 `download_dir`、`connections`(8)、`max_active`(3)、`speed_limit`(bytes/s)、`proxy`、
 `max_retries`(5)、`timeout`(30)、`port`(9000)、`auto_resume`。
@@ -162,16 +162,16 @@ ndm stop
 ## 结构
 
 ```
-ndm.py              入口
+zdm.py              入口
 gui.py              桌面客户端（PyQt5，独立运行，走 HTTP API）
 install.sh          Linux / macOS 安装器
 install.ps1          Windows 安装器（install.bat 双击入口）
-ndm/http.py         轻量 HTTP 客户端（Range / 重定向 / 超时）
-ndm/core.py         分块下载引擎（Segmenter / RateLimiter / Download）
-ndm/manager.py      队列、调度、持久化、事件
-ndm/autostart.py    跨平台登录自启开关（Linux/macOS/Windows）
-ndm/server.py       REST + SSE + 静态 UI
-ndm/cli.py          命令行
+zdm/http.py         轻量 HTTP 客户端（Range / 重定向 / 超时）
+zdm/core.py         分块下载引擎（Segmenter / RateLimiter / Download）
+zdm/manager.py      队列、调度、持久化、事件
+zdm/autostart.py    跨平台登录自启开关（Linux/macOS/Windows）
+zdm/server.py       REST + SSE + 静态 UI
+zdm/cli.py          命令行
 web/index.html      Web 管理界面
 extension/          Chrome MV3 扩展
 ```
