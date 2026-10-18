@@ -18,6 +18,7 @@ dist/deb_staging/
 dist/zdm-linux/
 dist/zdm-macos/
 dist/zdm-windows/
+.build_win/
 
 # 系统
 .DS_Store

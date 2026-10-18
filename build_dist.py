@@ -1,167 +1,304 @@
 #!/usr/bin/env python3
-"""Build distributable install packages for ZDM on Linux, macOS and Windows.
+"""Build distributable packages for ZDM on all three platforms.
 
-Output (into ./dist):
-  zdm-linux.tar.gz      Linux (run ./install.sh, no root needed)
-  zdm_1.0.0_all.deb    Linux .deb (sudo dpkg -i)  [bonus formal package]
-  zdm-macos.zip        macOS (run ./install.sh -> builds ZDM.app + LaunchAgent)
-  zdm-windows.zip      Windows (run install.ps1 or install.bat)
+Outputs (into ./dist):
+  - zdm_1.0.0_all.deb          Linux  (apt/dpkg installable, real .deb)
+  - zdm-linux.tar.gz           Linux  (fallback, user-level, no root)
+  - ZDM-Setup-1.0.0.exe        Windows (.exe self-extracting installer, no admin)
+  - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
+
+The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
+    [ 7zS.sfx stub ] + [ installer config ] + [ archive.7z ]
+7zS.sfx extracts the payload to a temp dir and runs setup.cmd, which invokes
+install.ps1. The macOS .dmg itself must be produced on a Mac (hdiutil is
+macOS-only); build_macos_dmg.sh does that in one command.
 """
 import os
 import shutil
-import tarfile
-import zipfile
+import subprocess
+import sys
 
-SRC = "/home/ooo/WorkBuddy/2026-10-19-00-23-14/zdm"
-OUT = "/home/ooo/WorkBuddy/2026-10-19-00-23-14/dist"
-
-# What goes into every package (the whole app, copy of installers included).
-COMMON = ["zdm", "web", "extension", "zdm.py", "gui.py", "README.md"]
-
-WIN_ONLY = ["install.ps1", "install.bat"]
-UNIX_ONLY = ["install.sh"]
+ROOT = os.path.abspath(os.path.dirname(__file__))
+ZDM = os.path.join(ROOT, "zdm")
+DIST = os.path.join(ROOT, "dist")
+SFX = os.path.join(ROOT, "7zS.sfx")
+VERSION = "1.0.0"
 
 
-def copytree_clean(src, dst):
-    if os.path.exists(dst):
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+def which(cmd):
+    from shutil import which as w
+    return w(cmd)
 
 
-def stage(name, extra):
-    d = os.path.join(OUT, name)
+EXE7Z = None
+for c in ("7z", "7za", "7zr"):
+    if which(c):
+        EXE7Z = c
+        break
+if not EXE7Z:
+    sys.exit("ERROR: 7z not found on PATH")
+
+
+def run(*args, cwd=None):
+    print("+", " ".join(args))
+    subprocess.run(args, cwd=cwd, check=True)
+
+
+def clean_pycache():
+    for dirpath, dirs, _ in os.walk(ZDM):
+        for d in list(dirs):
+            if d == "__pycache__":
+                shutil.rmtree(os.path.join(dirpath, d), ignore_errors=True)
+
+
+def stage_files(dst):
+    """Copy the runtime tree (source + installers) into dst."""
+    os.makedirs(dst, exist_ok=True)
+    for item in ("zdm", "web", "extension"):
+        shutil.copytree(os.path.join(ZDM, item), os.path.join(dst, item),
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    for f in ("zdm.py", "gui.py", "README.md", "install.sh",
+              "install.ps1", "install.bat", "setup.cmd", "build_macos_dmg.sh",
+              "LICENSE.txt"):
+        src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
+            else os.path.join(ROOT, f)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(dst, f))
+
+
+# ----------------------------------------------------------------- Linux deb
+def build_deb():
+    staging = os.path.join(DIST, "deb_staging")
+    if os.path.exists(staging):
+        shutil.rmtree(staging)
+    app = os.path.join(staging, "usr", "local", "share", "zdm")
+    bindir = os.path.join(staging, "usr", "local", "bin")
+    appdir = os.path.join(staging, "usr", "local", "share", "applications")
+    icondir = os.path.join(staging, "usr", "local", "share", "icons", "hicolor",
+                          "128x128", "apps")
+    os.makedirs(app, exist_ok=True)
+    os.makedirs(bindir, exist_ok=True)
+    os.makedirs(appdir, exist_ok=True)
+    os.makedirs(icondir, exist_ok=True)
+
+    for item in ("zdm", "web", "extension"):
+        shutil.copytree(os.path.join(ZDM, item), os.path.join(app, item),
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    for f in ("zdm.py", "gui.py", "README.md"):
+        shutil.copy2(os.path.join(ZDM, f), os.path.join(app, f))
+
+    with open(os.path.join(bindir, "zdm"), "w", encoding="utf-8") as fh:
+        fh.write('#!/bin/sh\nPY="$(command -v python3 || command -v python)"\n'
+                 'exec "$PY" "/usr/local/share/zdm/zdm.py" "$@"\n')
+    os.chmod(os.path.join(bindir, "zdm"), 0o755)
+
+    shutil.copy2(os.path.join(ZDM, "extension", "icons", "icon128.png"),
+                 os.path.join(icondir, "zdm.png"))
+    with open(os.path.join(appdir, "zdm.desktop"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=ZDM 下载管理器\n"
+            "Comment=多线程下载管理器（浏览器扩展可接管下载）\n"
+            "Exec=/usr/local/bin/zdm gui\n"
+            "Icon=zdm\n"
+            "Terminal=false\n"
+            "Categories=Network;FileTransfer;\n"
+            "Keywords=download;zdm;下载;\n"
+            "StartupNotify=true\n"
+        )
+
+    debian = os.path.join(staging, "DEBIAN")
+    os.makedirs(debian, exist_ok=True)
+    size_mb = int(subprocess.check_output(["du", "-sm", staging]).split()[0]) + 1
+    with open(os.path.join(debian, "control"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "Package: zdm\n"
+            f"Version: {VERSION}\n"
+            "Section: net\n"
+            "Priority: optional\n"
+            "Architecture: all\n"
+            f"Installed-Size: {size_mb}\n"
+            "Depends: python3 (>= 3.9)\n"
+            "Maintainer: ZDM <noreply@example.com>\n"
+            "Description: ZDM 跨平台多线程下载管理器\n"
+            " 纯标准库引擎 + PyQt5 桌面端；多线程分块、断点续传、暂停/继续、队列、限速；\n"
+            " 自带浏览器扩展接管下载；桌面端单实例 + 系统托盘（开机自启/退出）。\n"
+        )
+    with open(os.path.join(debian, "postinst"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "#!/bin/sh\n"
+            "set -e\n"
+            "if command -v update-desktop-database >/dev/null 2>&1; then "
+            "update-desktop-database /usr/local/share/applications || true; fi\n"
+            "if command -v gtk-update-icon-cache >/dev/null 2>&1; then "
+            "gtk-update-icon-cache -f -t /usr/local/share/icons/hicolor || true; fi\n"
+            'PY="$(command -v python3 || command -v python)"\n'
+            'if [ -n "$PY" ] && ! "$PY" -c "import PyQt5.QtWidgets" >/dev/null 2>&1; then\n'
+            '  "$PY" -m pip install --user PyQt5 >/dev/null 2>&1 || true\n'
+            "fi\n"
+            "exit 0\n"
+        )
+    os.chmod(os.path.join(debian, "postinst"), 0o755)
+
+    out = os.path.join(DIST, f"zdm_{VERSION}_all.deb")
+    run("dpkg-deb", "--build", "--root-owner-group", staging, out)
+
+
+def build_linux_tarball():
+    name = "zdm-linux"
+    d = os.path.join(DIST, name)
+    if os.path.exists(d):
+        shutil.rmtree(d)
+    stage_files(d)
+    run("chmod", "+x", os.path.join(d, "install.sh"))
+    tar = os.path.join(DIST, f"{name}.tar.gz")
+    if os.path.exists(tar):
+        os.remove(tar)
+    run("tar", "-czf", tar, "-C", DIST, name)
+
+
+# ----------------------------------------------------------------- Windows exe
+def build_windows_exe():
+    d = os.path.join(DIST, "zdm-windows")
+    if os.path.exists(d):
+        shutil.rmtree(d)
+    stage_files(d)
+    # Build the 7z payload (relative paths, from inside the staged dir).
+    archive = os.path.join(DIST, "zdm-payload.7z")
+    if os.path.exists(archive):
+        os.remove(archive)
+    run(EXE7Z, "a", "-t7z", "-mx=5", "-y", archive, ".", cwd=d)
+
+    config = (
+        ";!@Install@!UTF-8!\n"
+        'Title="ZDM 下载管理器"\n'
+        'BeginPrompt="安装 ZDM 下载管理器（多线程下载 + 浏览器扩展接管）？"\n'
+        'RunProgram="setup.cmd"\n'
+        ";!@InstallEnd@!\n"
+    )
+    cfg = os.path.join(DIST, "sfx_config.txt")
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write(config)
+
+    out = os.path.join(DIST, f"ZDM-Setup-{VERSION}.exe")
+    with open(out, "wb") as out_fh:
+        for part in (SFX, cfg, archive):
+            with open(part, "rb") as pf:
+                shutil.copyfileobj(pf, out_fh)
+    os.chmod(out, 0o755)
+    print(f"built {out}")
+
+
+# ----------------------------------------------------------------- macOS zip
+def build_macos_app(dst_app):
+    os.makedirs(os.path.join(dst_app, "Contents", "MacOS"), exist_ok=True)
+    os.makedirs(os.path.join(dst_app, "Contents", "Resources"), exist_ok=True)
+    launcher = os.path.join(dst_app, "Contents", "MacOS", "ZDM")
+    with open(launcher, "w", encoding="utf-8") as fh:
+        fh.write(
+            "#!/bin/sh\n"
+            'PY="$(command -v python3 || command -v python)"\n'
+            'SUPPORT="$HOME/Library/Application Support/ZDM"\n'
+            'if [ ! -x "$SUPPORT/zdm.py" ]; then\n'
+            '  osascript -e \'display dialog "请先运行 zdm/install.sh 完成安装"\' '
+            "2>/dev/null\n"
+            '  open "$(dirname "$0")/../../.."\n'
+            "  exit 1\n"
+            "fi\n"
+            'if ! curl -s -m 2 http://127.0.0.1:9000/api/state >/dev/null 2>&1; then\n'
+            '  launchctl kickstart -k gui/$(id -u)/com.zdm.service 2>/dev/null || \\\n'
+            '    nohup "$PY" "$SUPPORT/zdm.py" serve >/dev/null 2>&1 &\n'
+            "fi\n"
+            'exec "$PY" "$SUPPORT/gui.py" 9000\n'
+        )
+    os.chmod(launcher, 0o755)
+    info = os.path.join(dst_app, "Contents", "Info.plist")
+    with open(info, "w", encoding="utf-8") as fh:
+        fh.write(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            "<plist version=\"1.0\">\n<dict>\n"
+            "  <key>CFBundleName</key><string>ZDM</string>\n"
+            "  <key>CFBundleDisplayName</key><string>ZDM 下载管理器</string>\n"
+            "  <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>\n"
+            "  <key>CFBundleExecutable</key><string>ZDM</string>\n"
+            "  <key>CFBundleIconFile</key><string>zdm</string>\n"
+            f"  <key>CFBundleVersion</key><string>{VERSION}</string>\n"
+            "  <key>CFBundlePackageType</key><string>APPL</string>\n"
+            "  <key>NSHighResolutionCapable</key><true/>\n"
+            "</dict>\n</plist>\n"
+        )
+
+
+def build_macos_zip():
+    d = os.path.join(DIST, "zdm-macos")
     if os.path.exists(d):
         shutil.rmtree(d)
     os.makedirs(d, exist_ok=True)
-    for item in COMMON:
-        s = os.path.join(SRC, item)
-        if os.path.isdir(s):
-            copytree_clean(s, os.path.join(d, item))
-        else:
-            shutil.copy2(s, os.path.join(d, item))
-    for item in extra:
-        s = os.path.join(SRC, item)
-        if os.path.exists(s):
-            shutil.copy2(s, os.path.join(d, item))
-    return d
+    build_macos_app(os.path.join(d, "ZDM.app"))
+    shutil.copytree(os.path.join(ZDM, "extension"), os.path.join(d, "extension"),
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    for f in ("install.sh", "install.ps1", "install.bat", "build_macos_dmg.sh",
+              "README.md", "LICENSE.txt"):
+        src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
+            else os.path.join(ROOT, f)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(d, f))
 
-
-def make_targz(folder, arcname):
-    path = os.path.join(OUT, arcname)
-    with tarfile.open(path, "w:gz") as tf:
-        tf.add(os.path.join(OUT, folder), arcname=folder, recursive=True)
-    return path
-
-
-def make_zip(folder, arcname, exec_files=()):
-    path = os.path.join(OUT, arcname)
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        root = os.path.join(OUT, folder)
-        for base, _dirs, files in os.walk(root):
-            for fn in files:
-                full = os.path.join(base, fn)
-                rel = os.path.relpath(full, OUT)
-                if rel in exec_files:
-                    zi = zipfile.ZipInfo(rel)
-                    zi.external_attr = 0o755 << 16
-                    with open(full, "rb") as fh:
-                        zf.writestr(zi, fh.read())
-                else:
-                    zf.write(full, rel)
-    return path
-
-
-def build_deb():
-    """Build a user-friendly .deb (installs to /opt/zdm, /usr/local/bin/zdm)."""
-    stage_dir = os.path.join(OUT, "deb_staging")
-    if os.path.exists(stage_dir):
-        shutil.rmtree(stage_dir)
-    app = os.path.join(stage_dir, "opt", "zdm")
-    os.makedirs(app, exist_ok=True)
-    for item in COMMON:
-        s = os.path.join(SRC, item)
-        if os.path.isdir(s):
-            copytree_clean(s, os.path.join(app, item))
-        else:
-            shutil.copy2(s, os.path.join(app, item))
-    # launcher wrapper
-    bin_dir = os.path.join(stage_dir, "usr", "local", "bin")
-    os.makedirs(bin_dir, exist_ok=True)
-    with open(os.path.join(bin_dir, "zdm"), "w", encoding="utf-8") as f:
-        f.write("#!/bin/sh\n# ZDM launcher (system install)\n"
-                'exec python3 /opt/zdm/zdm.py "$@"\n')
-    os.chmod(os.path.join(bin_dir, "zdm"), 0o755)
-    # .desktop for the GUI
-    app_dir = os.path.join(stage_dir, "usr", "share", "applications")
-    os.makedirs(app_dir, exist_ok=True)
-    with open(os.path.join(app_dir, "zdm.desktop"), "w", encoding="utf-8") as f:
-        f.write(
-            "[Desktop Entry]\nType=Application\nName=ZDM 下载管理器\n"
-            "Comment=多线程下载管理器（浏览器扩展可接管下载）\n"
-            "Exec=/usr/local/bin/zdm gui\nTerminal=false\n"
-            "Categories=Network;FileTransfer;\nKeywords=download;zdm;下载;\n"
-            "StartupNotify=true\n")
-    debian = os.path.join(stage_dir, "DEBIAN")
-    os.makedirs(debian, exist_ok=True)
-    with open(os.path.join(debian, "control"), "w", encoding="utf-8") as f:
-        f.write(
-            "Package: zdm\nVersion: 1.0.0\nSection: net\nPriority: optional\n"
-            "Architecture: all\nMaintainer: ZDM <zdm@example.com>\n"
-            "Description: ZDM 多线程下载管理器\n"
-            " 本地多线程下载管理器：断点续传、浏览器扩展接管下载、桌面端、\n"
-            " 开机自启与托盘菜单。GUI 需要 PyQt5（pip install PyQt5）。\n")
-    out = os.path.join(OUT, "zdm_1.0.0_all.deb")
-    r = shutil.run if hasattr(shutil, "run") else None
-    import subprocess
-    subprocess.run(["dpkg-deb", "--build", "--root-owner-group", stage_dir, out],
-                   check=True)
-    return out
+    zf = os.path.join(DIST, "zdm-macos.zip")
+    if os.path.exists(zf):
+        os.remove(zf)
+    run("zip", "-r", "-q", zf, "zdm-macos", cwd=DIST)
 
 
 def main():
-    os.makedirs(OUT, exist_ok=True)
-
-    # Linux tarball
-    stage("zdm-linux", UNIX_ONLY)
-    p1 = make_targz("zdm-linux", "zdm-linux.tar.gz")
-
-    # macOS zip (install.sh builds the .app on the target mac)
-    stage("zdm-macos", UNIX_ONLY)
-    p2 = make_zip("zdm-macos", "zdm-macos.zip", exec_files={"zdm-macos/install.sh"})
-
-    # Windows zip
-    stage("zdm-windows", WIN_ONLY)
-    p3 = make_zip("zdm-windows", "zdm-windows.zip")
-
-    # Bonus: Linux .deb
-    p4 = build_deb()
-
-    for p in (p1, p2, p3, p4):
-        size = os.path.getsize(p)
-        print(f"{os.path.basename(p):24s} {size:>10,d} bytes")
-
-    # Dist-level README
-    with open(os.path.join(OUT, "README.txt"), "w", encoding="utf-8") as f:
-        f.write(
+    os.makedirs(DIST, exist_ok=True)
+    clean_pycache()
+    print("==> Linux .deb")
+    build_deb()
+    print("==> Linux tarball")
+    build_linux_tarball()
+    print("==> Windows .exe (7z SFX)")
+    build_windows_exe()
+    print("==> macOS .zip (ZDM.app + dmg script)")
+    build_macos_zip()
+    # tidy intermediates
+    for junk in ("zdm-payload.7z", "sfx_config.txt", "zdm-windows.zip",
+                 "zdm-windows", "zdm-macos", "deb_staging"):
+        jp = os.path.join(DIST, junk)
+        if os.path.isdir(jp):
+            shutil.rmtree(jp, ignore_errors=True)
+        elif os.path.exists(jp):
+            os.remove(jp)
+    # dist-level README
+    with open(os.path.join(DIST, "README.txt"), "w", encoding="utf-8") as fh:
+        fh.write(
             "ZDM 三端安装包\n"
             "=============\n\n"
             "1) Linux\n"
-            "   - zdm-linux.tar.gz  （推荐，无需 root）\n"
-            "       解压后运行:  ./install.sh\n"
-            "   - zdm_1.0.0_all.deb（需要 root）\n"
-            "       sudo dpkg -i zdm_1.0.0_all.deb\n\n"
+            "   - zdm_1.0.0_all.deb   （推荐，需 root：sudo dpkg -i zdm_1.0.0_all.deb）\n"
+            "   - zdm-linux.tar.gz    （免 root：解压后 ./install.sh）\n\n"
             "2) macOS\n"
             "   - zdm-macos.zip\n"
-            "       解压后运行:  bash install.sh\n"
-            "       脚本会自动生成 ~/Applications/ZDM.app 并注册登录自启\n\n"
+            "       解压后运行:  bash install.sh   （自动生成 ~/Applications/ZDM.app + 登录自启）\n"
+            "       若要 .dmg：在 Mac 上执行包内 build_macos_dmg.sh 一键生成 ZDM-1.0.0.dmg\n"
+            "       （.dmg 需 macOS 的 hdiutil 生成，无法在 Linux 上构建）\n\n"
             "3) Windows\n"
-            "   - zdm-windows.zip\n"
-            "       解压后右键 install.ps1 选「使用 PowerShell 运行」\n"
-            "       或在解压目录双击 install.bat\n\n"
-            "安装后在「设置」或托盘图标右键菜单里可随时开关「开机自启」与「退出」。\n"
+            "   - ZDM-Setup-1.0.0.exe\n"
+            "       双击运行，按提示安装（用户级、无需管理员；自动检测/安装 Python 与 PyQt5）\n\n"
+            "安装后在桌面端「设置」或托盘图标右键菜单里，可随时开关「开机自启」与「退出」。\n"
             "浏览器扩展：加载各包内 extension/ 目录即可接管下载。\n"
         )
-    print("dist README.txt written")
+    print("\n=== dist/ ===")
+    for f in sorted(os.listdir(DIST)):
+        p = os.path.join(DIST, f)
+        if os.path.isfile(p):
+            print(f"  {f:28s} {os.path.getsize(p):>10,d} bytes")
 
 
 if __name__ == "__main__":

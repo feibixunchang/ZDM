@@ -90,7 +90,7 @@ foreach ($item in @("zdm", "web", "extension")) {
     if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
     Copy-Item -Recurse -Force (Join-Path $Root $item) $dst
 }
-foreach ($f in @("zdm.py", "gui.py", "README.md")) {
+foreach ($f in @("zdm.py", "gui.py", "README.md", "install.ps1", "install.bat")) {
     Copy-Item -Force (Join-Path $Root $f) (Join-Path $App $f)
 }
 Get-ChildItem -Path $App -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
@@ -165,6 +165,26 @@ if ($LASTEXITCODE -ne 0) {
 Write-Step "Starting service"
 Start-Process -FilePath $pyw -ArgumentList "zdm.py","serve" -WorkingDirectory $App -WindowStyle Hidden
 Start-Sleep -Seconds 2
+
+# Register an uninstall entry so ZDM shows up in "Apps & Features" / Control Panel.
+Write-Step "Registering uninstall entry"
+try {
+    $unKey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZDM"
+    $reg = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($unKey)
+    $reg.SetValue("DisplayName", "ZDM Download Manager")
+    $reg.SetValue("UninstallString", "powershell -ExecutionPolicy Bypass -File `"$App\install.ps1`" -Uninstall")
+    $reg.SetValue("QuietUninstallString", "powershell -ExecutionPolicy Bypass -File `"$App\install.ps1`" -Uninstall")
+    $reg.SetValue("DisplayIcon", (Join-Path $App "extension\icons\icon.ico"))
+    $reg.SetValue("InstallLocation", $App)
+    $reg.SetValue("Publisher", "ZDM")
+    $reg.SetValue("DisplayVersion", "1.0.0")
+    $reg.SetValue("NoModify", 1)
+    $reg.SetValue("NoRepair", 1)
+    $reg.Close()
+    Write-Host "  uninstall entry: added"
+} catch {
+    Write-Host "  could not write uninstall registry key (non-fatal)" -ForegroundColor Yellow
+}
 
 Write-Host ""
 Write-Host "ZDM installed." -ForegroundColor Green
