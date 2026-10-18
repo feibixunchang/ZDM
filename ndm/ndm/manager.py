@@ -1,0 +1,434 @@
+"""Download queue manager: scheduling, persistence and event broadcasting."""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from typing import Dict, List, Optional
+
+from .core import Chunk, Download, RateLimiter, Segmenter
+
+APP_NAME = "ndm"
+DEFAULT_PORT = 9000
+
+
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+
+def config_dir() -> str:
+    """Per-user config directory for the current platform."""
+    home = os.path.expanduser("~")
+    if IS_WIN:
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+        path = os.path.join(base, "NDM")
+    elif IS_MAC:
+        path = os.path.join(home, "Library", "Application Support", "NDM")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+        path = os.path.join(base, APP_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def default_download_dir() -> str:
+    home = os.path.expanduser("~")
+    for cand in (os.path.join(home, "Downloads"), os.path.join(home, "下载")):
+        if os.path.isdir(cand):
+            return cand
+    return os.path.join(home, "Downloads")
+
+
+DEFAULT_CONFIG: Dict[str, object] = {
+    "download_dir": default_download_dir(),
+    "connections": 8,
+    "max_active": 3,
+    "speed_limit": 0,  # bytes/s, 0 = unlimited
+    "proxy": "",
+    "max_retries": 5,
+    "timeout": 30,
+    "port": DEFAULT_PORT,
+    "auto_resume": True,
+    "intercept_browser": False,
+    "history_limit": 200,
+}
+
+
+def load_config(state_file: Optional[str] = None) -> Dict[str, object]:
+    """Read persisted config only — never starts schedulers or loads tasks."""
+    cfg: Dict[str, object] = dict(DEFAULT_CONFIG)
+    path = state_file or os.path.join(config_dir(), "state.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for k, v in (data.get("config") or {}).items():
+            if k in DEFAULT_CONFIG:
+                cfg[k] = v
+    except Exception:
+        pass
+    return cfg
+
+
+class Manager:
+    def __init__(self, state_file: Optional[str] = None):
+        self._lock = threading.RLock()
+        self._listeners: List[queue.Queue] = []
+        self._workers: Dict[str, threading.Thread] = {}
+        self.downloads: Dict[str, Download] = {}
+        self.config: Dict[str, object] = dict(DEFAULT_CONFIG)
+        self.state_file = state_file or os.path.join(config_dir(), "state.json")
+        self._stop = threading.Event()
+        self.global_limiter = RateLimiter(int(self.config.get("speed_limit") or 0))
+        self._scheduler = threading.Thread(target=self._loop, daemon=True)
+        self.load_state()
+        self._scheduler.start()
+
+    # ---------------- events ----------------
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=64)
+        with self._lock:
+            self._listeners.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._lock:
+            if q in self._listeners:
+                self._listeners.remove(q)
+
+    def _emit(self, event: str, d: Optional[Download] = None) -> None:
+        payload = {
+            "event": event,
+            "id": d.id if d else None,
+            "task": d.to_dict() if d else None,
+            "ts": time.time(),
+        }
+        with self._lock:
+            dead = []
+            for q in self._listeners:
+                try:
+                    q.put_nowait(payload)
+                except queue.Full:
+                    dead.append(q)
+            for q in dead:
+                self._listeners.remove(q)
+        if event in ("completed", "error", "canceled", "paused", "started"):
+            self.save_state()
+
+    def _on_task_event(self, event: str, d: Download) -> None:
+        self._emit(event, d)
+
+    # ---------------- tasks ----------------
+    def add(
+        self,
+        url: str,
+        directory: Optional[str] = None,
+        filename: Optional[str] = None,
+        connections: Optional[int] = None,
+        headers: Optional[Dict[str, str]] = None,
+        proxy: Optional[str] = None,
+        speed_limit: Optional[int] = None,
+        start_now: bool = True,
+    ) -> Download:
+        if not url or not str(url).startswith(("http://", "https://")):
+            raise ValueError("only http/https URLs are supported")
+        cfg = self.config
+        if filename:
+            from .http import sanitize_filename
+
+            filename = sanitize_filename(filename.strip()) or None
+        d = Download(
+            id=uuid.uuid4().hex[:12],
+            url=url,
+            directory=directory or str(cfg["download_dir"]),
+            filename=filename,
+            connections=int(connections or cfg["connections"]),
+            headers=headers,
+            proxy=proxy if proxy is not None else (str(cfg["proxy"]) or None),
+            max_retries=int(cfg["max_retries"]),  # type: ignore[arg-type]
+            timeout=float(cfg["timeout"]),  # type: ignore[arg-type]
+            speed_limit=int(speed_limit or 0),
+        )
+        d.set_event_callback(self._on_task_event)
+        d.global_limiter = self.global_limiter
+        with self._lock:
+            self.downloads[d.id] = d
+        if start_now:
+            d.status = "queued"
+        else:
+            d.status = "paused"
+        self._emit("added", d)
+        return d
+
+    def get(self, task_id: str) -> Optional[Download]:
+        with self._lock:
+            return self.downloads.get(task_id)
+
+    def list(self) -> List[dict]:
+        with self._lock:
+            items = list(self.downloads.values())
+        items.sort(key=lambda x: x.created_at, reverse=True)
+        return [d.to_dict() for d in items]
+
+    def _wait_idle(self, d: Download, timeout: float = 12.0) -> None:
+        """Wait until the task's runner thread has fully exited."""
+        t = self._workers.get(d.id)
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=timeout)
+
+    def pause(self, task_id: str) -> bool:
+        d = self.get(task_id)
+        if not d:
+            return False
+        d.pause()
+        self._wait_idle(d)
+        self._emit("paused", d)
+        return True
+
+    def resume(self, task_id: str) -> bool:
+        d = self.get(task_id)
+        if not d:
+            return False
+        self._wait_idle(d)
+        d.resume()
+        self._emit("resumed", d)
+        return True
+
+    def restart(self, task_id: str) -> bool:
+        d = self.get(task_id)
+        if not d:
+            return False
+        d.cancel(remove_files=True)
+        self._wait_idle(d)
+        d.segmenter = None
+        d.meter.reset()
+        d.retries = 0
+        d.error = None
+        d.status = "queued"
+        self._emit("restarted", d)
+        return True
+
+    def cancel(self, task_id: str, remove_files: bool = True) -> bool:
+        d = self.get(task_id)
+        if not d:
+            return False
+        d.cancel(remove_files=remove_files)
+        self._wait_idle(d)
+        return True
+
+    def remove(self, task_id: str, remove_files: bool = True) -> bool:
+        d = self.get(task_id)
+        if not d:
+            return False
+        if d.status in ("downloading", "queued"):
+            d.cancel(remove_files=remove_files)
+        else:
+            if remove_files:
+                for p in (d.part_path, d.meta_path):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+        with self._lock:
+            self.downloads.pop(task_id, None)
+        self._emit("removed", d)
+        self.save_state()
+        return True
+
+    def pause_all(self) -> None:
+        for d in list(self.downloads.values()):
+            if d.status in ("downloading", "queued"):
+                self.pause(d.id)
+
+    def resume_all(self) -> None:
+        for d in list(self.downloads.values()):
+            if d.status in ("paused", "error"):
+                self.resume(d.id)
+
+    def clear_finished(self) -> int:
+        n = 0
+        for d in list(self.downloads.values()):
+            if d.status in ("completed", "canceled", "error"):
+                with self._lock:
+                    self.downloads.pop(d.id, None)
+                n += 1
+        self.save_state()
+        return n
+
+    # ---------------- scheduling ----------------
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.5)
+
+    def _tick(self) -> None:
+        for tid in [k for k, v in self._workers.items() if not v.is_alive()]:
+            self._workers.pop(tid, None)
+        max_active = int(self.config.get("max_active") or 3)
+        with self._lock:
+            running = [d for d in self.downloads.values() if d.is_active()]
+            if len(running) >= max_active:
+                return
+            candidates = [
+                d
+                for d in self.downloads.values()
+                if d.status == "queued" and d.id not in self._workers
+            ]
+            candidates.sort(key=lambda x: x.created_at)
+            for d in candidates[: max_active - len(running)]:
+                d.status = "downloading"
+                t = threading.Thread(target=self._run_task, args=(d,), daemon=True)
+                self._workers[d.id] = t
+                t.start()
+
+    def _run_task(self, d: Download) -> None:
+        try:
+            d.start()
+        except Exception as e:  # noqa: BLE001
+            d.status = "error"
+            d.error = str(e)
+            self._emit("error", d)
+        finally:
+            self._workers.pop(d.id, None)
+
+    # ---------------- config / state ----------------
+    def set_config(self, patch: Dict[str, object]) -> Dict[str, object]:
+        with self._lock:
+            for k, v in patch.items():
+                if k in DEFAULT_CONFIG and v is not None:
+                    if k in ("connections", "max_active", "max_retries", "speed_limit", "port", "history_limit"):
+                        v = int(v)  # type: ignore[arg-type]
+                    elif k == "timeout":
+                        v = float(v)  # type: ignore[arg-type]
+                    elif k == "auto_resume":
+                        v = bool(v)
+                    self.config[k] = v
+            if "download_dir" in patch:
+                os.makedirs(str(self.config["download_dir"]), exist_ok=True)
+        self.global_limiter.set_rate(int(self.config.get("speed_limit") or 0))
+        self._emit("config")
+        self.save_state()
+        return self.config
+
+    def save_state(self) -> None:
+        with self._lock:
+            tasks = []
+            limit = int(self.config.get("history_limit") or 200)
+            finished = [d for d in self.downloads.values() if d.status == "completed"]
+            finished.sort(key=lambda x: x.completed_at or 0, reverse=True)
+            keep = {d.id for d in finished[:limit]}
+            for d in self.downloads.values():
+                if d.status == "completed" and d.id not in keep:
+                    continue
+                meta = d.to_dict()
+                meta.pop("chunks", None)
+                meta["chunks"] = d.segmenter.snapshot() if d.segmenter else []
+                tasks.append(meta)
+            data = {"config": self.config, "tasks": tasks}
+        tmp = self.state_file + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.state_file)
+        except Exception:
+            pass
+
+    def load_state(self) -> None:
+        if not os.path.exists(self.state_file):
+            return
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        cfg = data.get("config") or {}
+        for k, v in cfg.items():
+            if k in DEFAULT_CONFIG:
+                self.config[k] = v
+        for t in data.get("tasks", []):
+            if t.get("status") == "completed":
+                d = Download(
+                    id=t["id"], url=t["url"],
+                    directory=t.get("directory") or str(self.config["download_dir"]),
+                    filename=t.get("filename"), connections=int(t.get("connections") or 1),
+                )
+                d.size = int(t.get("size") or 0)
+                d.status = "completed"
+                d.completed_at = t.get("completed_at") or time.time()
+                d.created_at = t.get("created_at", time.time())
+                d.global_limiter = self.global_limiter
+                if d.size:
+                    d.segmenter = Segmenter(d.size, [Chunk(0, d.size, d.size)])
+                self.downloads[d.id] = d
+                continue
+            d = Download(
+                id=t["id"],
+                url=t["url"],
+                directory=t.get("directory") or str(self.config["download_dir"]),
+                filename=t.get("filename"),
+                connections=int(t.get("connections") or self.config["connections"]),
+                headers=t.get("headers") or {},
+                proxy=t.get("proxy"),
+                max_retries=int(self.config["max_retries"]),  # type: ignore[arg-type]
+                timeout=float(self.config["timeout"]),  # type: ignore[arg-type]
+                speed_limit=int(t.get("speed_limit") or 0),
+            )
+            d.set_event_callback(self._on_task_event)
+            d.global_limiter = self.global_limiter
+            d.size = int(t.get("size") or 0)
+            d.created_at = t.get("created_at", time.time())
+            d.load_meta(t)
+            prev = t.get("status")
+            if prev == "downloading":
+                d.status = "queued" if self.config["auto_resume"] else "paused"
+            elif prev in ("queued", "paused", "error"):
+                d.status = "queued" if self.config["auto_resume"] else "paused"
+            else:
+                continue
+            self.downloads[d.id] = d
+
+    def shutdown(self) -> None:
+        self._stop.set()
+        for d in list(self.downloads.values()):
+            if d.is_active():
+                d.pause()
+        self.save_state()
+
+    # ---------------- shell helpers ----------------
+    @staticmethod
+    def open_path(path: str) -> bool:
+        """Open a file's folder (or the folder itself) in the OS file manager."""
+        try:
+            devnull = subprocess.DEVNULL
+            if IS_WIN:
+                if os.path.isdir(path):
+                    os.startfile(path)  # type: ignore[attr-defined]
+                elif os.path.exists(path):
+                    subprocess.Popen(["explorer", "/select,", os.path.normpath(path)],
+                                     stdout=devnull, stderr=devnull)
+                else:
+                    subprocess.Popen(["explorer", os.path.dirname(os.path.normpath(path))],
+                                     stdout=devnull, stderr=devnull)
+            elif IS_MAC:
+                if os.path.isdir(path):
+                    subprocess.Popen(["open", path], stdout=devnull, stderr=devnull)
+                elif os.path.exists(path):
+                    subprocess.Popen(["open", "-R", path], stdout=devnull, stderr=devnull)
+                else:
+                    subprocess.Popen(["open", os.path.dirname(path) or "."],
+                                     stdout=devnull, stderr=devnull)
+            else:
+                target = path if os.path.isdir(path) else (os.path.dirname(path) or ".")
+                subprocess.Popen(["xdg-open", target], stdout=devnull, stderr=devnull)
+            return True
+        except Exception:
+            return False

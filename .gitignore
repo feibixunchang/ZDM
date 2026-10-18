@@ -1,0 +1,24 @@
+# WorkBuddy 会话数据
+.workbuddy/
+.Trash-0/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+env/
+
+# 下载中间产物
+*.part
+*.part.ndm
+
+# 构建中间目录（保留 dist 下的发布包本身）
+dist/deb_staging/
+dist/ndm-linux/
+dist/ndm-macos/
+dist/ndm-windows/
+
+# 系统
+.DS_Store
+Thumbs.db

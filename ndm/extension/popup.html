@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body{width:320px;margin:0;font:13px/1.5 -apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif;
+    background:#f5f7fa;color:#1f2937}
+  header{display:flex;align-items:center;gap:8px;padding:12px 14px;background:#fff;border-bottom:1px solid #e3e8ef}
+  header b{font-size:14px}
+  .dot{width:8px;height:8px;border-radius:50%;background:#9ca3af}
+  .dot.on{background:#16a34a}
+  .dot.off{background:#dc2626}
+  .body{padding:10px 14px}
+  .row{display:flex;align-items:center;gap:8px;padding:6px 0}
+  .row .sp{flex:1}
+  button{font:inherit;border:1px solid #e3e8ef;background:#fff;padding:6px 10px;border-radius:8px;cursor:pointer}
+  button:hover{background:#f3f4f6}
+  button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  .task{padding:8px 0;border-bottom:1px solid #eef1f5}
+  .task:last-child{border-bottom:none}
+  .name{font-weight:600;font-size:12px;word-break:break-all}
+  .meta{color:#6b7280;font-size:11px;margin-top:2px}
+  .bar{height:4px;background:#e8ecf1;border-radius:999px;margin-top:5px;overflow:hidden}
+  .bar>i{display:block;height:100%;background:#2563eb}
+  .empty{padding:18px 0;text-align:center;color:#6b7280}
+  footer{padding:10px 14px;border-top:1px solid #e3e8ef;background:#fff;display:flex;gap:8px}
+  input[type=checkbox]{width:16px;height:16px}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span><b>NDM 下载管理器</b>
+  <span class="sp" style="flex:1"></span>
+  <span style="color:#6b7280;font-size:11px" id="port"></span>
+</header>
+<div class="body">
+  <div class="row">
+    <span>接管浏览器下载</span><span style="flex:1"></span>
+    <input type="checkbox" id="intercept">
+  </div>
+  <div id="tasks" style="max-height:230px;overflow:auto"></div>
+  <div class="empty" id="empty" hidden>服务未启动 · 终端运行 <code>ndm start --daemon</code></div>
+</div>
+<footer>
+  <button class="primary" id="openUi" style="flex:1">打开管理界面</button>
+  <button id="openOpts">⚙</button>
+</footer>
+<script src="popup.js"></script>
+</body>
+</html>

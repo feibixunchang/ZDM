@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>NDM 设置</title>
+<style>
+  body{width:520px;margin:0 auto;padding:24px;font:14px/1.6 -apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif;
+    background:#f5f7fa;color:#1f2937}
+  h2{margin:0 0 4px;font-size:18px}
+  .sub{color:#6b7280;font-size:12px;margin-bottom:18px}
+  .card{background:#fff;border:1px solid #e3e8ef;border-radius:10px;padding:16px}
+  label{display:block;font-size:12px;color:#6b7280;margin:12px 0 4px}
+  input{width:100%;padding:8px 10px;border:1px solid #e3e8ef;border-radius:8px;font:inherit}
+  input:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 3px #eff4ff}
+  .row{display:flex;align-items:center;gap:8px;margin-top:12px}
+  button{padding:8px 14px;border-radius:8px;border:1px solid #e3e8ef;background:#fff;cursor:pointer;font:inherit}
+  button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  #msg{margin-top:12px;font-size:13px;color:#16a34a}
+  code{background:#f3f4f6;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<h2>NDM Connector</h2>
+<div class="sub">与本机 NDM 下载服务通信（默认 <code>http://127.0.0.1:9000</code>）</div>
+<div class="card">
+  <label>服务地址</label>
+  <input id="serverUrl" placeholder="http://127.0.0.1:9000">
+  <label>保存目录（留空用服务端默认下载目录）</label>
+  <input id="directory" placeholder="/home/你的用户名/Downloads">
+  <label>每个任务的连接数</label>
+  <input id="connections" type="number" min="1" max="32">
+  <div class="row">
+    <input type="checkbox" id="intercept" style="width:auto">
+    <label style="margin:0;color:#1f2937">自动接管浏览器下载</label>
+  </div>
+  <div class="row">
+    <input type="checkbox" id="notify" style="width:auto">
+    <label style="margin:0;color:#1f2937">显示通知</label>
+  </div>
+  <div class="row">
+    <button class="primary" id="save">保存</button>
+    <button id="test">测试连接</button>
+  </div>
+  <div id="msg"></div>
+</div>
+<script src="options.js"></script>
+</body>
+</html>

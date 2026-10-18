@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NDM · 下载管理器</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --panel:#ffffff; --border:#e3e8ef; --text:#1f2937; --muted:#6b7280;
+    --accent:#2563eb; --accent-soft:#eff4ff; --ok:#16a34a; --warn:#d97706; --err:#dc2626;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.1);
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","Source Han Sans SC",sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:14px 20px;background:var(--panel);
+    border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+  .logo{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px}
+  .logo svg{width:22px;height:22px}
+  .spacer{flex:1}
+  button{font:inherit;cursor:pointer;border:1px solid var(--border);background:var(--panel);
+    color:var(--text);padding:7px 12px;border-radius:8px;transition:.15s}
+  button:hover{background:#f3f4f6}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover{background:#1d4fd8}
+  button.icon{padding:6px 8px;line-height:1}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input,select{font:inherit;padding:7px 10px;border:1px solid var(--border);border-radius:8px;
+    background:#fff;color:var(--text);outline:none}
+  input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  main{max-width:1180px;margin:0 auto;padding:18px 20px 60px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+    box-shadow:var(--shadow)}
+  .addbar{display:flex;gap:8px;padding:12px;margin-bottom:14px;flex-wrap:wrap}
+  .addbar input.url{flex:1;min-width:260px}
+  .toolbar{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border);
+    flex-wrap:wrap}
+  .tabs{display:flex;gap:4px}
+  .tab{padding:5px 12px;border-radius:999px;border:1px solid transparent;cursor:pointer;color:var(--muted)}
+  .tab.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .stats{margin-left:auto;color:var(--muted);font-size:13px}
+  .stats b{color:var(--text)}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:8px 12px;
+    border-bottom:1px solid var(--border);background:#fafbfc}
+  td{padding:10px 12px;border-bottom:1px solid #f0f2f5;vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  .fname{font-weight:600;word-break:break-all}
+  .sub{color:var(--muted);font-size:12px;margin-top:2px;word-break:break-all}
+  .bar{height:6px;border-radius:999px;background:#e8ecf1;overflow:hidden;margin-top:6px}
+  .bar>i{display:block;height:100%;background:var(--accent);border-radius:999px;transition:width .3s}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+  .s-downloading{background:#e0f2fe;color:#0369a1}
+  .s-completed{background:#dcfce7;color:#15803d}
+  .s-paused{background:#fef3c7;color:#b45309}
+  .s-error{background:#fee2e2;color:#b91c1c}
+  .s-queued{background:#f1f5f9;color:#475569}
+  .s-canceled{background:#f1f5f9;color:#64748b}
+  .s-merging{background:#ede9fe;color:#6d28d9}
+  .actions{display:flex;gap:6px;justify-content:flex-end}
+  .empty{padding:48px;text-align:center;color:var(--muted)}
+  dialog{border:none;border-radius:12px;padding:0;width:520px;box-shadow:0 20px 60px rgba(0,0,0,.2)}
+  dialog::backdrop{background:rgba(15,23,42,.35)}
+  .dlg-h{padding:14px 18px;border-bottom:1px solid var(--border);font-weight:700}
+  .dlg-b{padding:16px 18px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .field label{font-size:12px;color:var(--muted)}
+  .field.full{grid-column:1/-1}
+  .dlg-f{padding:12px 18px;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--border)}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111827;color:#fff;
+    padding:10px 16px;border-radius:8px;font-size:13px;opacity:0;transition:.2s;pointer-events:none;z-index:99}
+  .toast.show{opacity:1}
+  .hint{color:var(--muted);font-size:12px;padding:10px 14px;border-top:1px solid var(--border)}
+  code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/>
+    </svg>
+    <span>NDM</span>
+  </div>
+  <span class="sub" id="svc" style="color:var(--muted);font-size:12px"></span>
+  <div class="spacer"></div>
+  <button id="btnAdd">＋ 新建下载</button>
+  <button id="btnSettings">⚙ 设置</button>
+</header>
+
+<main>
+  <div class="card addbar">
+    <input class="url" id="url" placeholder="粘贴下载链接 http(s)://…  支持直接拖入链接">
+    <input id="fname" placeholder="文件名（可选）" style="width:180px">
+    <input id="fconn" type="number" min="1" max="32" placeholder="连接数" style="width:88px" title="连接数，留空用默认">
+    <button class="primary" id="btnGo">下载</button>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <div class="tabs">
+        <span class="tab active" data-f="all">全部</span>
+        <span class="tab" data-f="downloading">进行中</span>
+        <span class="tab" data-f="paused">已暂停</span>
+        <span class="tab" data-f="completed">已完成</span>
+      </div>
+      <button id="btnPauseAll">全部暂停</button>
+      <button id="btnResumeAll">全部继续</button>
+      <button id="btnClear">清除已完成</button>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div id="tableWrap">
+      <table>
+        <thead><tr>
+          <th style="width:38%">文件</th>
+          <th style="width:16%">大小</th>
+          <th style="width:22%">进度</th>
+          <th style="width:10%">速度</th>
+          <th style="width:14%">操作</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>还没有下载任务 —— 粘贴链接到上方，或安装浏览器扩展一键接管下载</div>
+    </div>
+    <div class="hint">
+      浏览器扩展：打开 <code>chrome://extensions</code> → 开发者模式 → 加载已解压的扩展 → 选择本项目 <code>extension/</code> 目录。
+      开启「接管浏览器下载」后，Chrome 的下载会自动交给 NDM 多线程下载。
+    </div>
+  </div>
+</main>
+
+<dialog id="dlgSettings">
+  <div class="dlg-h">设置</div>
+  <div class="dlg-b">
+    <div class="field full"><label>下载目录</label><input id="cfgDir"></div>
+    <div class="field"><label>单任务连接数</label><input id="cfgConn" type="number" min="1" max="32"></div>
+    <div class="field"><label>同时下载任务数</label><input id="cfgActive" type="number" min="1" max="16"></div>
+    <div class="field"><label>限速 (KB/s，0=不限)</label><input id="cfgSpeed" type="number" min="0"></div>
+    <div class="field"><label>失败重试次数</label><input id="cfgRetry" type="number" min="0" max="20"></div>
+    <div class="field"><label>代理 (http://host:port)</label><input id="cfgProxy" placeholder="留空则不使用代理"></div>
+    <div class="field"><label>服务端口</label><input id="cfgPort" type="number" min="1024" max="65535"></div>
+    <div class="field full"><label><input type="checkbox" id="cfgAuto"> 重启后自动继续未完成任务</label></div>
+  </div>
+  <div class="dlg-f">
+    <button id="btnOpenDir">打开下载目录</button>
+    <button class="primary" id="btnSaveCfg">保存</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let tasks = [], config = {}, filter = 'all';
+
+const fmtSize = n => {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  const u = ['KB','MB','GB','TB'];
+  let i = -1; do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(1) + ' ' + u[i];
+};
+const fmtTime = s => {
+  if (s == null || !isFinite(s)) return '—';
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = s%60;
+  return h ? `${h}h${m}m` : m ? `${m}m${sec}s` : `${sec}s`;
+};
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const statusText = {queued:'排队中',downloading:'下载中',paused:'已暂停',completed:'已完成',error:'失败',canceled:'已取消',merging:'合并中'};
+
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2200); }
+
+async function api(method, path, body){
+  const r = await fetch('/api/' + path, {
+    method, headers:{'Content-Type':'application/json'},
+    body: body ? JSON.stringify(body) : undefined });
+  return r.json();
+}
+
+function render(){
+  const list = tasks.filter(t => filter==='all' ? true
+    : filter==='downloading' ? ['downloading','queued','merging'].includes(t.status)
+    : t.status===filter);
+  $('#empty').hidden = list.length > 0;
+  let speedSum = 0, html = '';
+  for (const t of list){
+    if (t.status==='downloading') speedSum += t.speed || 0;
+    const pct = t.size ? Math.min(100, t.progress) : (t.status==='completed' ? 100 : 0);
+    const canPause = ['downloading','queued'].includes(t.status);
+    const canResume = ['paused','error','canceled'].includes(t.status);
+    const done = t.status==='completed';
+    html += `<tr>
+      <td>
+        <div class="fname">${esc(t.filename)}</div>
+        <div class="sub">${esc(t.url)}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}</div>
+      </td>
+      <td>${fmtSize(t.downloaded)} / ${t.size ? fmtSize(t.size) : '未知'}</td>
+      <td>
+        <div class="bar"><i style="width:${pct}%;background:${done?'var(--ok)':'var(--accent)'}"></i></div>
+        <div class="sub">${pct.toFixed(1)}% · <span class="pill s-${t.status}">${statusText[t.status]||t.status}</span>
+        ${t.status==='downloading' ? '· 剩余 '+fmtTime(t.eta) : ''}</div>
+      </td>
+      <td>${t.status==='downloading' ? fmtSize(t.speed)+'/s' : '—'}</td>
+      <td><div class="actions">
+        ${canPause ? `<button class="icon" data-a="pause" data-id="${t.id}" title="暂停">⏸</button>` : ''}
+        ${canResume ? `<button class="icon" data-a="resume" data-id="${t.id}" title="继续">▶</button>` : ''}
+        ${!done ? `<button class="icon" data-a="restart" data-id="${t.id}" title="重新下载">⟳</button>` : ''}
+        ${done ? `<button class="icon" data-a="open" data-id="${t.id}" title="打开文件位置">📂</button>` : ''}
+        <button class="icon" data-a="del" data-id="${t.id}" title="删除">✕</button>
+      </div></td>
+    </tr>`;
+  }
+  $('#rows').innerHTML = html;
+  const act = tasks.filter(t=>t.status==='downloading').length;
+  $('#stats').innerHTML = `进行中 <b>${act}</b> · 总速度 <b>${fmtSize(speedSum)}/s</b> · 共 ${tasks.length} 项`;
+}
+
+$('#rows').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-a]'); if (!b) return;
+  const id = b.dataset.id, a = b.dataset.a;
+  if (a === 'del'){
+    const keep = await api('DELETE', 'tasks/' + id);
+    tasks = tasks.filter(t => t.id !== id);
+  } else {
+    const r = await api('POST', `tasks/${id}/${a}`, {});
+    if (!r.ok) toast(r.error || '操作失败');
+  }
+  refresh();
+});
+
+async function refresh(){
+  try{
+    const st = await (await fetch('/api/state')).json();
+    tasks = st.tasks || []; config = st.config || {};
+    $('#svc').textContent = '本地服务已连接 · 端口 ' + (config.port || 9000);
+    render();
+  }catch(e){ $('#svc').textContent = '服务未连接'; }
+}
+
+async function addDownload(){
+  const url = $('#url').value.trim();
+  if (!url) return toast('请先填入链接');
+  const body = { url };
+  if ($('#fname').value.trim()) body.filename = $('#fname').value.trim();
+  if ($('#fconn').value) body.connections = Number($('#fconn').value);
+  const r = await api('POST','tasks',body);
+  if (!r.ok) return toast(r.error || '添加失败');
+  $('#url').value = ''; $('#fname').value = '';
+  toast('已加入队列');
+  refresh();
+}
+$('#btnGo').onclick = addDownload;
+$('#url').addEventListener('keydown', e => { if (e.key === 'Enter') addDownload(); });
+$('#btnAdd').onclick = () => $('#url').focus();
+
+// drag & drop a link
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  const t = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+  if (t && /^https?:\/\//i.test(t.trim())){ $('#url').value = t.trim(); addDownload(); }
+});
+
+document.querySelectorAll('.tab').forEach(el => el.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  el.classList.add('active'); filter = el.dataset.f; render();
+});
+
+$('#btnPauseAll').onclick = async () => { await api('POST','action',{action:'pause_all'}); refresh(); };
+$('#btnResumeAll').onclick = async () => { await api('POST','action',{action:'resume_all'}); refresh(); };
+$('#btnClear').onclick = async () => { await api('POST','action',{action:'clear_finished'}); refresh(); };
+
+$('#btnSettings').onclick = () => {
+  $('#cfgDir').value = config.download_dir || '';
+  $('#cfgConn').value = config.connections || 8;
+  $('#cfgActive').value = config.max_active || 3;
+  $('#cfgSpeed').value = Math.round((config.speed_limit || 0) / 1024);
+  $('#cfgRetry').value = config.max_retries ?? 5;
+  $('#cfgProxy').value = config.proxy || '';
+  $('#cfgPort').value = config.port || 9000;
+  $('#cfgAuto').checked = !!config.auto_resume;
+  $('#dlgSettings').showModal();
+};
+$('#btnSaveCfg').onclick = async () => {
+  const r = await api('POST','config',{
+    download_dir: $('#cfgDir').value.trim(),
+    connections: Number($('#cfgConn').value),
+    max_active: Number($('#cfgActive').value),
+    speed_limit: Number($('#cfgSpeed').value) * 1024,
+    max_retries: Number($('#cfgRetry').value),
+    proxy: $('#cfgProxy').value.trim(),
+    port: Number($('#cfgPort').value),
+    auto_resume: $('#cfgAuto').checked,
+  });
+  if (r.ok){ toast('已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }
+  else toast(r.error || '保存失败');
+};
+$('#btnOpenDir').onclick = () => api('POST','open',{path:$('#cfgDir').value.trim()});
+
+let es;
+function connectEvents(){
+  es = new EventSource('/api/events');
+  es.addEventListener('snapshot', e => {
+    const d = JSON.parse(e.data); tasks = d.tasks || []; config = d.config || {}; render();
+  });
+  es.addEventListener('task', e => {
+    const d = JSON.parse(e.data);
+    if (d.task){
+      const i = tasks.findIndex(t => t.id === d.task.id);
+      if (i >= 0) tasks[i] = d.task; else tasks.unshift(d.task);
+    }
+    render();
+  });
+  es.onerror = () => { $('#svc').textContent = '连接中断，重试中…'; };
+}
+refresh();
+connectEvents();
+setInterval(() => { if (es.readyState === 2) { es = null; connectEvents(); } }, 5000);
+</script>
+</body>
+</html>

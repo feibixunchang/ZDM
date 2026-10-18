@@ -1,0 +1,178 @@
+﻿# NDM installer for Windows - user level, no administrator rights needed.
+# Usage (PowerShell):
+#   .\install.ps1                 # install + autostart + launch desktop window
+#   .\install.ps1 -NoAutoStart    # install without autostart
+#   .\install.ps1 -Uninstall      # remove
+param(
+    [switch]$Uninstall,
+    [switch]$NoAutoStart
+)
+
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$App = Join-Path $env:LOCALAPPDATA "NDM"
+$StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\NDM"
+$Startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+$Agent = "com.ndm.service"
+
+function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+
+function Find-Python {
+    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    if ($launcher) {
+        try {
+            $exe = & py -3 -c "import sys; sys.stdout.write(sys.executable)" 2>$null
+            if ($exe -and (Test-Path $exe)) { return $exe.Trim() }
+        } catch {}
+    }
+    foreach ($c in @("python", "python3")) {
+        $cmd = Get-Command $c -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+    }
+    return $null
+}
+
+function Test-PyVersion($exe) {
+    try {
+        $v = & $exe -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+        if (-not $v) { return $false }
+        $parts = $v.Trim().Split(".")
+        return ([int]$parts[0] -ge 3 -and [int]$parts[1] -ge 9)
+    } catch { return $false }
+}
+
+# ---------------------------------------------------------------- uninstall
+if ($Uninstall) {
+    Write-Step "Uninstalling NDM"
+    $cmd = Join-Path $App "ndm.cmd"
+    if (Test-Path $cmd) { & $cmd stop }
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*ndm.py*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $pl = Join-Path $env:APPDATA "NDM"
+    Remove-Item -Recurse -Force $App -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $StartMenu -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $Startup "NDM Service.lnk") -ErrorAction SilentlyContinue
+    Remove-Item -Force (Join-Path $Startup "NDM Service.vbs") -ErrorAction SilentlyContinue
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($userPath -like "*$App*") {
+        $new = ($userPath.Split(";") | Where-Object { $_ -and $_ -ne $App }) -join ";"
+        [Environment]::SetEnvironmentVariable("Path", $new, "User")
+    }
+    Write-Host "NDM removed. Downloads and settings under the install folder are gone," -ForegroundColor Yellow
+    Write-Host "but your downloaded files stay where they are." -ForegroundColor Yellow
+    exit 0
+}
+
+# ---------------------------------------------------------------- python
+Write-Step "Checking Python"
+$py = Find-Python
+if (-not $py -or -not (Test-PyVersion $py)) {
+    Write-Host "Python 3.9+ not found. Trying winget..." -ForegroundColor Yellow
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+        $py = Find-Python
+    }
+}
+if (-not $py) {
+    Write-Host "Could not find Python. Install it from https://www.python.org/downloads/" -ForegroundColor Red
+    Write-Host "(tick 'Add python.exe to PATH'), then run this script again." -ForegroundColor Red
+    exit 1
+}
+Write-Host "  python: $py"
+
+# ---------------------------------------------------------------- files
+Write-Step "Installing to $App"
+New-Item -ItemType Directory -Force -Path $App | Out-Null
+foreach ($item in @("ndm", "web", "extension")) {
+    $dst = Join-Path $App $item
+    if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
+    Copy-Item -Recurse -Force (Join-Path $Root $item) $dst
+}
+foreach ($f in @("ndm.py", "gui.py", "README.md")) {
+    Copy-Item -Force (Join-Path $Root $f) (Join-Path $App $f)
+}
+Get-ChildItem -Path $App -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------- launcher
+$cmdPath = Join-Path $App "ndm.cmd"
+Set-Content -Path $cmdPath -Encoding ASCII -Value @"
+@echo off
+"$py" "%~dp0ndm.py" %*
+"@
+
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$App*") {
+    [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";$App"), "User")
+    $env:Path = $env:Path + ";$App"
+}
+Write-Host "  command: ndm  (restart the terminal to pick it up, or use $cmdPath)"
+
+# ---------------------------------------------------------------- shortcuts
+Write-Step "Creating shortcuts"
+$ws = New-Object -ComObject WScript.Shell
+New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
+$icon = Join-Path $App "extension\icons\icon.ico"
+
+$lnk = $ws.CreateShortcut((Join-Path $StartMenu "NDM 下载管理器.lnk"))
+$lnk.TargetPath = $cmdPath
+$lnk.Arguments = "gui"
+$lnk.WorkingDirectory = $App
+if (Test-Path $icon) { $lnk.IconLocation = $icon }
+$lnk.Description = "NDM 多线程下载管理器"
+$lnk.Save()
+
+$lnk2 = $ws.CreateShortcut((Join-Path $StartMenu "NDM 网页界面.lnk"))
+$lnk2.TargetPath = $cmdPath
+$lnk2.Arguments = "open"
+$lnk2.WorkingDirectory = $App
+if (Test-Path $icon) { $lnk2.IconLocation = $icon }
+$lnk2.Save()
+
+# ---------------------------------------------------------------- autostart
+if (-not $NoAutoStart) {
+    $pyw = Join-Path (Split-Path $py) "pythonw.exe"
+    if (-not (Test-Path $pyw)) { $pyw = $py }
+    $lnk3 = $ws.CreateShortcut((Join-Path $Startup "NDM Service.lnk"))
+    $lnk3.TargetPath = $pyw
+    $lnk3.Arguments = "ndm.py serve"
+    $lnk3.WorkingDirectory = $App
+    $lnk3.WindowStyle = 7
+    $lnk3.Description = "NDM background download service"
+    $lnk3.Save()
+    Write-Host "  autostart: yes (Startup folder)"
+} else {
+    Remove-Item -Force (Join-Path $Startup "NDM Service.lnk") -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------- PyQt5 (optional)
+Write-Step "Checking PyQt5 for the desktop app"
+$hasQt = & $py -c "import PyQt5.QtWidgets" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  installing PyQt5 (needed only for the desktop window)..." -ForegroundColor Yellow
+    & $py -m pip install --user PyQt5
+    $hasQt = & $py -c "import PyQt5.QtWidgets" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  PyQt5 unavailable - the desktop window will fall back to the web UI." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  PyQt5 already installed"
+}
+
+# ---------------------------------------------------------------- start
+Write-Step "Starting service"
+Start-Process -FilePath $pyw -ArgumentList "ndm.py","serve" -WorkingDirectory $App -WindowStyle Hidden
+Start-Sleep -Seconds 2
+
+Write-Host ""
+Write-Host "NDM installed." -ForegroundColor Green
+Write-Host ""
+Write-Host "  Desktop app : NDM 下载管理器  (Start menu), or  ndm gui"
+Write-Host "  Web UI      : http://127.0.0.1:9000/"
+Write-Host "  Extension   : chrome://extensions -> Developer mode -> Load unpacked"
+Write-Host "                -> select  $App\extension"
+Write-Host ""
+Write-Host "  If Windows Firewall asks about python, allow access on private networks" -ForegroundColor Yellow
+Write-Host "  (NDM only listens on 127.0.0.1)." -ForegroundColor Yellow
