@@ -62,6 +62,40 @@ if not os.path.exists(ICON):
         os.path.expanduser("~/.local/share/icons/hicolor/128x128/apps"), "zdm.png"
     )
 
+
+# ---------------------------------------------------------------------------
+# Desktop-only preferences.
+#
+# The service owns everything download related, but a few window-behaviour
+# choices have nowhere to live there, so they are stored client-side next to
+# the dock log.
+# ---------------------------------------------------------------------------
+_GUI_CFG_PATH = os.path.join(os.path.expanduser("~/.config/zdm"), "gui.json")
+
+
+def _gui_cfg_all() -> dict:
+    try:
+        with open(_GUI_CFG_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _gui_cfg(key: str, default=None):
+    return _gui_cfg_all().get(key, default)
+
+
+def _gui_cfg_set(**kwargs) -> None:
+    data = _gui_cfg_all()
+    data.update(kwargs)
+    try:
+        os.makedirs(os.path.dirname(_GUI_CFG_PATH), exist_ok=True)
+        with open(_GUI_CFG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 STATUS_TEXT = {
     "queued": "排队中",
     "downloading": "下载中",
@@ -287,6 +321,7 @@ class Api:
 
 # --------------------------------------------------------------------------- Qt
 from PyQt5.QtCore import (  # noqa: E402
+    QEvent,
     QPoint,
     QPointF,
     QRect,
@@ -525,6 +560,12 @@ class ZDMApplication(QApplication):
         # that activation must not also yank the window on screen.
         if getattr(win, "_suppress_restore_until", 0.0) > time.time():
             _dlog(f"[restore:{_tag}] suppressed (tray menu opening)")
+            return
+        # The user minimized the window from the title bar (or the WM). Honour
+        # that: without this guard every ApplicationActive flip yanked the
+        # window back on screen, so "minimize" looked like a no-op.
+        if getattr(win, "_user_minimized", False):
+            _dlog(f"[restore:{_tag}] skipped (minimized by user)")
             return
         # NOTE: on macOS, QWidget.isVisible() only reflects "not explicitly hidden"
         # and flips to True as soon as show() is called -- even if the window has
@@ -1602,6 +1643,8 @@ class MainWindow(QMainWindow):
         auto_gui_cb.setChecked(bool(cfg.get("auto_show_gui", True)))
         update_cb = QCheckBox("启动时自动检查更新")
         update_cb.setChecked(bool(cfg.get("check_updates", True)))
+        close_tray_cb = QCheckBox("关闭窗口时最小化到托盘（不退出程序）")
+        close_tray_cb.setChecked(bool(_gui_cfg("close_to_tray", False)))
         # ---- appearance: follow the OS appearance by default ----
         appearance = QComboBox()
         for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
@@ -1623,6 +1666,7 @@ class MainWindow(QMainWindow):
         form.addRow("", auto)
         form.addRow("", autostart_cb)
         form.addRow("", auto_gui_cb)
+        form.addRow("", close_tray_cb)
         # ---- version + updates ----
         ver_row = QWidget()
         vh = QHBoxLayout(ver_row)
@@ -1675,6 +1719,7 @@ class MainWindow(QMainWindow):
             "auto_show_gui": auto_gui_cb.isChecked(),
             "check_updates": update_cb.isChecked(),
         })
+        _gui_cfg_set(close_to_tray=close_tray_cb.isChecked())
         if getattr(self, "autostart_action", None) is not None:
             self.autostart_action.setChecked(autostart.is_enabled())
         self._status("设置已保存")
@@ -1762,6 +1807,7 @@ class MainWindow(QMainWindow):
         # On macOS an inactive app's window is drawn greyed out and eats the
         # first click, so activate the app before showing anything.
         activate_app()
+        self._user_minimized = False
         self.show()
         self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
         self.raise_()
@@ -1777,6 +1823,15 @@ class MainWindow(QMainWindow):
             self._show_front()
 
     # ---------------- events ----------------
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.WindowStateChange:
+            # Track whether *the user* put the window away. The app-level
+            # restore hook (ZDMApplication._maybe_restore) fires on every
+            # ApplicationActive flip and used to fight this, popping a
+            # minimized window straight back up.
+            self._user_minimized = bool(self.isMinimized())
+
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls() or e.mimeData().hasText():
             e.acceptProposedAction()
@@ -1792,7 +1847,12 @@ class MainWindow(QMainWindow):
                 self._run(self.api.add, {"url": u.strip()})
 
     def closeEvent(self, e):
-        if self.tray is not None and self.tray.isVisible():
+        # Closing quits by default. Only fall back to the tray when the user
+        # explicitly asked for it in Settings - hiding the window on every
+        # close made the title-bar button look broken.
+        if (self.tray is not None and self.tray.isVisible()
+                and _gui_cfg("close_to_tray", False)):
+            self._user_minimized = False
             self.hide()
             self.tray.showMessage("ZDM", "已最小化到托盘，右键托盘图标可退出",
                                   QSystemTrayIcon.Information, 2500)
@@ -1834,6 +1894,15 @@ def main(argv=None) -> int:
             port = int(a)
         else:
             rest.append(a)
+
+    # Honor the desktop scale factor. The frozen build ships its own Qt, which
+    # carries no Deepin dxcb plugin, so Qt falls back to 96 dpi and renders the
+    # window *and* the fonts 1.5x too small on a 150% (Xft.dpi 144) screen.
+    try:
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
 
     app = ZDMApplication(sys.argv)
     app.setApplicationName(APP_NAME)
