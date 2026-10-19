@@ -15,6 +15,12 @@ public sealed class TaskRow
 
     public string Id => Task.Id;
     public string Filename => Task.Filename;
+
+    /// <summary>Dead records are dimmed so they do not read as actionable.</summary>
+    public Brush FilenameBrush => IsMissingFile
+        ? Palettes.Missing
+        : Palettes.Current.BTextStrong;
+
     public string Url => Task.Url;
 
     public string SizeText => Task.Size > 0
@@ -30,11 +36,37 @@ public sealed class TaskRow
         : "—";
 
     public Core.TaskStatus Status => Task.Status;
-    public string StatusText => TaskStatusNames.ToChinese(Task.Status);
-    public Brush StatusBrush => StatusColor(Task.Status);
-    public Brush ProgressBrush => StatusColor(Task.Status);
+
+    /// <summary>
+    /// True when the task is marked completed but the file is gone. The record
+    /// survives restarts while the file does not, so this has to be checked on
+    /// disk rather than inferred from status — otherwise the list shows a
+    /// confident "已完成" for something the user can no longer open.
+    /// </summary>
+    public bool IsMissingFile =>
+        Task.Status == Core.TaskStatus.Completed
+        && !File.Exists(Path.Combine(Task.Directory, Task.Filename));
+
+    public string StatusText => IsMissingFile ? "文件已丢失" : TaskStatusNames.ToChinese(Task.Status);
+
+    /// <summary>Muted for dead records so they read as inactive at a glance.</summary>
+    public Brush StatusBrush => IsMissingFile
+        ? Palettes.Missing
+        : StatusColor(Task.Status);
+
+    public Brush ProgressBrush => StatusBrush;
+
+    /// <summary>Shows the missing-file hint under the file name.</summary>
+    public string SubtitleText => IsMissingFile
+        ? Task.Url
+        : Task.Url;
+
+    public bool ShowMissingHint => IsMissingFile;
+
     public string Directory => Task.Directory;
-    public string Tooltip => Task.Url;
+    public string Tooltip => IsMissingFile
+        ? $"{Task.Filename}\n文件已不存在：\n{Path.Combine(Task.Directory, Task.Filename)}"
+        : Task.Url;
 
     /// <summary>Remaining time, shown next to the percentage while downloading.</summary>
     public string EtaText
