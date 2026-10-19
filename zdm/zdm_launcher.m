@@ -56,6 +56,13 @@ int main(int argc, char **argv) {
     /* Keep the process name as the bundle executable for NSBundle lookups. */
     PyConfig_SetBytesArgv(&config, argc, argv);
 
+    /* Force UTF-8 for stdio. Without this, stdout/stderr default to the ASCII
+     * codec when the app is launched from Finder/CI (no TTY), and any Chinese
+     * text printed by gui.py raises UnicodeEncodeError and aborts startup. */
+    PyConfig_SetBytesString(&config, &config.stdio_encoding, "utf-8");
+    /* Also make the filesystem encoding UTF-8 so paths with non-ASCII chars work. */
+    PyConfig_SetBytesString(&config, &config.filesystem_encoding, "utf-8");
+
     /* Program name influences sys.executable / prefix discovery. Point it at the
      * venv interpreter that owns PyQt5 so the venv's site-packages is found. */
     char venv_python[4096];
