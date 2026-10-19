@@ -1,0 +1,8 @@
+# WPF native client (C#/.NET 10)
+bin/
+obj/
+publish/
+dist/
+*.user
+*.suo
+.vs/
