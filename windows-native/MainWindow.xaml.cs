@@ -41,6 +41,17 @@ public partial class MainWindow : Window
         _server = new ApiServer(_manager, _manager.Config.Port);
         _server.Start();
 
+        // Shell-action self check: proves OpenFile / OpenInExplorer really launch.
+        if (Environment.GetCommandLineArgs().Contains("--uitest"))
+        {
+            _ = Task.Run(() =>
+            {
+                UiSelfTest.Run(_manager);
+                Application.Current.Shutdown();
+            });
+            return;
+        }
+
         // Headless verification mode: exercise the API without showing UI.
         if (Environment.GetCommandLineArgs().Contains("--selftest"))
         {
@@ -209,7 +220,18 @@ public partial class MainWindow : Window
     }
 
     private void OnOpenFolder(object sender, RoutedEventArgs e)
-        => Human.OpenInExplorer(_manager.Config.DownloadDir);
+    {
+        var dir = _manager.Config.DownloadDir;
+        if (!Directory.Exists(dir))
+        {
+            MessageBox.Show(this, $"目录已不存在：\n{dir}", "ZDM 下载管理器",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (!Core.Human.OpenInExplorer(dir))
+            MessageBox.Show(this, $"无法打开目录：\n{dir}", "ZDM 下载管理器",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
 
     private void OnBrowseFolder(object sender, RoutedEventArgs e)
     {
@@ -320,19 +342,20 @@ public partial class MainWindow : Window
 
         if (row.Status != Core.TaskStatus.Completed)
         {
-            MessageBox.Show(this, "文件尚未下载完成。", "ZDM 下载管理器",
+            MessageBox.Show(this, "任务尚未完成，文件还不存在。", "ZDM 下载管理器",
                 MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         if (!File.Exists(path))
         {
-            MessageBox.Show(this, $"找不到文件：\n{path}", "ZDM 下载管理器",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
+            // Common for tasks restored from a previous session: the record
+            // survives but the file was moved or deleted.
+            MessageBox.Show(this,
+                $"文件已不存在：\n{path}\n\n它可能已被移动、删除，或清理工具已将其移除。",
+                "ZDM 下载管理器", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        // Report failure instead of swallowing it: a menu item that silently
-        // does nothing is indistinguishable from a broken app.
         if (!Core.Human.OpenFile(path))
             MessageBox.Show(this,
                 $"无法打开此文件。系统可能没有为它设置默认程序。\n\n{path}",
@@ -343,13 +366,25 @@ public partial class MainWindow : Window
     private void OnOpenRowFolder(object sender, RoutedEventArgs e)
     {
         if (Selected is not { } row) return;
-        var path = row.Status == Core.TaskStatus.Completed
-            ? Path.Combine(row.Directory, row.Filename)
-            : row.Directory;
 
-        if (!Core.Human.OpenInExplorer(path))
+        var folder = row.Directory;
+        var file = Path.Combine(folder, row.Filename);
+
+        // Completed tasks reveal the exact file; otherwise just open the folder.
+        var target = row.Status == Core.TaskStatus.Completed && File.Exists(file)
+            ? file
+            : folder;
+
+        if (!Directory.Exists(folder))
+        {
+            MessageBox.Show(this, $"目录已不存在：\n{folder}", "ZDM 下载管理器",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (!Core.Human.OpenInExplorer(target))
             MessageBox.Show(this,
-                $"无法打开所在位置：\n{path}", "ZDM 下载管理器",
+                $"无法打开所在位置：\n{target}", "ZDM 下载管理器",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
@@ -375,19 +410,22 @@ public partial class MainWindow : Window
     /// selection.
     /// </summary>
     /// <summary>
-    /// Right-click on a row selects it and enables/disables the row actions
-    /// before WPF shows the menu.
+    /// Prepare the row context menu.
     ///
-    /// Deliberately does NOT touch Visibility or Placement: a ContextMenu
-    /// assigned to DataGrid.ContextMenu is opened by WPF itself, and forcing
-    /// it visible here fights that flow and leaves the menu inert.
+    /// ContextMenuOpening is raised *on the DataGrid*, so its OriginalSource is
+    /// the grid itself — walking up looking for a DataGridRow finds nothing and
+    /// silently clears the selection, which makes every menu action a no-op.
+    /// The row under the cursor therefore has to be resolved by hit-testing the
+    /// mouse position instead.
+    ///
+    /// Visibility and PlacementTarget are left alone: WPF opens an assigned
+    /// DataGrid.ContextMenu by itself, and forcing it visible here breaks that.
     /// </summary>
     private void OnGridContextMenu(object sender, ContextMenuEventArgs e)
     {
-        if (e.OriginalSource is not DependencyObject src) return;
+        TaskRow? hit = RowUnderCursor();
 
-        var row = Ancestor<DataGridRow>(src);
-        if (row?.Item is not TaskRow hit)
+        if (hit is null)
         {
             // Clicked empty space: clear the selection so no row action applies.
             TaskGrid.SelectedItem = null;
@@ -397,15 +435,42 @@ public partial class MainWindow : Window
         TaskGrid.SelectedItem = hit;
         TaskGrid.Focus();
 
-        // "Open file" only makes sense once the file exists on disk.
+        var completed = hit.Status == Core.TaskStatus.Completed;
         foreach (var item in RowMenu.Items.OfType<MenuItem>())
         {
-            // Only "open file" is conditional; everything else stays available.
+            // Only "open file" needs the file to exist; everything else applies
+            // regardless of state.
             if (item.Header as string == "打开文件")
-                item.IsEnabled = hit.Status == Core.TaskStatus.Completed;
-            else
-                item.IsEnabled = true;
+                item.IsEnabled = completed;
         }
+    }
+
+    /// <summary>The row under the current mouse position, or null.</summary>
+    private TaskRow? RowUnderCursor()
+    {
+        // InputHitTest needs a Visual, and it only answers once the grid has
+        // been hit-tested at least once — not guaranteed while the context menu
+        // owns the mouse. VisualTreeHelper.HitTest works either way.
+        var pos = Mouse.GetPosition(TaskGrid);
+        var hit = VisualTreeHelper.HitTest(TaskGrid, pos)?.VisualHit;
+
+        DependencyObject? node = hit;
+        while (node is not null && node is not DataGridRow)
+            node = VisualTreeHelper.GetParent(node);
+
+        if (node is DataGridRow row)
+            return row.Item as TaskRow;
+
+        return TaskGrid.SelectedItem as TaskRow;
+    }
+
+    /// <summary>Double-clicking a finished task opens the file, like a file manager.</summary>
+    private void OnGridDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (RowUnderCursor() is not { } row) return;
+        TaskGrid.SelectedItem = row;
+        if (row.Status == Core.TaskStatus.Completed)
+            OnOpenFile(sender, new RoutedEventArgs());
     }
 
     private static T? Ancestor<T>(DependencyObject node) where T : DependencyObject
@@ -646,8 +711,8 @@ public partial class MainWindow : Window
 
     private void OpenFolderFromTray()
     {
-        Human.OpenInExplorer(_manager.Config.DownloadDir);
         ShowFromTray();
+        OnOpenFolder(this, new RoutedEventArgs());
     }
 
     private void OpenWebFromTray()
