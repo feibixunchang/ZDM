@@ -118,9 +118,10 @@
 
             <!-- Text inputs -->
             <Style x:Key="AppTextBox" TargetType="TextBox">
-                <Setter Property="MinHeight" Value="32"/>
-                <Setter Property="Padding" Value="10,6"/>
+                <Setter Property="MinHeight" Value="30"/>
+                <Setter Property="Padding" Value="10,5"/>
                 <Setter Property="VerticalContentAlignment" Value="Center"/>
+                <Setter Property="HorizontalContentAlignment" Value="Left"/>
                 <Setter Property="FontSize" Value="{StaticResource UiFontSize}"/>
                 <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
                 <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
@@ -135,8 +136,15 @@
                                     Background="{TemplateBinding Background}"
                                     BorderBrush="{TemplateBinding BorderBrush}"
                                     BorderThickness="{TemplateBinding BorderThickness}">
-                                <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                                <!--
+                                  Margin carries the padding, not the ScrollViewer:
+                                  padding inside a ScrollViewer is applied after
+                                  layout and can clip the glyphs vertically.
+                                -->
+                                <ScrollViewer x:Name="PART_ContentHost"
+                                              Margin="{TemplateBinding Padding}"
+                                              VerticalAlignment="Center"
+                                              HorizontalAlignment="Stretch"/>
                             </Border>
                             <ControlTemplate.Triggers>
                                 <Trigger Property="IsKeyboardFocusWithin" Value="True">

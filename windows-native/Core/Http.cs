@@ -187,34 +187,55 @@ public static class Human
         return double.TryParse(t, out var v) ? (long)(v * mult) : 0;
     }
 
-    public static void OpenInExplorer(string path)
+    // ShellExecute verbs and constants.
+    private const int SW_SHOWNORMAL = 1;
+    private const int SW_RESTORE = 9;
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr ShellExecuteW(IntPtr hwnd, string? lpOperation, string lpFile,
+        string? lpParameters, string? lpDirectory, int nShowCmd);
+
+    /// <summary>Open a file with whatever program the user has associated with it.</summary>
+    public static bool OpenFile(string path)
     {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return false;
+        return ShellExecuteW(IntPtr.Zero, "open", path, null, null, SW_SHOWNORMAL) != IntPtr.Zero;
+    }
+
+    /// <summary>Reveal a file in Explorer, or open the folder when it does not exist.</summary>
+    public static bool OpenInExplorer(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+
         try
         {
             if (Directory.Exists(path))
+                // "explore" on the folder itself: opens it in a new window.
+                return ShellExecuteW(IntPtr.Zero, "explore", path, null, null, SW_SHOWNORMAL)
+                       != IntPtr.Zero;
+
+            if (File.Exists(path))
             {
-                Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"")
-                {
-                    UseShellExecute = true,
-                });
+                // /select needs the path without quotes around the whole argument;
+                // ShellExecute adds its own quoting and stray quotes make
+                // explorer treat the argument as a program to run.
+                var dir = Path.GetDirectoryName(path) ?? string.Empty;
+                return ShellExecuteW(IntPtr.Zero, "open", dir, $"/select,{path}", null, SW_SHOWNORMAL)
+                       != IntPtr.Zero;
             }
-            else if (File.Exists(path))
-            {
-                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
-                {
-                    UseShellExecute = true,
-                });
-            }
-            else
-            {
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
-                    OpenInExplorer(dir);
-            }
+
+            var parent = Path.GetDirectoryName(path);
+            return !string.IsNullOrEmpty(parent) && Directory.Exists(parent)
+                && OpenInExplorer(parent);
         }
-        catch
+        catch (Exception ex)
         {
-            // opening the file manager is best-effort
+            Debug.WriteLine($"[open] {ex.GetType().Name}: {ex.Message}");
+            return false;
         }
     }
+
+    /// <summary>Bring an already-open Explorer window to the front.</summary>
+    public static void RestoreExplorer(string path)
+        => ShellExecuteW(IntPtr.Zero, "open", path, null, null, SW_RESTORE);
 }

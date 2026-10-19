@@ -35,8 +35,12 @@
                       WPF's Watermark because a TextBox watermark must be
                       re-templated anyway, and the hint needs to be muted in
                       both themes.
+
+                      Height must stay Auto: pinning an explicit height clips
+                      the text vertically once the font metric exceeds it.
+                      The outer Grid therefore only pins the width.
                     -->
-                    <Grid Width="420" Height="30">
+                    <Grid Width="420">
                         <TextBox x:Name="UrlBox" Style="{StaticResource AppTextBox}"
                                  KeyDown="OnUrlKeyDown"
                                  TextChanged="OnUrlTextChanged"
@@ -46,7 +50,7 @@
                                    VerticalAlignment="Center" Margin="11,0,0,0"
                                    IsHitTestVisible="False" Opacity="0.75"/>
                     </Grid>
-                    <Grid Width="52" Height="30" Margin="8,0,0,0">
+                    <Grid Width="52" Margin="8,0,0,0">
                         <TextBox x:Name="ConnectionBox"
                                  Style="{StaticResource AppTextBox}"
                                  TextAlignment="Center"
@@ -59,7 +63,7 @@
                     </Grid>
                     <Button Content="下载" Style="{StaticResource PrimaryButton}"
                             Margin="10,0,0,0" Click="OnAddClick" IsDefault="True"
-                            MinHeight="30" Padding="18,4"/>
+                            VerticalAlignment="Center"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
