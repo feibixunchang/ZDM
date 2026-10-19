@@ -99,10 +99,19 @@ RES="$APP/Contents/Resources"
 for item in zdm web extension; do
     cp -R "$SRC/$item" "$RES/"
 done
-cp "$SRC/zdm.py" "$SRC/gui.py" "$RES/"
+# Top-level runtime modules that live next to gui.py but NOT inside the zdm/
+# package directory (e.g. theme.py). Missing these makes `import theme` fail at
+# startup, so list every such module explicitly.
+cp "$SRC/zdm.py" "$SRC/gui.py" "$SRC/theme.py" "$RES/"
 cp "$SRC/README.md" "$RES/" 2>/dev/null || true
 cp "$SRC/LICENSE.txt" "$RES/" 2>/dev/null || true
 find "$APP" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+# Fail fast if a module gui.py imports at top level is missing.
+echo "==> verifying required runtime modules are present"
+for mod in gui.py theme.py zdm.py; do
+    [ -f "$RES/$mod" ] || { echo "ERROR: $mod missing from $RES"; exit 1; }
+done
 
 # PyQt5 is required by the desktop client; install it into a throwaway venv that
 # the app will use at runtime (bundled, so the end user needs nothing).
@@ -111,6 +120,20 @@ VENV="$RES/venv"
 "$PY" -m venv "$VENV"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
 "$VENV/bin/python" -m pip install --quiet PyQt5 pyobjc-framework-Cocoa
+
+# Now that a Python exists, actually import every top-level module gui.py needs.
+# This is the check that catches a module being forgotten in the copy lists.
+echo "==> import check for runtime modules"
+( cd "$RES" && "$VENV/bin/python" -c "
+import importlib.util as u, sys
+missing = [m for m in ('theme', 'gui') if u.find_spec(m) is None]
+if missing:
+    print('missing modules:', missing); sys.exit(1)
+import theme
+assert theme.LIGHT and theme.DARK
+assert theme.build_stylesheet(theme.DARK)
+print('    theme + gui importable, both palettes render')
+" ) || { echo "ERROR: runtime module import check failed"; exit 1; }
 
 echo "==> embedding Python framework (for the native launcher to link against)"
 # IMPORTANT: the framework directory MUST be named PythonX.framework (no minor
