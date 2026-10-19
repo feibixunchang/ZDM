@@ -27,7 +27,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full dpkg-dev xvfb \
+          sudo apt-get install -y p7zip-full dpkg-dev xvfb python3-venv libgl1 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
             libxkbcommon-x11-0 libegl1
@@ -67,9 +67,12 @@ jobs:
           echo "control arch:    $(dpkg-deb --field "$DEB" Architecture)"
           echo "installed size:  $(dpkg-deb --field "$DEB" Installed-Size) KB"
           # No pip / interpreter game in the maintainer scripts any more.
-          if dpkg-deb --info "$DEB" | grep -q postinst; then
-            dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | grep -q "pip install"               && { echo "ERROR: postinst still pip-installs something"; exit 1; }
+          rm -rf /tmp/ctrl && mkdir -p /tmp/ctrl
+          dpkg-deb --ctrl-tarfile "$DEB" | tar -x -C /tmp/ctrl ./postinst
+          if grep -q "pip install" /tmp/ctrl/postinst; then
+            echo "ERROR: postinst still pip-installs something"; exit 1
           fi
+          grep -q "update-desktop-database" /tmp/ctrl/postinst
 
       - name: Run the packaged app out of an extracted tree
         run: |
