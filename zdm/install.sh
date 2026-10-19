@@ -41,12 +41,25 @@ pick_python() {
 install_pyqt() {
   local py="$1"
   if "$py" -c "import PyQt5.QtWidgets" >/dev/null 2>&1; then
-    echo "==> PyQt5 已就绪"; return
+    echo "==> PyQt5 已就绪"
+  else
+    echo "==> 安装 PyQt5（桌面端需要）"
+    "$py" -m pip install --user PyQt5 >/dev/null 2>&1 \
+      || "$py" -m pip install --user --break-system-packages PyQt5 >/dev/null 2>&1 \
+      || echo "==> PyQt5 安装失败，桌面端将自动回退到网页界面"
   fi
-  echo "==> 安装 PyQt5（桌面端需要）"
-  "$py" -m pip install --user PyQt5 >/dev/null 2>&1 \
-    || "$py" -m pip install --user --break-system-packages PyQt5 >/dev/null 2>&1 \
-    || echo "==> PyQt5 安装失败，桌面端将自动回退到网页界面"
+  # macOS: PyObjC lets the desktop client hook Cocoa's
+  # applicationShouldHandleReopen: so clicking the Dock icon restores a window
+  # that was closed to the tray. Without it we fall back to a state poller.
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if "$py" -c "import objc, AppKit" >/dev/null 2>&1; then
+      echo "==> PyObjC 已就绪（Dock 图标唤醒窗口）"
+    else
+      "$py" -m pip install --user pyobjc-framework-Cocoa >/dev/null 2>&1 \
+        || "$py" -m pip install --user --break-system-packages pyobjc-framework-Cocoa >/dev/null 2>&1 \
+        || echo "==> PyObjC 安装失败，Dock 唤醒将退化为轮询方式（仍可用）"
+    fi
+  fi
 }
 
 # ---------------------------------------------------------------- Linux
@@ -140,7 +153,7 @@ EOF
 
 # ---------------------------------------------------------------- macOS
 mac_uninstall() {
-  launchctl unload -w "$HOME/Library/LaunchAgents/com.zdm.service.plist" 2>/dev/null || true
+  launchctl bootout "gui/$(id -u)/com.zdm.service" 2>/dev/null || launchctl unload -w "$HOME/Library/LaunchAgents/com.zdm.service.plist" 2>/dev/null || true
   rm -rf "$HOME/Library/Application Support/ZDM" \
          "$HOME/Library/LaunchAgents/com.zdm.service.plist" \
          "$HOME/Applications/ZDM.app" "$HOME/.local/bin/zdm"
@@ -188,8 +201,14 @@ EOF
 </dict>
 </plist>
 EOF
-  launchctl unload -w "$LA/com.zdm.service.plist" 2>/dev/null || true
-  launchctl load -w "$LA/com.zdm.service.plist" 2>/dev/null || true
+  # macOS 13+ removed `launchctl load`; use bootstrap + kickstart (fallback to load on older macOS)
+  launchctl bootout "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
+  if launchctl bootstrap "gui/$(id -u)" "$LA/com.zdm.service.plist" 2>/dev/null; then
+    launchctl kickstart -k "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
+  else
+    launchctl unload -w "$LA/com.zdm.service.plist" 2>/dev/null || true
+    launchctl load -w "$LA/com.zdm.service.plist" 2>/dev/null || true
+  fi
   echo "==> 已注册 LaunchAgent（登录自启 + 崩溃重启）"
 
   # icon
@@ -198,18 +217,66 @@ EOF
     local ICONSET
     ICONSET="$(mktemp -d)/zdm.iconset"
     mkdir -p "$ICONSET"
-    for s in 16 32 64 128 256 512; do
-      sips -z "$s" "$s" "$APP_DIR/extension/icons/icon512.png" \
-        --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
+    # A valid .iconset needs the standard names AND every @2x (retina) variant.
+    # Missing @2x files produce a malformed .icns and macOS falls back to the
+    # generic placeholder icon in the Dock / Launchpad.
+    local SRC="$APP_DIR/extension/icons/icon512.png"
+    local logical icon_name
+    for logical in 16 32 128 256 512; do
+      icon_name="icon_${logical}x${logical}.png"
+      sips -z "$logical" "$logical" "$SRC" \
+        --out "$ICONSET/$icon_name" >/dev/null 2>&1 || true
+      sips -z "$((logical * 2))" "$((logical * 2))" "$SRC" \
+        --out "$ICONSET/icon_${logical}x${logical}@2x.png" >/dev/null 2>&1 || true
     done
     iconutil -c icns "$ICONSET" -o "$ICNS" >/dev/null 2>&1 || true
     rm -rf "$(dirname "$ICONSET")"
   fi
 
-  # script based .app bundle - no compilation needed
-  mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+  # Build a REAL native .app bundle.
+  #
+  # A "script based" bundle (Contents/MacOS/<exe> being a shell script that starts
+  # python) does NOT keep a stable macOS app identity: the Dock / LaunchServices
+  # key off the *running process image*, which ends up being Python.app, not
+  # ZDM.app. That causes a generic Dock icon and a Dock click that never reaches
+  # the Qt window. To fix this we build ZDM.app/Contents/MacOS/ZDM as a genuine
+  # Mach-O launcher that embeds the CPython interpreter *in the same process* (via
+  # the Python C API) and runs the Qt client from there. The process is then
+  # ZDM.app, so the Dock icon, the reopen callback, etc. all work natively.
+  mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
   [ -f "$ICNS" ] && cp "$ICNS" "$APP/Contents/Resources/zdm.icns"
-  cat > "$APP/Contents/MacOS/ZDM" <<EOF
+
+  # Locate the Python framework that backs the target interpreter so we can embed
+  # it and link the launcher against it.
+  local PYFRAMEWORK PYFRAMEWORK_VER
+  PYFRAMEWORK="$(python3 -c 'import sys; print(getattr(sys,"base_prefix",sys.prefix))' 2>/dev/null)"
+  PYFRAMEWORK="$("$PY" -c 'import sys; print(getattr(sys,"base_prefix",sys.prefix))' 2>/dev/null)"
+  PYFRAMEWORK_VER="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
+
+  if command -v clang >/dev/null && [ -n "$PYFRAMEWORK" ] && [ -d "$PYFRAMEWORK/Frameworks/Python$PYFRAMEWORK_VER.framework" ] || [ -d "$PYFRAMEWORK/../Library/Frameworks/Python$PYFRAMEWORK_VER.framework" ]; then
+    # Embed the Python framework into the bundle.
+    local FWSRC
+    FWSRC="$PYFRAMEWORK/Frameworks/Python$PYFRAMEWORK_VER.framework"
+    [ -d "$FWSRC" ] || FWSRC="$PYFRAMEWORK/../Library/Frameworks/Python$PYFRAMEWORK_VER.framework"
+    rm -rf "$APP/Contents/Frameworks/Python$PYFRAMEWORK_VER.framework"
+    cp -R "$FWSRC" "$APP/Contents/Frameworks/Python$PYFRAMEWORK_VER.framework" 2>/dev/null || true
+
+    # Compile the native launcher against the embedded framework.
+    local FW="$APP/Contents/Frameworks/Python$PYFRAMEWORK_VER.framework/Versions/$PYFRAMEWORK_VER"
+    if [ -f "$FW/lib/libpython$PYFRAMEWORK_VER.dylib" ] && [ -f "$FW/Headers/Python.h" ]; then
+      clang -o "$APP/Contents/MacOS/ZDM" "$ROOT/zdm_launcher.m" \
+        -I"$FW/Headers" "$FW/lib/libpython$PYFRAMEWORK_VER.dylib" \
+        -DZDM_APP_DIR="\"$APP_DIR\"" \
+        -Wl,-rpath,"@executable_path/../Frameworks/Python$PYFRAMEWORK_VER.framework/Versions/$PYFRAMEWORK_VER/lib" \
+        -Wl,-rpath,"@executable_path/../Frameworks" >/dev/null 2>&1 \
+        && echo "==> 已生成原生 App（内嵌 Python 运行时）" \
+        || echo "==> 原生 launcher 编译失败，回退到脚本启动器"
+    fi
+  fi
+
+  # Fallback: script launcher (still functional; Dock identity may be limited).
+  if [ ! -f "$APP/Contents/MacOS/ZDM" ] || ! file "$APP/Contents/MacOS/ZDM" 2>/dev/null | grep -q "Mach-O"; then
+    cat > "$APP/Contents/MacOS/ZDM" <<EOF
 #!/bin/sh
 PY="$PY"
 APP_DIR="$APP_DIR"
@@ -222,9 +289,10 @@ if ! curl -s -m 2 http://127.0.0.1:9000/api/state >/dev/null 2>&1; then
     i=\$((i+1)); sleep 0.3
   done
 fi
-exec "\$PY" "\$APP_DIR/gui.py" 9000
+"\$PY" "\$APP_DIR/gui.py" 9000
 EOF
-  chmod +x "$APP/Contents/MacOS/ZDM"
+    chmod +x "$APP/Contents/MacOS/ZDM"
+  fi
   cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -235,7 +303,7 @@ EOF
   <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>
   <key>CFBundleExecutable</key><string>ZDM</string>
   <key>CFBundleIconFile</key><string>zdm</string>
-  <key>CFBundleVersion</key><string>1.0.0</string>
+  <key>CFBundleVersion</key><string>1.1.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

@@ -2,7 +2,7 @@
 # Build a macOS .dmg installer for ZDM.
 # This script MUST run on macOS (it uses /usr/bin/hdiutil, which is macOS-only).
 #
-#   ./build_macos_dmg.sh            # produces ZDM-1.0.0.dmg in the current dir
+#   ./build_macos_dmg.sh            # produces ZDM-1.1.0.dmg in the current dir
 #   ZDM_VERSION=1.2.0 ./build_macos_dmg.sh
 #
 # The repo already ships a ready-made ZDM.app (see zdm/install.sh, which builds it
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="${ZDM_VERSION:-1.0.0}"
+VERSION="${ZDM_VERSION:-1.1.0}"
 APP_NAME="ZDM"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 STAGING="$(mktemp -d)/${APP_NAME}"
@@ -28,6 +28,12 @@ else
 fi
 [ -d "$SRC/extension" ] && cp -R "$SRC/extension" "$STAGING/"
 [ -f "$SRC/README.md" ] && cp "$SRC/README.md" "$STAGING/"
+# Ship the full install/usage guide inside the DMG when available.
+if [ -f "$SRC/docs/ZDM_安装与使用说明.md" ]; then
+  cp "$SRC/docs/ZDM_安装与使用说明.md" "$STAGING/安装与使用说明.md"
+elif [ -f "$SRC/../docs/ZDM_安装与使用说明.md" ]; then
+  cp "$SRC/../docs/ZDM_安装与使用说明.md" "$STAGING/安装与使用说明.md"
+fi
 # Make the .app easy to install: drop it into /Applications via a symlink in the DMG.
 ln -s "$APPS" "$STAGING/Applications"
 

@@ -13,6 +13,11 @@ env/
 *.part
 *.part.zdm
 
+# 桌面端运行时诊断日志（Dock 唤醒等排障用）
+dock.log
+gui.log
+zdm.log
+
 # 构建中间目录（保留 dist 下的发布包本身）
 dist/deb_staging/
 dist/zdm-linux/
