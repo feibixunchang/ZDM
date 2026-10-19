@@ -38,7 +38,22 @@ jobs:
 
       - name: Build
         working-directory: windows-native
+        # -warnaserror is deliberate: CI is where the nullable and manifest
+        # warnings get caught, not on a developer machine that skips warnings.
         run: dotnet build -c Release --no-restore -warnaserror
+
+      # Keep installer.iss in step with the single source of truth in the csproj.
+      - name: Sync installer version
+        shell: pwsh
+        working-directory: windows-native
+        run: |
+          $proj = Get-Content Zdm.App.csproj -Raw
+          if ($proj -notmatch '<Version>([^<]+)</Version>') { throw "no <Version> in csproj" }
+          $v = $Matches[1]
+          $iss = Get-Content installer.iss -Raw
+          $iss = [regex]::Replace($iss, '#define AppVersion "[^"]+"', "#define AppVersion `"$v`"")
+          Set-Content installer.iss $iss -NoNewline
+          Write-Host "installer version -> $v"
 
       - name: Publish single-file exe
         working-directory: windows-native
