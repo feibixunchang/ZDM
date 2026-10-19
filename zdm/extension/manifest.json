@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ZDM Connector",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "接管浏览器下载，交给本机 ZDM 多线程下载器加速",
   "minimum_chrome_version": "100",
   "permissions": ["downloads", "downloads.open", "contextMenus", "storage", "notifications"],

@@ -2,9 +2,9 @@
 """Build distributable packages for ZDM on all three platforms.
 
 Outputs (into ./dist):
-  - zdm_1.0.0_all.deb          Linux  (apt/dpkg installable, real .deb)
+  - zdm_1.1.0_all.deb          Linux  (apt/dpkg installable, real .deb)
   - zdm-linux.tar.gz           Linux  (fallback, user-level, no root)
-  - ZDM-Setup-1.0.0.exe        Windows (.exe self-extracting installer, no admin)
+  - ZDM-Setup-1.1.0.exe        Windows (.exe self-extracting installer, no admin)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
 The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
 SFX = os.path.join(ROOT, "7zS.sfx")
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def which(cmd):
@@ -60,7 +60,7 @@ def stage_files(dst):
                         ignore=shutil.ignore_patterns("__pycache__"))
     for f in ("zdm.py", "gui.py", "README.md", "install.sh",
               "install.ps1", "install.bat", "setup.cmd", "build_macos_dmg.sh",
-              "LICENSE.txt"):
+              "zdm_launcher.m", "LICENSE.txt"):
         src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
             else os.path.join(ROOT, f)
         if os.path.exists(src):
@@ -244,7 +244,7 @@ def build_macos_zip():
                     dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__"))
     for f in ("install.sh", "install.ps1", "install.bat", "build_macos_dmg.sh",
-              "README.md", "LICENSE.txt"):
+              "zdm_launcher.m", "README.md", "LICENSE.txt"):
         src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
             else os.path.join(ROOT, f)
         if os.path.exists(src):
@@ -259,8 +259,14 @@ def build_macos_zip():
 def main():
     os.makedirs(DIST, exist_ok=True)
     clean_pycache()
-    print("==> Linux .deb")
-    build_deb()
+    # The .deb is a Linux artifact and needs dpkg-deb (not available on macOS).
+    # Skip it gracefully so the other packages still build, instead of aborting
+    # the whole run on a missing Linux-only tool.
+    if which("dpkg-deb"):
+        print("==> Linux .deb")
+        build_deb()
+    else:
+        print("==> Linux .deb  [跳过：本机缺少 dpkg-deb，请在 Linux 上构建]")
     print("==> Linux tarball")
     build_linux_tarball()
     print("==> Windows .exe (7z SFX)")
@@ -281,15 +287,17 @@ def main():
             "ZDM 三端安装包\n"
             "=============\n\n"
             "1) Linux\n"
-            "   - zdm_1.0.0_all.deb   （推荐，需 root：sudo dpkg -i zdm_1.0.0_all.deb）\n"
+            f"   - zdm_{VERSION}_all.deb   （推荐，需 root：sudo dpkg -i zdm_{VERSION}_all.deb）\n"
+            "       ※ .deb 需在 Linux 上用 dpkg-deb 构建；若当前生成的包里没有它，\n"
+            "         请到 Linux 环境执行 python3 build_dist.py 补齐。\n"
             "   - zdm-linux.tar.gz    （免 root：解压后 ./install.sh）\n\n"
             "2) macOS\n"
             "   - zdm-macos.zip\n"
             "       解压后运行:  bash install.sh   （自动生成 ~/Applications/ZDM.app + 登录自启）\n"
-            "       若要 .dmg：在 Mac 上执行包内 build_macos_dmg.sh 一键生成 ZDM-1.0.0.dmg\n"
+            f"       若要 .dmg：在 Mac 上执行包内 build_macos_dmg.sh 一键生成 ZDM-{VERSION}.dmg\n"
             "       （.dmg 需 macOS 的 hdiutil 生成，无法在 Linux 上构建）\n\n"
             "3) Windows\n"
-            "   - ZDM-Setup-1.0.0.exe\n"
+            f"   - ZDM-Setup-{VERSION}.exe\n"
             "       双击运行，按提示安装（用户级、无需管理员；自动检测/安装 Python 与 PyQt5）\n\n"
             "安装后在桌面端「设置」或托盘图标右键菜单里，可随时开关「开机自启」与「退出」。\n"
             "浏览器扩展：加载各包内 extension/ 目录即可接管下载。\n"

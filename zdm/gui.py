@@ -38,6 +38,17 @@ STATUS_TEXT = {
     "merging": "合并中",
 }
 
+_DOCK_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dock.log")
+
+
+def _dlog(msg: str) -> None:
+    """Append a diagnostic line (Dock/window troubleshooting)."""
+    try:
+        with open(_DOCK_LOG, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
 
 def default_port() -> int:
     home = os.path.expanduser("~")
@@ -160,6 +171,205 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QVBoxLayout,
     QWidget,
 )
+
+
+class _ZDMReopenDelegate:
+    """Placeholder retained for backwards compatibility.
+
+    We no longer replace the NSApplication delegate: Qt's own Cocoa integration
+    already implements applicationShouldHandleReopen:, and swapping it out (with an
+    imperfect forwarding shim) breaks Qt's native window-restoration. Instead we
+    observe NSApplicationDidBecomeActiveNotification, which fires reliably whenever
+    the Dock icon is clicked, and restore the window from there.
+    """
+
+    _zdm_target = None
+    _zdm_orig = None
+
+
+def _build_reopen_delegate_class():
+    """Build the NSObject subclass that handles applicationShouldHandleReopen:.
+
+    Qt's QApplication on macOS does NOT install an NSApplication delegate for the
+    reopen callback (verified: NSApplication.delegate() is None), so installing our
+    own delegate is safe and is the canonical way to receive the Dock-icon click.
+
+    The delegate must implement exactly one selector; we deliberately do NOT try to
+    forward unknown selectors, because forwarding through a plain NSObject subclass
+    is error-prone (Objective-C selectors cannot be proxied with Python super()).
+    """
+    try:
+        import objc
+        from AppKit import NSObject
+    except Exception:
+        return None
+
+    class _Delegate(NSObject):
+        def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag):
+            _dlog(f"[reopen] Dock click received (visibleWindows={flag})")
+            target = self._zdm_target
+            if target is not None:
+                try:
+                    # Restore on the next runloop turn so Cocoa finishes the reopen.
+                    from PyQt5.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: target._maybe_restore("cocoaReopen"))
+                except Exception:
+                    try:
+                        target._maybe_restore("cocoaReopen")
+                    except Exception:
+                        pass
+            return True
+
+    return _Delegate
+
+
+_ZDMReopenDelegate = None
+if sys.platform == "darwin":
+    try:
+        _ZDMReopenDelegate = _build_reopen_delegate_class()
+    except Exception:
+        _ZDMReopenDelegate = None
+
+
+class ZDMApplication(QApplication):
+    """QApplication that brings the main window back when the Dock icon is clicked.
+
+    On macOS, clicking the Dock icon of an app whose only window was hidden (e.g.
+    closed to the tray) is delivered by Cocoa as `applicationShouldHandleReopen:`
+    and does NOT reliably surface as a Qt `applicationStateChanged` / `focusChanged`
+    signal (especially when the app is already the frontmost app but has no visible
+    window). Relying on those signals alone therefore misses the Dock click.
+
+    A robust, event-agnostic approach: poll the combination
+    "window not visible AND application is active". When a user clicks the Dock
+    icon, macOS makes the app active; if our window is hidden we bring it back.
+    We keep the signal handlers as a fast path, but the poller is the guarantee.
+    """
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self._main_window = None
+        self._dock_watch = None
+        self._reopen_delegate = None
+        self._active_observer = None
+
+    def set_main_window(self, win):
+        self._main_window = win
+        # Fast-path: react to Qt activation signals if the platform emits them.
+        self.applicationStateChanged.connect(self._on_state_changed)
+        # Primary (macOS): observe NSApplicationDidBecomeActiveNotification. Clicking
+        # the Dock icon always makes the app active, so this reliably catches the
+        # "reopen with no visible window" case without touching Qt's own delegate.
+        self._install_macos_reopen_hook(win)
+
+    def _install_macos_reopen_hook(self, win):
+        """Restore the window when the Dock icon is clicked (macOS).
+
+        Clicking the Dock icon of an app that has no visible windows makes Cocoa
+        post NSApplicationDidBecomeActiveNotification (and Qt also implements
+        applicationShouldHandleReopen: internally). We observe the notification and
+        re-show our window. This does NOT replace the NSApplication delegate, so
+        Qt's own macOS behaviour stays intact.
+        """
+        if sys.platform != "darwin":
+            return
+        # 1) Primary mechanism: install our own Cocoa delegate that implements
+        #    applicationShouldHandleReopen:hasVisibleWindows: - the canonical
+        #    "user clicked the Dock icon while the app has no visible windows"
+        #    callback. Qt's QApplication does NOT install an NSApplication
+        #    delegate for this (verified: NSApplication.delegate() is None), so
+        #    this fills a gap rather than fighting Qt.
+        if _ZDMReopenDelegate is not None:
+            try:
+                from AppKit import NSApplication
+                ns = NSApplication.sharedApplication()
+                d = _ZDMReopenDelegate.alloc().init()
+                d._zdm_target = self
+                ns.setDelegate_(d)
+                self._reopen_delegate = d
+                _dlog("[init] reopen delegate installed")
+            except Exception as e:
+                _dlog(f"[init] delegate failed: {type(e).__name__}: {e}")
+
+        # 2) Backstop: also observe DidBecomeActive (fires on cmd-tab and when the
+        #    app transitions from background to foreground).
+        try:
+            # NOTE on naming (both of these were wrong before and silently broke
+            # the observer because the AttributeError was swallowed):
+            #   - the selector is...usingBlock_ (not ...handler_)
+            #   - the notification name is the MODULE-LEVEL constant
+            #     NSApplicationDidBecomeActiveNotification (not a method on
+            #     NSApplication)
+            from AppKit import NSApplicationDidBecomeActiveNotification
+            from Foundation import NSNotificationCenter, NSOperationQueue
+
+            def _on_active(note):
+                _dlog("[didBecomeActive] fired")
+                # Defer slightly so the activation state settles before showing.
+                QTimer.singleShot(60, lambda: self._maybe_restore("didBecomeActive"))
+
+            center = NSNotificationCenter.defaultCenter()
+            # NOTE: the correct PyObjC selector is ...usingBlock_ (not ...handler_).
+            # Getting this name wrong raises AttributeError, which we would otherwise
+            # silently swallow -> the observer never gets installed and the Dock
+            # click never restores the window.
+            token = center.addObserverForName_object_queue_usingBlock_(
+                NSApplicationDidBecomeActiveNotification,
+                None,
+                NSOperationQueue.mainQueue(),
+                lambda n: _on_active(n),
+            )
+            self._active_observer = token
+            _dlog("[init] observer installed")
+        except Exception as e:
+            _dlog(f"[init-FAILED] {type(e).__name__}: {e}")
+            self._active_observer = None
+
+    def _on_state_changed(self, state):
+        # Qt.ApplicationActive == 2
+        _dlog(f"[stateChanged] state={state}")
+        if state == 2:
+            self._maybe_restore("stateChanged")
+
+    def _maybe_restore(self, _tag="?"):
+        win = self._main_window
+        if win is None:
+            return
+        # NOTE: on macOS, QWidget.isVisible() only reflects "not explicitly hidden"
+        # and flips to True as soon as show() is called -- even if the window has
+        # not actually been mapped to the screen yet. Trusting isVisible() here
+        # made us skip raising/activating a window that the user could see but
+        # not interact with (greyed out). We therefore treat a visible-but-not-
+        # active window as "needs restoring" too.
+        visible = win.isVisible()
+        minimized = win.isMinimized()
+        is_active = (self.applicationState() == Qt.ApplicationActive)
+        _dlog(f"[restore:{_tag}] visible={visible} minimized={minimized} active={is_active}")
+        try:
+            if minimized:
+                win.setWindowState(
+                    (win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive
+                )
+            elif visible and is_active:
+                # Already on screen and focused - nothing to do.
+                return
+            # Guard: don't force the window up while a modal dialog (e.g. the
+            # settings / new-download sheet) is the active window.
+            if self.activeModalWidget() is not None:
+                return
+            win.show()
+            win.setWindowState(
+                (win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive
+            )
+            win.raise_()
+            win.activateWindow()
+            # NOTE: deliberately NOT calling
+            # NSApplication.activateIgnoringOtherApps_(True) here. Forcing the app
+            # forward that way bypasses the normal macOS activation flow and can
+            # leave the window visible but greyed out / non-interactive, which is
+            # exactly the bug we hit. Qt's own activateWindow() is sufficient.
+        except Exception:
+            pass
 
 
 class PollWorker(QThread):
@@ -342,6 +552,7 @@ class MainWindow(QMainWindow):
             ("全部暂停", lambda: self._bulk("pause_all")),
             ("全部继续", lambda: self._bulk("resume_all")),
             ("清除已完成", lambda: self._bulk("clear_finished")),
+            ("打开网页版", self._open_web),
             ("打开目录", self._open_dir),
             ("设置", self._settings),
         ):
@@ -406,6 +617,7 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         menu.addAction("显示/隐藏", self.toggle_window)
         menu.addAction("新建下载", self._new_download)
+        menu.addAction("打开网页版", self._open_web)
         menu.addAction("打开下载目录", self._open_dir)
         menu.addSeparator()
         self.autostart_action = menu.addAction("开机自启")
@@ -680,6 +892,16 @@ class MainWindow(QMainWindow):
         path = str((self.config or {}).get("download_dir") or os.path.expanduser("~/Downloads"))
         self._run(self.api.open_path, path)
 
+    def _open_web(self):
+        """Open the local web UI (http://127.0.0.1:<port>/) in the default browser."""
+        port = int((self.config or {}).get("port") or self.port or 9000)
+        try:
+            import webbrowser
+            webbrowser.open(f"http://127.0.0.1:{port}/")
+            self.statusBar().showMessage(f"已在浏览器打开网页版：http://127.0.0.1:{port}/")
+        except Exception as e:
+            self.statusBar().showMessage(f"打开网页版失败：{e}")
+
     def _open_selected_file(self, row):
         item = self.table.item(row, 0)
         if not item:
@@ -720,10 +942,16 @@ class MainWindow(QMainWindow):
                 self._run(self.api.add, {"url": token})
 
     def toggle_window(self):
-        if self.isVisible() and not self.isMinimized():
+        # isVisible() can be True while the window is not really on screen / not
+        # focused (macOS show() is async). Treat "visible but not active" as
+        # visible and just re-raise it instead of toggling.
+        app = QApplication.instance()
+        active = (app is not None and app.applicationState() == Qt.ApplicationActive)
+        if self.isVisible() and not self.isMinimized() and active:
             self.hide()
         else:
             self.show()
+            self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
             self.raise_()
             self.activateWindow()
 
@@ -786,7 +1014,7 @@ def main(argv=None) -> int:
         else:
             rest.append(a)
 
-    app = QApplication(sys.argv)
+    app = ZDMApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
@@ -800,6 +1028,7 @@ def main(argv=None) -> int:
 
     api = Api(port)
     win = MainWindow(api, port)
+    app.set_main_window(win)
     guard.on_message(lambda payload: win.wake(payload))
     for token in rest:
         if token.lower().startswith(("http://", "https://")):
