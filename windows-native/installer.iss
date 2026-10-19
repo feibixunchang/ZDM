@@ -44,6 +44,10 @@ Name: "autostart"; Description: "开机自动启动后台服务"; GroupDescripti
 Source: "publish\Zdm.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "publish\web\*"; DestDir: "{app}\web"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "publish\Assets\app.ico"; DestDir: "{app}\Assets"; Flags: ignoreversion
+; 浏览器扩展随安装包一起落盘。Chrome 里「加载已解压的扩展程序」记的是磁盘路径，
+; 目录一旦被移走或删掉，Chrome 会直接丢掉整个扩展条目（不是禁用），工具栏图标也一起消失。
+; 放进安装目录，路径才稳定。
+Source: "publish\extension\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\Assets\app.ico"

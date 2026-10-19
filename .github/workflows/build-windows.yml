@@ -71,6 +71,18 @@ jobs:
           New-Item -ItemType Directory -Force -Path publish/Assets | Out-Null
           Copy-Item Assets/app.ico publish/Assets/app.ico -Force
 
+      # Ship the browser extension inside the installer. Chrome records the
+      # on-disk path of an unpacked extension and drops the whole entry once
+      # that folder disappears, so the path has to live in {app} and be
+      # reinstalled by every upgrade.
+      - name: Stage browser extension
+        shell: pwsh
+        working-directory: windows-native
+        run: |
+          New-Item -ItemType Directory -Force -Path publish/extension | Out-Null
+          Copy-Item ../zdm/extension/* publish/extension -Recurse -Force
+          Get-ChildItem publish/extension | Select-Object -ExpandProperty Name
+
       # -------------------------------------------------------------- package
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y

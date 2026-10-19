@@ -59,7 +59,9 @@ Windows 上除 PyQt5 版之外，还提供一套 **C# / WPF / .NET** 原生客�
 - 注册 `zdm://` 协议，浏览器里点链接可直接把下载任务交给 ZDM；
 - 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`），
   **ZDM 没运行时**，扩展一点下载就能把它拉起来，再把任务接过去；
-- 校验并修复「开机自启」注册项。
+- 校验并修复「开机自启」注册项；
+- 把浏览器扩展解压到 `{app}\extension`（默认 `%LOCALAPPDATA%\Programs\ZDM\extension`），
+  扩展的落盘路径由安装包保证，不再依赖任何临时目录。
 
 安装包参数 `Zdm.exe --register` 可在无界面下重做上述注册（安装器与「设置 → 浏览器自动唤醒」按钮走的是同一段代码）。
 
@@ -73,10 +75,18 @@ Windows 上除 PyQt5 版之外，还提供一套 **C# / WPF / .NET** 原生客�
 ```bash
 cd windows-native
 dotnet publish Zdm.App.csproj -c Release -r win-x64 --self-contained -o publish
+# 安装包会把这份扩展一起打进去，所以必须先落到 publish/extension
+mkdir -p publish/extension && cp -r ../zdm/extension/* publish/extension/
+iscc installer.iss
 ```
 
-打包安装器需要 Inno Setup 6：`iscc installer.iss`（版本号在 `installer.iss` 的 `AppVersion` 与
-`Zdm.App.csproj` 的 `<Version>` 两处保持一致）。
+`iscc` 来自 Inno Setup 6（用户级安装默认在 `%LOCALAPPDATA%\Programs\Inno Setup 6`，
+官方安装包不带简体中文语言文件，需要把 `ChineseSimplified.isl` 放进它的 `Languages` 目录）。
+版本号的唯一来源是 `Zdm.App.csproj` 的 `<Version>`，CI 会自动同步 `installer.iss` 的 `AppVersion`；
+本地打包前记得手动对齐这两处。
+
+**升级提示**：扩展文件装在 `{app}\extension` 里，跨版本升级时该目录会被重写。
+升级前先退出 Chrome，否则 Chrome 可能在目录重建的瞬间把扩展条目丢掉。
 
 ## macOS：真正的原生 App（v1.10.0 起）
 
