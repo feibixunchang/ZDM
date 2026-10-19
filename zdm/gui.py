@@ -549,8 +549,16 @@ class ZDMApplication(QApplication):
     def _on_state_changed(self, state):
         # Qt.ApplicationActive == 2
         _dlog(f"[stateChanged] state={state}")
-        if state == 2:
-            self._maybe_restore("stateChanged")
+        if state != 2:
+            return
+        # On macOS a Dock click is delivered as an app activation, so the
+        # window has to be brought back by hand. On Linux/Windows the window
+        # manager re-maps it itself; reacting to every activation flip here
+        # only steals focus from whatever the user is typing into.
+        if sys.platform != "darwin":
+            _dlog("[stateChanged] ignored (non-macOS: WM restores the window)")
+            return
+        self._maybe_restore("stateChanged")
 
     def _maybe_restore(self, _tag="?"):
         win = self._main_window
@@ -566,6 +574,11 @@ class ZDMApplication(QApplication):
         # window back on screen, so "minimize" looked like a no-op.
         if getattr(win, "_user_minimized", False):
             _dlog(f"[restore:{_tag}] skipped (minimized by user)")
+            return
+        # Same for a window the user closed to the tray on purpose - otherwise
+        # the next activation flipped it straight back open.
+        if getattr(win, "_user_hidden", False):
+            _dlog(f"[restore:{_tag}] skipped (hidden by user)")
             return
         # NOTE: on macOS, QWidget.isVisible() only reflects "not explicitly hidden"
         # and flips to True as soon as show() is called -- even if the window has
@@ -1808,6 +1821,7 @@ class MainWindow(QMainWindow):
         # first click, so activate the app before showing anything.
         activate_app()
         self._user_minimized = False
+        self._user_hidden = False
         self.show()
         self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
         self.raise_()
@@ -1818,6 +1832,7 @@ class MainWindow(QMainWindow):
         # focused (macOS show() is async). Treat "visible but not active" as
         # visible and just re-raise it instead of toggling.
         if self.isVisible() and not self.isMinimized() and app_is_active():
+            self._user_hidden = True
             self.hide()
         else:
             self._show_front()
@@ -1853,6 +1868,7 @@ class MainWindow(QMainWindow):
         if (self.tray is not None and self.tray.isVisible()
                 and _gui_cfg("close_to_tray", False)):
             self._user_minimized = False
+            self._user_hidden = True
             self.hide()
             self.tray.showMessage("ZDM", "已最小化到托盘，右键托盘图标可退出",
                                   QSystemTrayIcon.Information, 2500)
