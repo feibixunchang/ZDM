@@ -152,7 +152,8 @@
 
 <script>
 const $ = s => document.querySelector(s);
-let tasks = [], config = {}, filter = 'all';
+let tasks = [], config = {}, filter = 'all', SVC_VERSION = '';
+fetch('/api/').then(r => r.json()).then(d => { SVC_VERSION = d.version || ''; }).catch(() => {});
 
 const fmtSize = n => {
   n = Number(n) || 0;
@@ -208,7 +209,8 @@ function render(){
         ${canPause ? `<button class="icon" data-a="pause" data-id="${t.id}" title="暂停">⏸</button>` : ''}
         ${canResume ? `<button class="icon" data-a="resume" data-id="${t.id}" title="继续">▶</button>` : ''}
         ${!done ? `<button class="icon" data-a="restart" data-id="${t.id}" title="重新下载">⟳</button>` : ''}
-        ${done ? `<button class="icon" data-a="open" data-id="${t.id}" title="打开文件位置">📂</button>` : ''}
+        ${done ? `<button class="icon" data-a="open" data-id="${t.id}" title="打开文件">📂</button>` : ''}
+        ${done ? `<button class="icon" data-a="reveal" data-id="${t.id}" title="在文件夹中显示">🗂</button>` : ''}
         <button class="icon" data-a="del" data-id="${t.id}" title="删除">✕</button>
       </div></td>
     </tr>`;
@@ -235,7 +237,7 @@ async function refresh(){
   try{
     const st = await (await fetch('/api/state')).json();
     tasks = st.tasks || []; config = st.config || {};
-    $('#svc').textContent = '本地服务已连接 · 端口 ' + (config.port || 9000);
+    $('#svc').textContent = '本地服务已连接 · v' + (SVC_VERSION || '?') + ' · 端口 ' + (config.port || 9000);
     render();
   }catch(e){ $('#svc').textContent = '服务未连接'; }
 }

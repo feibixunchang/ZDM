@@ -90,8 +90,13 @@ foreach ($item in @("zdm", "web", "extension")) {
     if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
     Copy-Item -Recurse -Force (Join-Path $Root $item) $dst
 }
-foreach ($f in @("zdm.py", "gui.py", "README.md", "install.ps1", "install.bat")) {
+foreach ($f in @("zdm.py", "gui.py", "theme.py", "README.md", "install.ps1", "install.bat")) {
     Copy-Item -Force (Join-Path $Root $f) (Join-Path $App $f)
+}
+# theme.py lives next to gui.py (not inside the zdm package); without it the
+# desktop client cannot import its stylesheet and fails to start.
+if (-not (Test-Path (Join-Path $App "theme.py"))) {
+    throw "install.ps1: theme.py 复制失败，桌面端将无法启动"
 }
 Get-ChildItem -Path $App -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -177,7 +182,7 @@ try {
     $reg.SetValue("DisplayIcon", (Join-Path $App "extension\icons\icon.ico"))
     $reg.SetValue("InstallLocation", $App)
     $reg.SetValue("Publisher", "ZDM")
-    $reg.SetValue("DisplayVersion", "1.2.0")
+    $reg.SetValue("DisplayVersion", "1.3.0")
     $reg.SetValue("NoModify", 1)
     $reg.SetValue("NoRepair", 1)
     $reg.Close()

@@ -10,7 +10,7 @@ import sys
 import time
 from typing import Optional
 
-from . import server
+from . import desktop, server
 from .manager import Manager, config_dir, load_config
 
 PID_FILE = os.path.join(config_dir(), "zdm.pid")
@@ -155,6 +155,12 @@ def cmd_add(args) -> int:
         print(f"error: {r.get('error')}")
         return 1
     print(f"queued {r['id']}: {args.url}")
+    # Make sure the user actually sees the download: open the desktop client if
+    # it is not running (the service already does this for extension requests;
+    # the CLI talks to the same API but with auto_show_gui it would be a no-op
+    # only when ZDM is already visible).
+    if load_config().get("auto_show_gui", True):
+        desktop.ensure_desktop([args.url], port)
     return 0
 
 
@@ -242,7 +248,6 @@ def _python_with_qt() -> Optional[str]:
 
 def cmd_gui(args) -> int:
     """Launch the native desktop window (falls back to the web UI)."""
-    import shutil
     import webbrowser
 
     port = _resolve_port(args)
@@ -259,17 +264,14 @@ def cmd_gui(args) -> int:
             if server.ping(port=port):
                 break
 
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    gui = os.path.join(root, "gui.py")
-    py = _python_with_qt()
-    if not py or not os.path.exists(gui):
-        print("PyQt5 不可用，改用浏览器界面")
-        webbrowser.open(f"http://127.0.0.1:{port}/")
+    # desktop.ensure_desktop knows about the macOS app bundle / Windows exe and
+    # wakes an already-running instance instead of starting a second one.
+    desktop._last_launch = 0.0  # explicit request: bypass the throttle
+    if desktop.ensure_desktop([], port):
+        print(f"ZDM 桌面端已启动（端口 {port}）；若已在运行则已激活现有窗口")
         return 0
-    log_path = os.path.join(config_dir(), "gui.log")
-    log = open(log_path, "a", encoding="utf-8")
-    subprocess.Popen([py, gui, str(port)], stdout=log, stderr=log, **_detached())
-    print(f"ZDM 桌面端已启动 (python={py}, port={port})；若已运行则激活现有窗口")
+    print(f"未找到可用的桌面端（{desktop.last_error() or '缺少 PyQt5'}），改用浏览器界面")
+    webbrowser.open(f"http://127.0.0.1:{port}/")
     return 0
 
 
