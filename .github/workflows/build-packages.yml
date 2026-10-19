@@ -1,7 +1,7 @@
 name: build packages
 
 # Builds every platform package:
-#   ubuntu-latest -> Linux .deb + zdm-linux.tar.gz + Windows .exe
+#   ubuntu-22.04  -> self-contained Linux bundle + .deb + portable tar.gz, Windows .exe
 #   macos-latest  -> macOS ZDM.app + ZDM-<version>.dmg (native Mach-O launcher)
 on:
   push:
@@ -16,90 +16,98 @@ permissions:
 
 jobs:
   linux-windows:
-    # Ubuntu has dpkg-deb; Windows packages are assembled here with 7zS.sfx too.
-    runs-on: ubuntu-latest
+    # ubuntu-22.04 (glibc 2.35) is the oldest runner still offered, so the
+    # frozen bundle runs on Ubuntu 22.04+/Debian 12+/Mint 21+. Newer runners
+    # would raise the glibc floor and break those distros.
+    # Ubuntu also has dpkg-deb, and the Windows .exe is assembled here with 7zS.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full dpkg-dev
+          sudo apt-get install -y p7zip-full dpkg-dev xvfb \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libegl1
 
       - name: Show versions
         run: |
           python3 --version
           7z | head -2
           dpkg-deb --version | head -1
+          xvfb-run --help >/dev/null && echo "xvfb ok"
 
-      - name: Build packages
+      - name: Build packages (Linux native bundle + .deb + Windows exe)
         run: python3 build_dist.py
 
       - name: List artifacts
         run: ls -la dist/
 
-      - name: Sanity-check the .deb
+      - name: Verify the .deb is a real self-contained package
         run: |
           set -e
-          # Resolve the freshly built deb explicitly: dist/ may still contain an
-          # older artifact from a previous run, and a glob would match both.
-          DEB=$(ls -t dist/zdm_*_all.deb | head -1)
+          DEB=$(ls -t dist/zdm_*.deb | head -1)
           echo "==> inspecting $DEB"
           dpkg-deb --info "$DEB"
-          dpkg-deb --contents "$DEB" | head -20
-          echo "==> control Version:"
-          dpkg-deb --field "$DEB" Version
+          # The bundle must be inside the package - this is exactly what the old
+          # 87 KB "shell" .deb got wrong.
+          N=$(dpkg-deb --contents "$DEB" | grep -c '/opt/zdm/_internal/' || true)
+          echo "bundled files under /opt/zdm/_internal: $N"
+          test "$N" -gt 100 || { echo "ERROR: no bundled runtime in $DEB"; exit 1; }
+          dpkg-deb --contents "$DEB" | grep -q '/opt/zdm/ZDM$'
+          dpkg-deb --contents "$DEB" | grep -q 'usr/bin/zdm-desktop'
+          # A source-only package would be a few hundred KB. Anything under
+          # 10 MB means the runtime is missing again.
+          SZ=$(stat -c%s "$DEB")
+          echo "deb size: $SZ bytes"
+          test "$SZ" -gt 10000000 || { echo "ERROR: $DEB is too small to contain a runtime"; exit 1; }
+          echo "control version: $(dpkg-deb --field "$DEB" Version)"
+          echo "control arch:    $(dpkg-deb --field "$DEB" Architecture)"
+          echo "installed size:  $(dpkg-deb --field "$DEB" Installed-Size) KB"
+          # No pip / interpreter game in the maintainer scripts any more.
+          if dpkg-deb --info "$DEB" | grep -q postinst; then
+            dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | grep -q "pip install"               && { echo "ERROR: postinst still pip-installs something"; exit 1; }
+          fi
 
-      - name: Verify the .deb installs cleanly (container smoke test)
+      - name: Run the packaged app out of an extracted tree
         run: |
           set -e
-          DEB="$PWD/$(ls -t dist/zdm_*_all.deb | head -1)"
-          # NOTE: pass an absolute path. "apt-get install dist/zdm_x.deb" makes apt
-          # treat "dist" as a *package name* and look for it in the configured
-          # repos -> "Package dist is not available".
-          sudo apt-get install -y "$DEB"
-          # the CLI wrapper must exist and be executable
-          test -x /usr/local/bin/zdm
-          # the desktop entry + icon must be installed
-          test -f /usr/local/share/applications/zdm.desktop
-          test -f /usr/local/share/icons/hicolor/128x128/apps/zdm.png
-          # core engine must import and report its version
-          python3 -c "import sys; sys.path.insert(0,'/usr/local/share/zdm'); import zdm; print('engine version', zdm.__version__)"
-          # the desktop client imports top-level modules that are NOT part of the
-          # zdm package (gui.py imports theme.py). If a packaging list forgets one,
-          # `import theme` fails at startup - verify they are all installed.
-          python3 - <<'PYEOF'
-          import importlib.util as u, sys
-          sys.path.insert(0, '/usr/local/share/zdm')
-          missing = [m for m in ('theme', 'gui') if u.find_spec(m) is None]
-          if missing:
-              print('MISSING top-level modules:', missing); sys.exit(1)
-          import theme
-          assert theme.build_stylesheet(theme.DARK)
-          # desktop.py (auto-launch) and update.py (self-update) live inside the
-          # package; make sure the packaging step really shipped them.
-          from zdm import desktop, update
-          assert update.parse_version('v1.2.3') == (1, 2, 3)
-          assert update.is_newer('1.3.0', '1.2.9')
-          assert callable(desktop.ensure_desktop)
-          print('desktop modules OK (theme + gui + update + desktop)')
-          PYEOF
-          # the version the engine reports must match the package version
-          V=$(python3 -c "import sys;sys.path.insert(0,'/usr/local/share/zdm');import zdm;print(zdm.__version__)")
-          D=$(dpkg-deb --field "$DEB" Version)
-          echo "engine version: $V / deb version: $D"
-          [ "$D" = "$V" ] || { echo "ERROR: version mismatch ($D != $V)"; exit 1; }
-          # CLI must run and show help without a TTY
-          /usr/local/bin/zdm --help | head -5
-          echo "==> .deb install smoke test passed"
+          DEB=$(ls -t dist/zdm_*.deb | head -1)
+          rm -rf /tmp/zdmdeb && mkdir -p /tmp/zdmdeb
+          dpkg-deb -x "$DEB" /tmp/zdmdeb
+          test -x /tmp/zdmdeb/opt/zdm/ZDM
+          file /tmp/zdmdeb/opt/zdm/ZDM
+          /tmp/zdmdeb/opt/zdm/ZDM --selfcheck
+          /tmp/zdmdeb/opt/zdm/ZDM --version
+          /tmp/zdmdeb/opt/zdm/ZDM --help | head -5
+
+      - name: Install the .deb in a clean Debian container (no python, no pip)
+        run: |
+          set -e
+          DEB=$(ls -t dist/zdm_*.deb | head -1)
+          docker run --rm -v "$PWD/$DEB:/tmp/zdm.deb:ro" debian:12 bash -c '
+            set -e
+            apt-get update -qq
+            apt-get install -y -qq /tmp/zdm.deb xvfb >/tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
+            echo "--- installed ---"
+            ls -l /opt/zdm/ZDM /usr/bin/zdm /usr/bin/zdm-desktop
+            /usr/bin/zdm --version
+            /usr/bin/zdm --selfcheck
+            test -f /usr/share/applications/zdm.desktop
+            # the point of the whole exercise: the window opens with no Python
+            timeout 90 xvfb-run -a /usr/bin/zdm-desktop 9123 --smoke
+            echo "desktop client started and quit cleanly under Xvfb"
+          '
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: zdm-packages
           path: |
-            dist/zdm_*_all.deb
-            dist/zdm-linux.tar.gz
+            dist/zdm_*.deb
+            dist/zdm-linux-*.tar.gz
             dist/ZDM-PyQt5-Setup-*.exe
             dist/README.txt
           if-no-files-found: error
@@ -110,10 +118,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/zdm_*_all.deb
-            dist/zdm-linux.tar.gz
+            dist/zdm_*.deb
+            dist/zdm-linux-*.tar.gz
             dist/ZDM-PyQt5-Setup-*.exe
           fail_on_unmatched_files: false
+
   macos:
     # The .dmg needs hdiutil, and ZDM.app's native launcher needs clang +
     # a Python.framework with libpython + headers (both ship with the Xcode

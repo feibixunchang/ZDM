@@ -84,6 +84,11 @@ LIGHT = Palette(
     # hairline around a vibrancy (frosted glass) popup: the menu is transparent
     # on macOS so the NSVisualEffectView behind it shows through.
     glass_border="rgba(0, 0, 0, 0.14)",
+    # On Linux there is no system blur API, so the popup paints this colour
+    # itself at `glass_alpha` opacity (255 = fully solid, for desktops without a
+    # compositing manager).
+    glass_fill="#ffffff",
+    glass_alpha=232,
 )
 
 # Dark theme: neutral slate surfaces, same hue family for accents so the UI keeps
@@ -116,6 +121,8 @@ DARK = Palette(
     selection="#24334f",
     selection_text="#e6e8ec",
     glass_border="rgba(255, 255, 255, 0.18)",
+    glass_fill="#1e2128",
+    glass_alpha=238,
 )
 
 PALETTES = {"light": LIGHT, "dark": DARK}
@@ -169,9 +176,10 @@ QMenu {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: 8
 QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: 6px; color: {p.text}; }}
 QMenu::item:selected {{ background: {p.accent_soft}; color: {p.accent}; }}
 QMenu::separator {{ height: 1px; background: {p.border}; margin: 4px 8px; }}
-/* Frosted-glass popup (macOS only): the widget paints nothing but text and a
-   hairline, the blur itself comes from an NSVisualEffectView placed behind the
-   menu window. Radius must match GLASS_RADIUS in gui.py. */
+/* Frosted-glass popup: the widget paints nothing but text, a hairline and the
+   rounded shape. macOS blurs the desktop behind it with an NSVisualEffectView;
+   on Linux GlassMenu paints {p.glass_fill} at glass_alpha inside this border.
+   Radius must match GLASS_RADIUS in gui.py. */
 QMenu#glassMenu {{ background: transparent; border: 1px solid {p.glass_border};
     border-radius: 12px; padding: 5px; }}
 QMenu#glassMenu::item {{ padding: 7px 24px 7px 14px; border-radius: 7px; color: {p.text}; }}

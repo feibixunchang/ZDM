@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.10.0**（PyQt5 三端 + Windows 原生客户端同版本）
+当前版本：**v1.11.0**（PyQt5 三端 + Windows 原生客户端同版本）
 
 ## 仓库结构
 
@@ -21,24 +21,24 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.10.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.11.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.10.0_all.deb` | `sudo dpkg -i zdm_1.10.0_all.deb`（自动装 PyQt5） |
-| Linux | `zdm-linux.tar.gz` | 免 root：解压后 `./install.sh` |
-| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.10.0.exe` | 双击运行，用户级安装、无需管理员 |
-| Windows（原生） | `ZDM-Setup-1.10.0.exe` | C#/WPF 客户端，双击安装，见下方专节 |
+| Linux | `zdm_1.11.0_amd64.deb` | `sudo apt install ./zdm_1.11.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
+| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.11.0.exe` | 双击运行，用户级安装、无需管理员 |
+| Windows（原生） | `ZDM-Setup-1.11.0.exe` | C#/WPF 客户端，双击安装，见下方专节 |
 | 浏览器扩展 | `ZDM-Connector-1.2.1.zip` | 解压后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-PyQt5-Setup-*.exe` 在 `ubuntu-latest`
 > 上构建，`ZDM-<version>.dmg` 在 `macos-latest` 上构建（由
 > `.github/workflows/build-packages.yml` 驱动），push main 即构建，推 tag 时产物自动挂到对应 Release。
 >
-> macOS 的 `.dmg` 是**自包含**的：Python 运行时与含 PyQt5/PyObjC 的 venv 都嵌在
-> `ZDM.app` 内，目标机器无需预装 Python，拖进 Applications 即可运行。
-> CI 在发布前会自检：launcher 必须是 Mach-O、dyld 能解析内嵌 framework、
-> 图标与版本正确，并真实启动 GUI 存活 12 秒。
->
-> Linux 的 `.deb` 还会在 runner 上真实 `apt install` 一次，校验 CLI、桌面入口与图标。
+> macOS 的 `.dmg` 与 Linux 的 `.deb` 都是**自包含**的：Python 运行时、PyQt5/Qt 与资源全部
+> 打包在产物内，目标机器无需预装 Python、pip 或 `python3-pyqt5`。
+> CI 在发布前会自检：macOS launcher 必须是 Mach-O 且 dyld 能解析内嵌 framework；
+> Linux 的 `ZDM` 必须是 ELF、`--selfcheck` 必须报告内嵌 PyQt5/资源齐全、
+> 所有 `.so` 无未解析依赖，并在 xvfb 里真实启动 GUI；`.deb` 还会在干净容器里
+> `apt install` 一次再跑同样的自检。
 
 每个包内自带 `extension/` 浏览器扩展，装完在 `chrome://extensions` 加载即可接管下载。
 
@@ -49,12 +49,15 @@
 
 ```bash
 python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
+
+# 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
+bash zdm/build_linux_app.sh ./linux-build 1.11.0
 ```
 
-## Windows 原生客户端（v1.10.0）
+## Windows 原生客户端（v1.11.0）
 
 Windows 上除 PyQt5 版之外，还提供一套 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`。
-安装包 `ZDM-Setup-1.10.0.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
+安装包 `ZDM-Setup-1.11.0.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
 
 - 注册 `zdm://` 协议，浏览器里点链接可直接把下载任务交给 ZDM；
 - 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`），
@@ -78,7 +81,7 @@ dotnet publish Zdm.App.csproj -c Release -r win-x64 --self-contained -o publish
 打包安装器需要 Inno Setup 6：`iscc installer.iss`（版本号在 `installer.iss` 的 `AppVersion` 与
 `Zdm.App.csproj` 的 `<Version>` 两处保持一致）。
 
-## macOS：真正的原生 App（v1.10.0 起）
+## macOS：真正的原生 App（v1.11.0 起）
 
 `ZDM.app` 的主程序 `Contents/MacOS/ZDM` 是**用 clang 编译的原生 Mach-O**（源码 `zdm/zdm_launcher.m`），
 它通过 Python C API 把CPython 解释器内嵌进 App 自身的进程，再运行 Qt 客户端——全程只有一个进程，

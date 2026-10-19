@@ -19,7 +19,7 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                         # repo root
 BUILD_DIR="${1:-$(pwd)/macos-build}"
-VERSION="${2:-1.10.0}"
+VERSION="${2:-1.11.0}"
 APP="$BUILD_DIR/ZDM.app"
 STAGE="$BUILD_DIR/dmg-root"
 
@@ -139,7 +139,7 @@ import theme
 assert theme.LIGHT and theme.DARK
 assert theme.build_stylesheet(theme.DARK)
 from zdm import update, desktop
-assert update.is_newer('1.10.0', '1.9.1')
+assert update.is_newer('1.11.0', '1.9.1')
 assert callable(desktop.ensure_desktop)
 print('    theme + gui + update + desktop importable, both palettes render')
 " ) || { echo "ERROR: runtime module import check failed"; exit 1; }
