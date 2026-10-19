@@ -75,6 +75,24 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
+      # Inno ships only English by default; the installer needs the Simplified
+      # Chinese messages file, so pull the official translation.
+      - name: Fetch Chinese language file
+        shell: pwsh
+        run: |
+          $langs = "${env:ProgramFiles(x86)}\Inno Setup 6\Languages"
+          if (-not (Test-Path $langs)) {
+            $langs = "${env:ProgramFiles(x86)}\Inno Setup 7\Languages"
+          }
+          New-Item -ItemType Directory -Force -Path $langs | Out-Null
+
+          $target = Join-Path $langs 'ChineseSimplified.isl'
+          if (Test-Path $target) { Write-Host "already present"; exit 0 }
+
+          $url = 'https://raw.githubusercontent.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/main/ChineseSimplified.isl'
+          Invoke-WebRequest $url -OutFile $target -UseBasicParsing
+          Write-Host "downloaded -> $target"
+
       - name: Build installer
         shell: pwsh
         working-directory: windows-native
