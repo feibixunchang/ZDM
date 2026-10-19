@@ -1,0 +1,153 @@
+<Window x:Class="Zdm.App.SettingsDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Zdm.App"
+        Width="520" SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource Surface}"
+        FontFamily="{StaticResource UiFont}"
+        FontSize="{StaticResource UiFontSize}"
+        ShowInTaskbar="False"
+        Title="设置"
+        Loaded="OnDialogLoaded"
+        Closing="OnDialogClosing">
+        <!--
+          The live theme preview repaints DynamicResource values straight away,
+          but the caption bar is drawn by DWM and needs its own flag, otherwise
+          a dark dialog keeps a white title bar.
+        -->
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>  <!-- appearance -->
+            <RowDefinition Height="Auto"/>  <!-- downloads -->
+            <RowDefinition Height="Auto"/>  <!-- startup / browser handoff -->
+            <RowDefinition Height="Auto"/>  <!-- buttons -->
+        </Grid.RowDefinitions>
+
+        <!-- ============ appearance ============ -->
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="外观" FontWeight="SemiBold" FontSize="14"
+                       Foreground="{DynamicResource TextStrong}" Margin="0,0,0,10"/>
+            <RadioButton x:Name="ThemeAuto" Content="跟随系统（自动切换深浅色）"
+                         GroupName="Theme" Margin="0,0,0,6" Checked="OnThemeChanged"/>
+            <RadioButton x:Name="ThemeLight" Content="浅色" GroupName="Theme"
+                         Margin="0,0,0,6" Checked="OnThemeChanged"/>
+            <RadioButton x:Name="ThemeDark" Content="深色" GroupName="Theme"
+                         Checked="OnThemeChanged"/>
+            <TextBlock Text="切换后立即生效，选择会保存，重启后仍然有效。"
+                       FontSize="12" Foreground="{DynamicResource TextMuted}"
+                       Margin="22,4,0,0"/>
+        </StackPanel>
+
+        <!-- ============ downloads ============ -->
+        <StackPanel Grid.Row="1" Margin="0,20,0,0">
+            <TextBlock Text="下载" FontWeight="SemiBold" FontSize="14"
+                       Foreground="{DynamicResource TextStrong}" Margin="0,0,0,10"/>
+
+            <Grid Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="110"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="下载目录" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextPrimary}"/>
+                <TextBox x:Name="DirBox" Grid.Column="1" Style="{StaticResource AppTextBox}"/>
+                <Button Grid.Column="2" Content="浏览…" Margin="8,0,0,0"
+                        Style="{StaticResource FlatButton}" Click="OnBrowseDir"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="110"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="默认连接数" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextPrimary}"/>
+                <TextBox x:Name="ConnBox" Grid.Column="1" Style="{StaticResource AppTextBox}"
+                         Text="8" ToolTip="每个任务的分片连接数，1-32"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="110"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="同时任务数" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextPrimary}"/>
+                <TextBox x:Name="MaxBox" Grid.Column="1" Style="{StaticResource AppTextBox}"
+                         Text="3" ToolTip="最多同时下载的任务数量"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="110"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="速度限制" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextPrimary}"/>
+                <Grid Grid.Column="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="SpeedBox" Style="{StaticResource AppTextBox}"
+                             Text="0" ToolTip="单位 MB/s，0 表示不限速"/>
+                    <TextBlock Grid.Column="1" Text="MB/s（0 = 不限速）" Margin="10,0,0,0"
+                               VerticalAlignment="Center" Foreground="{DynamicResource TextMuted}"/>
+                </Grid>
+            </Grid>
+        </StackPanel>
+
+        <!-- ============ startup / browser handoff ============ -->
+        <StackPanel Grid.Row="2" Margin="0,20,0,0">
+            <TextBlock Text="启动与浏览器接管" FontWeight="SemiBold" FontSize="14"
+                       Foreground="{DynamicResource TextStrong}" Margin="0,0,0,10"/>
+
+            <CheckBox x:Name="AutoStartBox"
+                      Content="开机时自动启动（静默驻留托盘，不弹窗）"/>
+            <TextBlock Text="开启后登录 Windows 即自动运行 ZDM，浏览器里点下载可以立刻交给它。"
+                       FontSize="12" Foreground="{DynamicResource TextMuted}"
+                       Margin="22,4,0,0" TextWrapping="Wrap"/>
+
+            <Grid Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                    <TextBlock Text="浏览器自动唤醒" Foreground="{DynamicResource TextPrimary}"/>
+                    <TextBlock x:Name="ProtocolLabel" FontSize="12"
+                               Foreground="{DynamicResource TextMuted}"
+                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+                </StackPanel>
+                <Button Grid.Column="1" x:Name="ProtocolButton" Content="重新注册"
+                        Style="{StaticResource FlatButton}" Padding="10,4"
+                        VerticalAlignment="Center" Margin="10,0,0,0"
+                        Click="OnRegisterProtocol"/>
+            </Grid>
+        </StackPanel>
+
+        <!-- ============ buttons ============ -->
+        <Border Grid.Row="3" Margin="0,24,0,0" Padding="0,14,0,0"
+                BorderBrush="{DynamicResource BorderBrushSoft}" BorderThickness="0,1,0,0">
+            <Grid>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="取消" Style="{StaticResource FlatButton}"
+                            Click="OnCancel" Padding="16,6" Margin="0,0,8,0"/>
+                    <Button Content="保存" Style="{StaticResource PrimaryButton}"
+                            Click="OnSave" Padding="20,6" IsDefault="True"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                    <TextBlock x:Name="VersionLabel" FontSize="12"
+                               Foreground="{DynamicResource TextMuted}"/>
+                    <Button x:Name="UpdateLink" Content="检查更新" Margin="10,0,0,0"
+                            Style="{StaticResource FlatButton}" Padding="8,2"
+                            FontSize="12" Click="OnCheckUpdate"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
