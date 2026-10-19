@@ -6,11 +6,16 @@
         Height="720" Width="1180"
         MinHeight="520" MinWidth="940"
         WindowStartupLocation="CenterScreen"
-        Background="{DynamicResource AppBg}"
+        Background="{DynamicResource Surface}"
         FontFamily="{StaticResource UiFont}"
         FontSize="{StaticResource UiFontSize}"
         TextOptions.TextFormattingMode="Display"
         UseLayoutRounding="True">
+        <!--
+          The root background is what DWM paints into the extended title-bar
+          frame. It is Surface (not AppBg) so the caption matches the toolbar
+          strip directly beneath it and the two read as one block.
+        -->
 
     <Grid>
         <Grid.RowDefinitions>
@@ -81,7 +86,8 @@
         </Border>
 
         <!-- ================= filters ================= -->
-        <Border Grid.Row="1" Background="{DynamicResource AppBg}">
+        <!-- Surface, not AppBg: the whole top block reads as one continuous panel -->
+        <Border Grid.Row="1" Background="{DynamicResource Surface}">
             <StackPanel Orientation="Horizontal" Margin="14,10,14,8">
                 <Border x:Name="FilterAll" Background="Transparent" CornerRadius="999" Margin="0,0,6,0">
                     <ToggleButton Content="全部" Tag="all" Style="{StaticResource FilterTab}"
@@ -245,7 +251,7 @@
         </Grid>
 
         <!-- ================= status bar ================= -->
-        <Border Grid.Row="3" Background="{DynamicResource SurfaceAlt}"
+        <Border Grid.Row="3" Background="{DynamicResource Surface}"
                 BorderBrush="{DynamicResource BorderBrushSoft}" BorderThickness="0,1,0,0">
             <Grid Margin="14,6">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">

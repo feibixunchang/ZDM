@@ -5,17 +5,16 @@ using System.Windows.Interop;
 namespace Zdm.App;
 
 /// <summary>
-/// Paints the window frame (title bar and borders).
+/// Paints the window frame (title bar and borders) so it matches the client
+/// area exactly.
 ///
-/// The non-client area is drawn by DWM, not by WPF, so setting the window
-/// background has no effect on it: in dark mode the client area goes dark while
-/// the title bar stays white. Two mechanisms are needed:
-///
-/// 1. `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)` tells DWM to draw
-///    its own chrome dark on Windows 10 1809+ / Windows 11. On older builds the
-///    attribute id differs, so both are tried.
-/// 2. `DwmExtendFrameIntoClientArea` with a dark background brush paints the
-///    frame ourselves, which also covers builds where (1) is ignored.
+/// The non-client area is drawn by DWM, not WPF, so the window background has
+/// no effect on it. Merely setting DWMWA_USE_IMMERSIVE_DARK_MODE makes DWM use
+/// its *own* dark colour, which is a different shade from the app background —
+/// the title bar ends up visibly greyer than the content. To get one uniform
+/// colour the frame is extended into the client area by 1px on each edge and
+/// filled by the window background, with the DWM dark flag still enabled so the
+/// caption text and min/max/close glyphs render light.
 /// </summary>
 public static class TitleBarStyler
 {
@@ -32,9 +31,6 @@ public static class TitleBarStyler
 
     [DllImport("user32.dll")]
     private static extern int GetWindowLong(IntPtr hwnd, int index);
-
-    [DllImport("user32.dll")]
-    private static extern int SetWindowLong(IntPtr hwnd, int index, int value);
 
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_LAYERED = 0x80000;
@@ -54,8 +50,6 @@ public static class TitleBarStyler
         if (hwnd == IntPtr.Zero) return;
 
         var value = dark ? 1 : 0;
-
-        // Windows 11 and recent Windows 10 use id 20; older builds use 19.
         if (DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
                 ref value, sizeof(int)) != 0)
         {
@@ -63,18 +57,18 @@ public static class TitleBarStyler
                 ref value, sizeof(int));
         }
 
-        // With layered windows the client area would otherwise punch a hole in
-        // the frame, so only extend the frame for a solid window.
+        // A layered window would show a hole where the frame is extended.
         var ex = GetWindowLong(hwnd, GWL_EXSTYLE);
-        if ((ex & WS_EX_LAYERED) != 0)
-            return;
+        if ((ex & WS_EX_LAYERED) != 0) return;
 
+        // Extending by1px on every edge lets the window background — already
+        // set to the palette's surface colour — paint the caption area itself,
+        // instead of DWM painting its own grey. In light mode no extension is
+        // needed because the default chrome already matches.
         var margins = dark
-            ? new MARGINS { cyTopHeight = 1, cxRightWidth = 1, cxLeftWidth = 1, cyBottomHeight = 1 }
-            : new MARGINS { cxLeftWidth = 0, cxRightWidth = 0, cyTopHeight = 0, cyBottomHeight = 0 };
+            ? new MARGINS { cxLeftWidth = 1, cxRightWidth = 1, cyTopHeight = 1, cyBottomHeight = 1 }
+            : default;
 
-        // In dark mode the 1px extension is filled by the window background,
-        // which ApplyTheme has already set to the dark surface colour.
         DwmExtendFrameIntoClientArea(hwnd, ref margins);
     }
 }

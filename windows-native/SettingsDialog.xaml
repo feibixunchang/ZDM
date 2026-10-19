@@ -2,14 +2,21 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:Zdm.App"
-        Title="设置"
         Width="520" SizeToContent="Height"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource AppBg}"
         FontFamily="{StaticResource UiFont}"
         FontSize="{StaticResource UiFontSize}"
-        ShowInTaskbar="False">
+        ShowInTaskbar="False"
+        Title="设置"
+        Loaded="OnDialogLoaded"
+        Closing="OnDialogClosing">
+        <!--
+          The live theme preview repaints DynamicResource values straight away,
+          but the caption bar is drawn by DWM and needs its own flag, otherwise
+          a dark dialog keeps a white title bar.
+        -->
 
     <Grid Margin="20">
         <Grid.RowDefinitions>

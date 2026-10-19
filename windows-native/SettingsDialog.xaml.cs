@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Windows;
 using Microsoft.Win32;
 using Zdm.App.Core;
@@ -24,6 +25,11 @@ public partial class SettingsDialog : Window
         _theme = theme;
         _originalMode = theme.Mode;
 
+        // The caption bar is DWM-drawn; re-apply on every theme change so the
+        // preview below flips the dialog chrome together with the content.
+        _theme.Changed += OnThemeChangedForChrome;
+        TitleBarStyler.Apply(this, _theme.IsDark);
+
         VersionLabel.Text = $"当前版本 {AppVersion.Display}";
 
         DirBox.Text = manager.Config.DownloadDir;
@@ -41,6 +47,27 @@ public partial class SettingsDialog : Window
             case AppThemeMode.Dark: ThemeDark.IsChecked = true; break;
             default: ThemeAuto.IsChecked = true; break;
         }
+    }
+
+    private void OnThemeChangedForChrome()
+    {
+        if (!IsLoaded) return;
+        // Must run on the UI thread; ThemeManager.Changed fires from the
+        // dispatcher timer in this app, but guard anyway.
+        if (Dispatcher.CheckAccess())
+            TitleBarStyler.Apply(this, _theme.IsDark);
+        else
+            Dispatcher.BeginInvoke(() => TitleBarStyler.Apply(this, _theme.IsDark));
+    }
+
+    private void OnDialogLoaded(object sender, RoutedEventArgs e)
+        => TitleBarStyler.Apply(this, _theme.IsDark);
+
+    private void OnDialogClosing(object? sender, CancelEventArgs e)
+    {
+        _theme.Changed -= OnThemeChangedForChrome;
+        if (DialogResult != true)
+            _theme.SetMode(_originalMode);
     }
 
     private void OnThemeChanged(object sender, RoutedEventArgs e)
@@ -135,6 +162,8 @@ public partial class SettingsDialog : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        // Safety net for paths that bypass Closing (e.g. an exception).
+        _theme.Changed -= OnThemeChangedForChrome;
         // Covers the title-bar X button, which bypasses OnCancel.
         if (DialogResult != true)
             _theme.SetMode(_originalMode);
