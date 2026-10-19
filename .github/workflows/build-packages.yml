@@ -54,7 +54,10 @@ jobs:
       - name: Verify the .deb installs cleanly (container smoke test)
         run: |
           set -e
-          DEB=$(ls -t dist/zdm_*_all.deb | head -1)
+          DEB="$PWD/$(ls -t dist/zdm_*_all.deb | head -1)"
+          # NOTE: pass an absolute path. "apt-get install dist/zdm_x.deb" makes apt
+          # treat "dist" as a *package name* and look for it in the configured
+          # repos -> "Package dist is not available".
           sudo apt-get install -y "$DEB"
           # the CLI wrapper must exist and be executable
           test -x /usr/local/bin/zdm
