@@ -1,0 +1,69 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- TaskbarIcon lives in Windows.Forms; the icon itself stays native -->
+    <UseWindowsForms>true</UseWindowsForms>
+
+    <RootNamespace>Zdm.App</RootNamespace>
+    <AssemblyName>Zdm</AssemblyName>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Single self-contained exe: no .NET runtime needed on the target machine -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <Version>1.3.0</Version>
+    <Product>ZDM Download Manager</Product>
+    <AssemblyTitle>ZDM 下载管理器</AssemblyTitle>
+    <Company>ZDM</Company>
+    <NeutralLanguage>zh-CN</NeutralLanguage>
+
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <DebugType>embedded</DebugType>
+    <PublishReadyToRun>false</PublishReadyToRun>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      WinForms is only needed for the tray icon. Its implicit usings collide
+      with WPF/BCL type names, so drop them and alias what we actually use.
+      System.Threading.Tasks.TaskStatus also clashes with our own
+      Zdm.App.Core.TaskStatus, which the global alias below resolves once.
+    -->
+    <Using Remove="System.Drawing" />
+    <Using Remove="System.Windows.Forms" />
+    <Using Include="Zdm.App.Core.TaskStatus" Alias="TaskStatus" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Kestrel hosts the local REST API that the browser extension talks to -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+    <Using Include="System.Text.Json" />
+    <Using Include="System.Text.Json.Nodes" />
+    <Using Include="System.Collections.Generic" />
+    <Using Include="System.Linq" />
+    <Using Include="System.Threading" />
+    <Using Include="System.Threading.Tasks" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Assets\app.ico" />
+    <None Include="web\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
