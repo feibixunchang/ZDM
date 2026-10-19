@@ -42,21 +42,22 @@ jobs:
       - name: Sanity-check the .deb
         run: |
           set -e
-          DEB=$(ls dist/zdm_*_all.deb)
+          # Resolve the freshly built deb explicitly: dist/ may still contain an
+          # older artifact from a previous run, and a glob would match both.
+          DEB=$(ls -t dist/zdm_*_all.deb | head -1)
           echo "==> inspecting $DEB"
           dpkg-deb --info "$DEB"
           dpkg-deb --contents "$DEB" | head -20
-          # version in the control file must match the tag we are building
+          echo "==> control Version:"
           dpkg-deb --field "$DEB" Version
 
       - name: Verify the .deb installs cleanly (container smoke test)
         run: |
           set -e
-          DEB=$(ls dist/zdm_*_all.deb)
+          DEB=$(ls -t dist/zdm_*_all.deb | head -1)
           sudo apt-get install -y "$DEB"
           # the CLI wrapper must exist and be executable
           test -x /usr/local/bin/zdm
-          command -v zdm || ls -l /usr/local/bin/zdm
           # the desktop entry + icon must be installed
           test -f /usr/local/share/applications/zdm.desktop
           test -f /usr/local/share/icons/hicolor/128x128/apps/zdm.png
@@ -75,6 +76,7 @@ jobs:
             dist/zdm-linux.tar.gz
             dist/ZDM-Setup-*.exe
             dist/README.txt
+          if-no-files-found: error
 
       # Attach the freshly built packages to the GitHub release when a tag is pushed.
       - name: Attach packages to release

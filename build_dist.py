@@ -259,6 +259,16 @@ def build_macos_zip():
 def main():
     os.makedirs(DIST, exist_ok=True)
     clean_pycache()
+    # Remove previously built artifacts FIRST. Otherwise a stale zdm_1.0.0_all.deb
+    # sitting next to a freshly built zdm_1.1.0_all.deb makes any downstream
+    # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
+    import glob
+    for pat in ("dist/zdm_*_all.deb", "dist/ZDM-Setup-*.exe",
+                "dist/zdm-linux.tar.gz", "dist/zdm-macos.zip"):
+        for stale in glob.glob(os.path.join(ROOT, pat)):
+            if os.path.isfile(stale):
+                os.remove(stale)
+                print(f"    (removed stale {os.path.basename(stale)})")
     # The .deb is a Linux artifact and needs dpkg-deb (not available on macOS).
     # Skip it gracefully so the other packages still build, instead of aborting
     # the whole run on a missing Linux-only tool.
