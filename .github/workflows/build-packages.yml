@@ -65,6 +65,19 @@ jobs:
           test -f /usr/local/share/icons/hicolor/128x128/apps/zdm.png
           # core engine must import and report its version
           python3 -c "import sys; sys.path.insert(0,'/usr/local/share/zdm'); import zdm; print('engine version', zdm.__version__)"
+          # the desktop client imports top-level modules that are NOT part of the
+          # zdm package (gui.py imports theme.py). If a packaging list forgets one,
+          # `import theme` fails at startup - verify they are all installed.
+          python3 - <<'PYEOF'
+          import importlib.util as u, sys
+          sys.path.insert(0, '/usr/local/share/zdm')
+          missing = [m for m in ('theme', 'gui') if u.find_spec(m) is None]
+          if missing:
+              print('MISSING top-level modules:', missing); sys.exit(1)
+          import theme
+          assert theme.build_stylesheet(theme.DARK)
+          print('desktop modules OK (theme + gui present)')
+          PYEOF
           # CLI must run and show help without a TTY
           /usr/local/bin/zdm --help | head -5
           echo "==> .deb install smoke test passed"
