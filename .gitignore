@@ -18,12 +18,18 @@ dock.log
 gui.log
 zdm.log
 
-# 构建中间目录（保留 dist 下的发布包本身）
+# 构建中间目录
 dist/deb_staging/
 dist/zdm-linux/
 dist/zdm-macos/
 dist/zdm-windows/
 .build_win/
+
+# 构建产物：.deb / tarball / .exe 由 CI（GitHub Actions）产出并挂到 Release，
+# 不入库，避免仓库里堆积同名的历史版本。
+dist/*.deb
+dist/*.tar.gz
+dist/*.exe
 
 # 系统
 .DS_Store
