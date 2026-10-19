@@ -317,21 +317,26 @@ public partial class MainWindow : Window
     {
         if (Selected is not { } row) return;
         var path = Path.Combine(row.Directory, row.Filename);
-        if (!File.Exists(path))
+
+        if (row.Status != Core.TaskStatus.Completed)
         {
             MessageBox.Show(this, "文件尚未下载完成。", "ZDM 下载管理器",
                 MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        try
+        if (!File.Exists(path))
         {
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"无法打开文件：\n{ex.Message}", "ZDM 下载管理器",
+            MessageBox.Show(this, $"找不到文件：\n{path}", "ZDM 下载管理器",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
         }
+
+        // Report failure instead of swallowing it: a menu item that silently
+        // does nothing is indistinguishable from a broken app.
+        if (!Core.Human.OpenFile(path))
+            MessageBox.Show(this,
+                $"无法打开此文件。系统可能没有为它设置默认程序。\n\n{path}",
+                "ZDM 下载管理器", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     /// <summary>Reveal the file in Explorer, or open the folder when incomplete.</summary>
@@ -341,7 +346,11 @@ public partial class MainWindow : Window
         var path = row.Status == Core.TaskStatus.Completed
             ? Path.Combine(row.Directory, row.Filename)
             : row.Directory;
-        Human.OpenInExplorer(path);
+
+        if (!Core.Human.OpenInExplorer(path))
+            MessageBox.Show(this,
+                $"无法打开所在位置：\n{path}", "ZDM 下载管理器",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private void OnCopyUrl(object sender, RoutedEventArgs e)
@@ -365,6 +374,14 @@ public partial class MainWindow : Window
     /// menu always acts on the row under the cursor rather than a stale
     /// selection.
     /// </summary>
+    /// <summary>
+    /// Right-click on a row selects it and enables/disables the row actions
+    /// before WPF shows the menu.
+    ///
+    /// Deliberately does NOT touch Visibility or Placement: a ContextMenu
+    /// assigned to DataGrid.ContextMenu is opened by WPF itself, and forcing
+    /// it visible here fights that flow and leaves the menu inert.
+    /// </summary>
     private void OnGridContextMenu(object sender, ContextMenuEventArgs e)
     {
         if (e.OriginalSource is not DependencyObject src) return;
@@ -372,9 +389,8 @@ public partial class MainWindow : Window
         var row = Ancestor<DataGridRow>(src);
         if (row?.Item is not TaskRow hit)
         {
-            // Clicked empty space: clear the selection and show no row menu.
+            // Clicked empty space: clear the selection so no row action applies.
             TaskGrid.SelectedItem = null;
-            RowMenu.Visibility = Visibility.Collapsed;
             return;
         }
 
@@ -382,13 +398,14 @@ public partial class MainWindow : Window
         TaskGrid.Focus();
 
         // "Open file" only makes sense once the file exists on disk.
-        var fileMenu = RowMenu.Items.OfType<MenuItem>()
-            .FirstOrDefault(m => m.Header as string == "打开文件");
-        if (fileMenu is not null)
-            fileMenu.IsEnabled = hit.Status == Core.TaskStatus.Completed;
-
-        RowMenu.PlacementTarget = TaskGrid;
-        RowMenu.Visibility = Visibility.Visible;
+        foreach (var item in RowMenu.Items.OfType<MenuItem>())
+        {
+            // Only "open file" is conditional; everything else stays available.
+            if (item.Header as string == "打开文件")
+                item.IsEnabled = hit.Status == Core.TaskStatus.Completed;
+            else
+                item.IsEnabled = true;
+        }
     }
 
     private static T? Ancestor<T>(DependencyObject node) where T : DependencyObject
