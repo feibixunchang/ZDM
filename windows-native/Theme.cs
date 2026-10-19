@@ -157,6 +157,22 @@ public sealed class Palette
 
 public static class Palettes
 {
+    /// <summary>
+    /// Colour for records whose file no longer exists. Deliberately outside the
+    /// palette pair so it reads as "stale" in both themes without competing
+    /// with the real status colours.
+    /// </summary>
+    public static readonly System.Windows.Media.SolidColorBrush Missing =
+        MakeFrozen(System.Windows.Media.Color.FromRgb(0x9A, 0xA3, 0xAF));
+
+    private static System.Windows.Media.SolidColorBrush MakeFrozen(
+        System.Windows.Media.Color c)
+    {
+        var b = new System.Windows.Media.SolidColorBrush(c);
+        b.Freeze();
+        return b;
+    }
+
     public static readonly Palette Light = new()
     {
         Window = "#f5f7fa",

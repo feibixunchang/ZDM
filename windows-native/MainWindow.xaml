@@ -136,8 +136,13 @@
                             <DataTemplate>
                                 <StackPanel>
                                     <TextBlock Text="{Binding Filename}" FontWeight="SemiBold"
-                                               Foreground="{DynamicResource TextPrimary}"
+                                               Foreground="{Binding FilenameBrush}"
                                                TextTrimming="CharacterEllipsis"/>
+                                    <!-- Shown only when the completed file is gone -->
+                                    <TextBlock Text="⚠ 文件已不存在"
+                                               FontSize="11" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource StatusPaused}"
+                                               Visibility="{Binding ShowMissingHint, Converter={StaticResource BoolToVis}}"/>
                                     <TextBlock Text="{Binding Url}" FontSize="11"
                                                Foreground="{DynamicResource TextMuted}"
                                                TextTrimming="CharacterEllipsis"/>

@@ -90,6 +90,9 @@ public partial class MainWindow : Window
         {
             Poll();
             UpdateTabStyles();
+            // ApplyTheme runs in the constructor, before the window has a usable
+            // HWND, so the frame styling has to be repeated once it exists.
+            TitleBarStyler.Apply(this, _theme.IsDark);
             if (autoStart) return;
             Activate();
             UrlBox.Focus();
@@ -148,6 +151,11 @@ public partial class MainWindow : Window
         Put("StatusError", p.StatusBrush("error"));
         Put("StatusQueued", p.StatusBrush("queued"));
         Put("StatusMerging", p.StatusBrush("merging"));
+
+        // The title bar is drawn by DWM and ignores the WPF background, so it
+        // needs its own dark/light flag; otherwise the chrome stays white while
+        // the rest of the window goes dark.
+        TitleBarStyler.Apply(this, _theme.IsDark);
 
         // Status brushes are captured by each row object rather than resolved
         // through DynamicResource, so rebuild the visible rows to pick up the
