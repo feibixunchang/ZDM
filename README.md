@@ -26,11 +26,16 @@
 | Linux | `zdm-linux.tar.gz` | 免 root：解压后 `./install.sh` |
 | Windows | `ZDM-Setup-1.1.0.exe` | 双击运行，用户级安装、无需管理员 |
 
-> **自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-Setup-*.exe` 由 GitHub Actions
-> （`.github/workflows/build-packages.yml`）在每次 push main 与推 tag 时自动构建，
-> 推 tag 时产物直接挂到对应 Release。CI 会在容器里真实安装一次 `.deb`，
-> 校验 CLI、桌面入口与图标后才发布。
-> macOS 的 `.dmg` 依赖 `hdiutil` 与 `clang`，需在 macOS 上构建后提交到 `dist/`。
+> **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-Setup-*.exe` 在 `ubuntu-latest`
+> 上构建，`ZDM-<version>.dmg` 在 `macos-latest` 上构建（由
+> `.github/workflows/build-packages.yml` 驱动），push main 即构建，推 tag 时产物自动挂到对应 Release。
+>
+> macOS 的 `.dmg` 是**自包含**的：Python 运行时与含 PyQt5/PyObjC 的 venv 都嵌在
+> `ZDM.app` 内，目标机器无需预装 Python，拖进 Applications 即可运行。
+> CI 在发布前会自检：launcher 必须是 Mach-O、dyld 能解析内嵌 framework、
+> 图标与版本正确，并真实启动 GUI 存活 12 秒。
+>
+> Linux 的 `.deb` 还会在 runner 上真实 `apt install` 一次，校验 CLI、桌面入口与图标。
 
 每个包内自带 `extension/` 浏览器扩展，装完在 `chrome://extensions` 加载即可接管下载。
 

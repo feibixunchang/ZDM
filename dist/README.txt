@@ -22,9 +22,12 @@ ZDM 安装包 — v1.1.0
    - ZDM-Setup-1.1.0.exe    ← 双击运行，用户级安装、无需管理员
                               （自动检测/安装 Python 与 PyQt5）
 
-注：.deb / zdm-linux.tar.gz / .exe 由 GitHub Actions 自动构建并挂到
-    GitHub Release（推 tag 即自动发布）。.dmg 依赖 hdiutil 与 clang，
-    需在 macOS 上构建后提交到 dist/。
+注：全部平台安装包均由 GitHub Actions 自动构建：.deb / tarball / .exe 在
+    ubuntu-latest 上产出，.dmg 在 macos-latest 上产出（zdm/build_macos_app.sh），
+    推 tag 即自动挂到 GitHub Release。
+
+    macOS 的 ZDM.app 是**自包含**的：Python 运行时 + 含 PyQt5/PyObjC 的 venv
+    都嵌在包内，目标机器无需预装 Python，拖进 Applications 即可运行。
 
 安装后可在桌面端「设置」或托盘图标右键菜单里，随时开关「开机自启」与「退出」。
 浏览器扩展：加载安装目录下的 extension/ 文件夹即可接管下载。
