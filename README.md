@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.10.0**（PyQt5 三端 + Windows 原生客户端同版本）
+当前版本：**v1.10.1**（PyQt5 三端 + Windows 原生客户端同版本）
 
 ## 仓库结构
 
@@ -21,12 +21,12 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.10.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.10.1.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.10.0_all.deb` | `sudo dpkg -i zdm_1.10.0_all.deb`（自动装 PyQt5） |
+| Linux | `zdm_1.10.1_all.deb` | `sudo dpkg -i zdm_1.10.1_all.deb`（自动装 PyQt5） |
 | Linux | `zdm-linux.tar.gz` | 免 root：解压后 `./install.sh` |
-| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.10.0.exe` | 双击运行，用户级安装、无需管理员 |
-| Windows（原生） | `ZDM-Setup-1.10.0.exe` | C#/WPF 客户端，双击安装，见下方专节 |
+| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.10.1.exe` | 双击运行，用户级安装、无需管理员 |
+| Windows（原生） | `ZDM-Setup-1.10.1.exe` | C#/WPF 客户端，双击安装，见下方专节 |
 | 浏览器扩展 | `ZDM-Connector-1.2.1.zip` | 解压后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-PyQt5-Setup-*.exe` 在 `ubuntu-latest`
@@ -51,10 +51,10 @@
 python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
 ```
 
-## Windows 原生客户端（v1.10.0）
+## Windows 原生客户端（v1.10.1）
 
 Windows 上除 PyQt5 版之外，还提供一套 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`。
-安装包 `ZDM-Setup-1.10.0.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
+安装包 `ZDM-Setup-1.10.1.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
 
 - 注册 `zdm://` 协议，浏览器里点链接可直接把下载任务交给 ZDM；
 - 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`），
@@ -88,7 +88,7 @@ iscc installer.iss
 **升级提示**：扩展文件装在 `{app}\extension` 里，跨版本升级时该目录会被重写。
 升级前先退出 Chrome，否则 Chrome 可能在目录重建的瞬间把扩展条目丢掉。
 
-## macOS：真正的原生 App（v1.10.0 起）
+## macOS：真正的原生 App（v1.10.1 起）
 
 `ZDM.app` 的主程序 `Contents/MacOS/ZDM` 是**用 clang 编译的原生 Mach-O**（源码 `zdm/zdm_launcher.m`），
 它通过 Python C API 把CPython 解释器内嵌进 App 自身的进程，再运行 Qt 客户端——全程只有一个进程，
