@@ -18,6 +18,36 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from zdm import autostart  # noqa: E402
+import theme as _theme  # noqa: E402
+
+# Global theme manager. Created lazily in main() (it needs the QApplication),
+# but these helpers let widgets pull the active palette without depending on it.
+_THEME_MANAGER = None
+
+
+def theme_manager():
+    """Return the process-wide ThemeManager (None before main() sets it up)."""
+    return _THEME_MANAGER
+
+
+def palette():
+    """Active colour palette for the current light/dark mode."""
+    # A live preview from the Settings dialog takes precedence until saved.
+    app = _THEME_MANAGER.qapp if _THEME_MANAGER is not None else None
+    win = getattr(app, "_main_window", None) if app is not None else None
+    if win is not None:
+        preview = getattr(win, "_theme_preview", None)
+        if preview == "dark":
+            return _theme.DARK
+        if preview == "light":
+            return _theme.LIGHT
+    if _THEME_MANAGER is not None:
+        return _THEME_MANAGER.palette()
+    return _theme.LIGHT if not _theme.system_prefers_dark() else _theme.DARK
+
+
+def build_style_sheet():
+    return _theme.build_stylesheet(palette())
 
 APP_NAME = "ZDM"
 ICON = os.path.join(
@@ -265,6 +295,25 @@ class ZDMApplication(QApplication):
     def __init__(self, argv):
         super().__init__(argv)
         self._main_window = None
+        self._theme_hooks = []
+
+    def add_theme_hook(self, fn):
+        """Register a callback invoked after the light/dark palette changes."""
+        self._theme_hooks.append(fn)
+
+    def notify_theme_changed(self):
+        """Let colour-aware widgets (progress bars, table text) re-read colours."""
+        for fn in list(self._theme_hooks):
+            try:
+                fn()
+            except Exception:
+                pass
+        win = self._main_window
+        if win is not None:
+            try:
+                win.refresh_theme()
+            except Exception:
+                pass
         self._dock_watch = None
         self._reopen_delegate = None
         self._active_observer = None
@@ -429,40 +478,33 @@ class OpWorker(QThread):
             self.done.emit("err", str(e))
 
 
-STYLE = """
-QMainWindow, QDialog { background: #f5f7fa; }
-QWidget { font-size: 13px; color: #1f2937; }
-QToolBar { background: #ffffff; border: none; border-bottom: 1px solid #e3e8ef; padding: 8px 10px; spacing: 6px; }
-QToolBar QLabel { color: #6b7280; }
-QLineEdit, QSpinBox { background: #ffffff; border: 1px solid #e3e8ef; border-radius: 7px; padding: 6px 9px; }
-QLineEdit:focus, QSpinBox:focus { border-color: #2563eb; }
-QPushButton { background: #ffffff; border: 1px solid #e3e8ef; border-radius: 7px; padding: 5px 12px; }
-QPushButton:hover { background: #f3f4f6; }
-QPushButton:pressed { background: #e8ecf1; }
-QPushButton:checked { background: #eff4ff; border-color: #c7d7fe; color: #2563eb; font-weight: 600; }
-QTableWidget { background: #ffffff; border: 1px solid #e3e8ef; border-radius: 10px; }
-QTableWidget::item { border-bottom: 1px solid #f1f3f7; padding: 6px 8px; }
-QTableWidget::item:selected { background: #eff4ff; color: #1f2937; }
-QHeaderView::section { background: #fafbfc; border: none; border-bottom: 1px solid #e3e8ef;
-    padding: 9px 8px; color: #6b7280; font-weight: 600; }
-QStatusBar { background: #ffffff; border-top: 1px solid #e3e8ef; color: #6b7280; }
-QProgressBar { border: none; background: transparent; }
-QPushButton#primary { background: #2563eb; border: 1px solid #2563eb; color: #ffffff;
-    font-weight: 600; padding: 6px 16px; }
-QPushButton#primary:hover { background: #1d4fd8; border-color: #1d4fd8; }
-QPushButton#primary:pressed { background: #1a45bf; }
-"""
+# The stylesheet is no longer a fixed string: it is rendered from the active
+# theme palette (see theme.py) so light and dark mode stay perfectly in sync.
+# `build_style_sheet()` is the single source of truth; nothing here hardcodes a
+# colour, which is what keeps the two themes visually consistent.
+STYLE = _theme.build_stylesheet(_theme.LIGHT)
 
 
 class ProgressCell(QWidget):
-    """Percent text above a slim rounded bar."""
+    """Percent text above a slim rounded bar.
 
-    def __init__(self, pct: float, text: str, color: str = "#2563eb"):
+    Colours come from the active theme palette so the bar, the track and the
+    label all follow light/dark mode automatically.
+    """
+
+    def __init__(self, pct: float, text: str, color: str = ""):
         super().__init__()
         self.pct = max(0.0, min(100.0, pct))
         self.text = text
-        self.color = QColor(color)
+        self.color = QColor(color or palette().status_downloading)
+        self._palette = palette()
         self.setMinimumHeight(34)
+
+    def apply_palette(self):
+        """Re-read the palette after a theme switch and repaint."""
+        self._palette = palette()
+        self.setMinimumHeight(34)
+        self.update()
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -471,11 +513,11 @@ class ProgressCell(QWidget):
         f = QFont(self.font())
         f.setPointSizeF(8.5)
         p.setFont(f)
-        p.setPen(QColor("#4b5563"))
+        p.setPen(QColor(self._palette.text_muted))
         p.drawText(QRect(r.left(), r.top() + 2, r.width(), 16), Qt.AlignLeft | Qt.AlignVCenter, self.text)
         bar = QRect(r.left(), r.top() + 21, r.width(), 6)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#e8ecf1"))
+        p.setBrush(QColor(self._palette.track))
         p.drawRoundedRect(bar, 3, 3)
         w = int(bar.width() * self.pct / 100.0)
         if w > 0:
@@ -683,18 +725,29 @@ class MainWindow(QMainWindow):
             return [t for t in self.tasks if t["status"] in ("downloading", "queued", "merging")]
         return [t for t in self.tasks if t["status"] == f]
 
+    def refresh_theme(self):
+        """Re-read the palette after a light/dark switch and repaint everything."""
+        # ProgressCell paints with QColor() so it must be told to reload.
+        for cell in self.table.findChildren(ProgressCell):
+            cell.apply_palette()
+        # Table text colours (status / size / speed) are set in _render.
+        self._render()
+
     def _render(self):
         items = self._visible()
         items.sort(key=lambda t: t["created_at"], reverse=True)
         self.table.setRowCount(len(items))
+        pal = palette()
         colors = {
-            "downloading": "#2563eb", "completed": "#16a34a", "paused": "#d97706",
-            "error": "#dc2626", "queued": "#94a3b8", "canceled": "#94a3b8", "merging": "#7c3aed",
+            "downloading": pal.status_downloading, "completed": pal.status_completed,
+            "paused": pal.status_paused, "error": pal.status_error,
+            "queued": pal.status_queued, "canceled": pal.status_canceled,
+            "merging": pal.status_merging,
         }
         for row, t in enumerate(items):
             pct = min(100.0, t.get("progress") or 0)
             status = t["status"]
-            color = colors.get(status, "#2563eb")
+            color = colors.get(status, pal.status_downloading)
 
             name_item = QTableWidgetItem(t["filename"])
             name_item.setToolTip(t["url"])
@@ -706,7 +759,7 @@ class MainWindow(QMainWindow):
             size_item = QTableWidgetItem(
                 f"{fmt_size(t['downloaded'])} / {fmt_size(t['size']) if t['size'] else '未知'}"
             )
-            size_item.setForeground(QColor("#6b7280"))
+            size_item.setForeground(QColor(pal.text_muted))
             size_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.table.setItem(row, 1, size_item)
 
@@ -719,7 +772,7 @@ class MainWindow(QMainWindow):
 
             speed_text = f"{fmt_size(t['speed'])}/s" if status == "downloading" else "—"
             speed_item = QTableWidgetItem(speed_text)
-            speed_item.setForeground(QColor("#374151"))
+            speed_item.setForeground(QColor(pal.text_strong))
             self.table.setItem(row, 3, speed_item)
 
             st_item = QTableWidgetItem(STATUS_TEXT.get(status, status))
@@ -865,11 +918,23 @@ class MainWindow(QMainWindow):
         auto.setChecked(bool(cfg.get("auto_resume", True)))
         autostart_cb = QCheckBox("开机自动启动 ZDM 服务")
         autostart_cb.setChecked(autostart.is_enabled())
+        # ---- appearance: follow the OS appearance by default ----
+        appearance = QComboBox()
+        for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
+            appearance.addItem(label, key)
+        cur_mode = theme_manager().mode if theme_manager() else "auto"
+        idx = appearance.findData(cur_mode)
+        appearance.setCurrentIndex(idx if idx >= 0 else 0)
+        # Live preview so the user sees the effect before saving.
+        appearance.currentIndexChanged.connect(
+            lambda _i: self._preview_theme(appearance.currentData())
+        )
         form.addRow("下载目录", row)
         form.addRow("单任务连接数", conns)
         form.addRow("同时下载任务数", active)
         form.addRow("全局限速", limit)
         form.addRow("代理", proxy)
+        form.addRow("外观（深浅色）", appearance)
         form.addRow("服务端口（重启服务后生效）", port)
         form.addRow("", auto)
         form.addRow("", autostart_cb)
@@ -886,7 +951,19 @@ class MainWindow(QMainWindow):
         bl.addWidget(box)
         form.addRow(btn_row)
         if dlg.exec_() != QDialog.Accepted:
+            # Discard the live preview and restore the persisted appearance.
+            self._theme_preview = None
+            tm = theme_manager()
+            if tm is not None:
+                tm.apply()
             return
+        # Persist the chosen appearance (and apply it if it changed).
+        self._theme_preview = None
+        tm = theme_manager()
+        if tm is not None:
+            chosen = appearance.currentData()
+            if chosen and chosen != tm.mode:
+                tm.set_mode(chosen)
         try:
             autostart.set_enabled(autostart_cb.isChecked())
         except Exception as e:
@@ -903,6 +980,28 @@ class MainWindow(QMainWindow):
         if getattr(self, "autostart_action", None) is not None:
             self.autostart_action.setChecked(autostart.is_enabled())
         self.statusBar().showMessage("设置已保存")
+
+    def _preview_theme(self, mode: str):
+        """Live-preview an appearance without persisting it (Settings dialog)."""
+        tm = theme_manager()
+        if tm is None or mode not in ("auto", "light", "dark"):
+            return
+        # Temporarily override the resolved mode; the choice is only written to
+        # disk when the user hits Save, so Cancel really reverts.
+        self._theme_preview = mode
+        tm._last_dark = (mode == "dark") if mode != "auto" else tm._last_dark
+        app = QApplication.instance()
+        if app is None:
+            return
+        if mode == "auto":
+            p = tm.palette()
+        else:
+            p = _theme.DARK if mode == "dark" else _theme.LIGHT
+        app.setStyleSheet(_theme.build_stylesheet(p))
+        app.setPalette(_theme._qt_palette(p))
+        notify = getattr(app, "notify_theme_changed", None)
+        if callable(notify):
+            notify()
 
     def _open_dir(self):
         path = str((self.config or {}).get("download_dir") or os.path.expanduser("~/Downloads"))
@@ -1034,7 +1133,16 @@ def main(argv=None) -> int:
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLE)
+
+    # Light/dark theme: follows the OS appearance by default, and the user can
+    # override it in Settings. Applying the palette before any widget is created
+    # avoids a visible light -> dark flash on startup.
+    global _THEME_MANAGER
+    _THEME_MANAGER = _theme.ThemeManager(app)
+    _THEME_MANAGER.prime()
+    app.setStyleSheet(build_style_sheet())
+    app.setPalette(_theme._qt_palette(palette()))
+    _THEME_MANAGER.watch_system()
 
     guard = SingleApp(f"zdm-gui-{port}")
     if guard.already:

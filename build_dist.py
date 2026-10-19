@@ -2,9 +2,9 @@
 """Build distributable packages for ZDM on all three platforms.
 
 Outputs (into ./dist):
-  - zdm_1.1.0_all.deb          Linux  (apt/dpkg installable, real .deb)
+  - zdm_1.2.0_all.deb          Linux  (apt/dpkg installable, real .deb)
   - zdm-linux.tar.gz           Linux  (fallback, user-level, no root)
-  - ZDM-Setup-1.1.0.exe        Windows (.exe self-extracting installer, no admin)
+  - ZDM-Setup-1.2.0.exe        Windows (.exe self-extracting installer, no admin)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
 The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
 SFX = os.path.join(ROOT, "7zS.sfx")
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def which(cmd):
@@ -260,7 +260,7 @@ def main():
     os.makedirs(DIST, exist_ok=True)
     clean_pycache()
     # Remove previously built artifacts FIRST. Otherwise a stale zdm_1.0.0_all.deb
-    # sitting next to a freshly built zdm_1.1.0_all.deb makes any downstream
+    # sitting next to a freshly built zdm_1.2.0_all.deb makes any downstream
     # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
     import glob
     for pat in ("dist/zdm_*_all.deb", "dist/ZDM-Setup-*.exe",
