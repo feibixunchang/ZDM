@@ -1,8 +1,8 @@
-ZDM 三端安装包 — v1.3.0
+ZDM 三端安装包 — v1.10.0
 ====================
 
 1) macOS（推荐）
-   - ZDM-1.3.0.dmg          ← 双击挂载后把 ZDM.app 拖进 Applications
+   - ZDM-1.10.0.dmg          ← 双击挂载后把 ZDM.app 拖进 Applications
    - zdm-macos.zip          ← 解压后运行 bash install.sh
                               （自动生成 ~/Applications/ZDM.app + 登录自启）
    dmg 内含：ZDM.app、extension/（浏览器扩展）、安装与使用说明.md
@@ -16,14 +16,15 @@ ZDM 三端安装包 — v1.3.0
      ~/Library/Application Support/ZDM/extension
 
 2) Linux
-   - zdm_1.3.0_all.deb      ← sudo dpkg -i zdm_1.3.0_all.deb（自动安装 PyQt5）
+   - zdm_1.10.0_all.deb      ← sudo dpkg -i zdm_1.10.0_all.deb（自动安装 PyQt5）
    - zdm-linux.tar.gz       ← 免 root：解压后 ./install.sh
 
 3) Windows
-   - ZDM-Setup-1.3.0.exe    ← 双击运行，用户级安装、无需管理员
-                              （自动检测/安装 Python 与 PyQt5）
+   - ZDM-PyQt5-Setup-1.10.0.exe  ← PyQt5 版，双击运行，用户级安装、无需管理员
+                                  （自动检测/安装 Python 与 PyQt5）
+   - ZDM-Setup-1.10.0.exe        ← 原生客户端（C#/WPF，推荐），双击安装
 
-本版新增（v1.3.0）：
+本版新增（v1.10.0）：
   · 主页面工具栏改为 ⏸ / ▶ 图标按钮（全部暂停 / 全部继续），托盘菜单同步
   · 「打开」打开下载的文件本身（.dmg 直接进安装界面），另设「目录」定位文件
   · 桌面端未运行时，浏览器扩展 / zdm add 发起下载会自动拉起窗口
