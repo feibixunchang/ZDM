@@ -16,19 +16,21 @@
 | `docs/` | 安装与使用说明文档 |
 | `build_dist.py` | 打包脚本：重新生成 `dist/` 下各平台安装包 |
 
-## 安装包（直接下载使用）
+## 安装包（推荐从 [Releases](https://github.com/feibixunchang/ZDM/releases) 下载）
 
-`dist/` 目录内含：
+| 平台 | 安装包 | 安装方式 |
+|---|---|---|
+| macOS | `ZDM-1.1.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
+| Linux | `zdm_1.1.0_all.deb` | `sudo dpkg -i zdm_1.1.0_all.deb`（自动装 PyQt5） |
+| Linux | `zdm-linux.tar.gz` | 免 root：解压后 `./install.sh` |
+| Windows | `ZDM-Setup-1.1.0.exe` | 双击运行，用户级安装、无需管理员 |
 
-- **`ZDM-1.1.0.dmg`** — **macOS 推荐**：双击挂载后把 `ZDM.app` 拖进 Applications 即可
-  （内含浏览器扩展与中文安装说明）
-- `zdm-macos.zip` — macOS 源码包（解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启）
-- `zdm-linux.tar.gz` — Linux 免 root 安装（解压后 `./install.sh`）
-- `zdm_1.0.0_all.deb` — Linux deb 包（`sudo dpkg -i`）
-- `zdm-windows.zip` — Windows（右键 `install.ps1` 用 PowerShell 运行，或双击 `install.bat`）
-
-> `.dmg` 与 macOS 相关代码改动会随每次发布同步；`.deb` 需在 Linux 上构建、
-> Windows `.exe` 需用 7-Zip 的 `7zS.sfx` 构建，两者由对应平台的构建流程产出。
+> **自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-Setup-*.exe` 由 GitHub Actions
+> （`.github/workflows/build-packages.yml`）在每次 push main 与推 tag 时自动构建，
+> 推 tag 时产物直接挂到对应 Release。CI 会在容器里真实安装一次 `.deb`，
+> 校验 CLI、桌面入口与图标后才发布。
+> macOS 的 `.dmg` 依赖 `hdiutil` 与 `clang`，需在 macOS 上构建后提交到 `dist/`。
 
 每个包内自带 `extension/` 浏览器扩展，装完在 `chrome://extensions` 加载即可接管下载。
 
@@ -38,7 +40,7 @@
 ## 构建
 
 ```bash
-python3 build_dist.py   # 在 dist/ 重新生成四个安装包
+python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
 ```
 
 ## macOS：真正的原生 App（v1.1.0 起）
