@@ -22,7 +22,7 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
 
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <Product>ZDM Download Manager</Product>
     <AssemblyTitle>ZDM 下载管理器</AssemblyTitle>
     <Company>ZDM</Company>
@@ -31,6 +31,14 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <DebugType>embedded</DebugType>
     <PublishReadyToRun>false</PublishReadyToRun>
+
+    <!--
+      WFO0003: WinForms asks that DPI live in code rather than app.manifest.
+      The tray icon is the only WinForms piece here; the window itself is WPF,
+      which reads its PerMonitorV2 settings from the manifest. The manifest
+      entry is deliberate, so the warning is not actionable.
+    -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

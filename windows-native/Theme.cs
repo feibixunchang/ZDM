@@ -157,12 +157,6 @@ public sealed class Palette
 
 public static class Palettes
 {
-    /// <summary>
-    /// The palette currently in effect. Rows read status colours from here so
-    /// they follow a theme switch; ThemeManager keeps it in sync.
-    /// </summary>
-    public static Palette Current { get; internal set; } = Light;
-
     public static readonly Palette Light = new()
     {
         Window = "#f5f7fa",
@@ -220,6 +214,17 @@ public static class Palettes
         Selection = "#24334f",
         SelectionText = "#e6e8ec",
     };
+
+    /// <summary>
+    /// The palette currently in effect. Grid rows read status colours from here
+    /// so they follow a theme switch; ThemeManager keeps it in sync.
+    ///
+    /// Initialised in the static constructor because assigning it inline would
+    /// run before <see cref="Light"/> is assigned, leaving it null.
+    /// </summary>
+    public static Palette Current { get; internal set; } = null!;
+
+    static Palettes() => Current = Light;
 }
 
 /// <summary>
