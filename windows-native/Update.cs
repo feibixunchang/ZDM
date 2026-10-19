@@ -36,56 +36,44 @@ public sealed class UpdateInfo
 }
 
 /// <summary>
-/// Checks the GitHub releases API for a newer tag. Fails silently: an update
-/// check must never interfere with downloading.
+/// Checks GitHub for a newer release. Fails silently: an update check must
+/// never interfere with downloading.
+///
+/// Deliberately avoids api.github.com. The unauthenticated REST endpoint is
+/// capped at 60 requests per hour per IP, which a shared or NAT'd network
+/// exhausts quickly and would leave the check permanently broken. Fetching the
+/// release page and reading the tag out of it has no such limit.
 /// </summary>
 public sealed class UpdateChecker
 {
-    private const string Repo = "feibixunchang/ZDM";
+    private const string ReleasesPage = "https://github.com/feibixunchang/ZDM/releases/latest";
 
     public async Task<UpdateInfo?> CheckAsync(CancellationToken ct = default)
     {
         try
         {
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
-            // Latest release, excluding drafts and prereleases.
-            var url = $"https://api.github.com/repos/{Repo}/releases/latest";
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.TryAddWithoutValidation("User-Agent", "ZDM");
-            req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            using var req = new HttpRequestMessage(HttpMethod.Get, ReleasesPage);
+            req.Headers.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZDM");
+            req.Headers.TryAddWithoutValidation("Accept", "text/html");
 
             using var resp = await client.SendAsync(req, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode) return null;
 
-            var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
+            var html = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
 
-            var tag = root.TryGetProperty("tag_name", out var t) ? t.GetString() ?? "" : "";
-            if (tag.Length == 0) return null;
-
-            var html = root.TryGetProperty("html_url", out var h) ? h.GetString() ?? "" : "";
-            var asset = "";
-            if (root.TryGetProperty("assets", out var assets) &&
-                assets.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var a in assets.EnumerateArray())
-                {
-                    var name = a.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                    if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                    {
-                        asset = a.TryGetProperty("browser_download_url", out var u)
-                            ? u.GetString() ?? "" : "";
-                        break;
-                    }
-                }
-            }
+            // /releases/latest redirects to /releases/tag/<tag>; the final
+            // request URI carries the tag.
+            var finalUrl = resp.RequestMessage?.RequestUri?.ToString() ?? ReleasesPage;
+            var tag = ExtractTag(finalUrl) ?? ExtractTagFromHtml(html);
+            if (tag is null) return null;
 
             return new UpdateInfo
             {
                 Tag = tag,
-                Url = html,
-                AssetUrl = asset,
+                Url = ReleasesPage,
+                AssetUrl = ReleasesPage,
                 IsNewer = IsNewerThanCurrent(tag),
             };
         }
@@ -93,6 +81,29 @@ public sealed class UpdateChecker
         {
             return null;
         }
+    }
+
+    private static string? ExtractTag(string url)
+    {
+        const string marker = "/releases/tag/";
+        var i = url.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (i < 0) return null;
+        var tail = url[(i + marker.Length)..];
+        var end = tail.IndexOfAny(new[] { '/', '?', '#' });
+        var tag = end > 0 ? tail[..end] : tail;
+        return tag.Length == 0 ? null : Uri.UnescapeDataString(tag);
+    }
+
+    private static string? ExtractTagFromHtml(string html)
+    {
+        // Fallback: the page embeds the tag in a canonical/og:url meta tag.
+        const string needle = "/releases/tag/";
+        var i = html.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
+        if (i < 0) return null;
+        var tail = html[(i + needle.Length)..];
+        var end = tail.IndexOfAny(new[] { '"', '<', '\'', ' ', '/' });
+        var tag = end > 0 ? tail[..end] : tail;
+        return tag.Length == 0 ? null : Uri.UnescapeDataString(tag);
     }
 
     private static bool IsNewerThanCurrent(string tag)
