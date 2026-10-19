@@ -177,7 +177,7 @@ try {
     $reg.SetValue("DisplayIcon", (Join-Path $App "extension\icons\icon.ico"))
     $reg.SetValue("InstallLocation", $App)
     $reg.SetValue("Publisher", "ZDM")
-    $reg.SetValue("DisplayVersion", "1.1.0")
+    $reg.SetValue("DisplayVersion", "1.2.0")
     $reg.SetValue("NoModify", 1)
     $reg.SetValue("NoRepair", 1)
     $reg.Close()

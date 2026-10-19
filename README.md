@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.1.0**
+当前版本：**v1.2.0**
 
 ## 仓库结构
 
@@ -20,11 +20,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.1.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.2.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.1.0_all.deb` | `sudo dpkg -i zdm_1.1.0_all.deb`（自动装 PyQt5） |
+| Linux | `zdm_1.2.0_all.deb` | `sudo dpkg -i zdm_1.2.0_all.deb`（自动装 PyQt5） |
 | Linux | `zdm-linux.tar.gz` | 免 root：解压后 `./install.sh` |
-| Windows | `ZDM-Setup-1.1.0.exe` | 双击运行，用户级安装、无需管理员 |
+| Windows | `ZDM-Setup-1.2.0.exe` | 双击运行，用户级安装、无需管理员 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-Setup-*.exe` 在 `ubuntu-latest`
 > 上构建，`ZDM-<version>.dmg` 在 `macos-latest` 上构建（由
@@ -48,7 +48,7 @@
 python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
 ```
 
-## macOS：真正的原生 App（v1.1.0 起）
+## macOS：真正的原生 App（v1.2.0 起）
 
 `ZDM.app` 的主程序 `Contents/MacOS/ZDM` 是**用 clang 编译的原生 Mach-O**（源码 `zdm/zdm_launcher.m`），
 它通过 Python C API 把CPython 解释器内嵌进 App 自身的进程，再运行 Qt 客户端——全程只有一个进程，
@@ -70,6 +70,10 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
 - HTTP/2-only CDN 自动回退 curl 传输
 - 桌面端单实例 + 系统托盘（右键含「开机自启」「退出」）
 - 桌面端工具栏可一键「打开网页版」
+- **深色 / 浅色模式**：默认**跟随系统外观**自动切换（macOS 读 AppleInterfaceStyle、
+  Windows 读 AppsUseLightTheme、Linux 读 gsettings），也可在「设置 → 外观」手动锁定为
+  浅色或深色。所有颜色统一取自一套调色板（`zdm/theme.py`），深浅两套完全一致，
+  切换时表格、进度条、状态色等自定义绘制部分同步刷新，不留异色碎片。
 - 浏览器扩展一键接管下载
 
 详见 [`zdm/README.md`](zdm/README.md)；macOS 踩坑与修复记录见 [`docs/ZDM_安装与使用说明.md`](docs/ZDM_安装与使用说明.md)。

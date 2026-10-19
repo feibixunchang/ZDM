@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 from .manager import Manager
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
