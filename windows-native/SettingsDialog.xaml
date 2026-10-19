@@ -5,7 +5,7 @@
         Width="520" SizeToContent="Height"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
-        Background="{DynamicResource AppBg}"
+        Background="{DynamicResource Surface}"
         FontFamily="{StaticResource UiFont}"
         FontSize="{StaticResource UiFontSize}"
         ShowInTaskbar="False"
@@ -22,7 +22,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>  <!-- appearance -->
             <RowDefinition Height="Auto"/>  <!-- downloads -->
-            <RowDefinition Height="Auto"/>  <!-- separator -->
+            <RowDefinition Height="Auto"/>  <!-- startup / browser handoff -->
             <RowDefinition Height="Auto"/>  <!-- buttons -->
         </Grid.RowDefinitions>
 
@@ -98,6 +98,35 @@
                     <TextBlock Grid.Column="1" Text="MB/s（0 = 不限速）" Margin="10,0,0,0"
                                VerticalAlignment="Center" Foreground="{DynamicResource TextMuted}"/>
                 </Grid>
+            </Grid>
+        </StackPanel>
+
+        <!-- ============ startup / browser handoff ============ -->
+        <StackPanel Grid.Row="2" Margin="0,20,0,0">
+            <TextBlock Text="启动与浏览器接管" FontWeight="SemiBold" FontSize="14"
+                       Foreground="{DynamicResource TextStrong}" Margin="0,0,0,10"/>
+
+            <CheckBox x:Name="AutoStartBox"
+                      Content="开机时自动启动（静默驻留托盘，不弹窗）"/>
+            <TextBlock Text="开启后登录 Windows 即自动运行 ZDM，浏览器里点下载可以立刻交给它。"
+                       FontSize="12" Foreground="{DynamicResource TextMuted}"
+                       Margin="22,4,0,0" TextWrapping="Wrap"/>
+
+            <Grid Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                    <TextBlock Text="浏览器自动唤醒" Foreground="{DynamicResource TextPrimary}"/>
+                    <TextBlock x:Name="ProtocolLabel" FontSize="12"
+                               Foreground="{DynamicResource TextMuted}"
+                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+                </StackPanel>
+                <Button Grid.Column="1" x:Name="ProtocolButton" Content="重新注册"
+                        Style="{StaticResource FlatButton}" Padding="10,4"
+                        VerticalAlignment="Center" Margin="10,0,0,0"
+                        Click="OnRegisterProtocol"/>
             </Grid>
         </StackPanel>
 

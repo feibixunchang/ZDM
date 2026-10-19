@@ -142,16 +142,23 @@ public static class Human
 {
     private static readonly string[] Units = { "B", "KB", "MB", "GB", "TB", "PB" };
 
-    public static string Size(long? bytes)
+    /// <summary>
+/// Human-readable byte size.
+///
+/// The unit index must advance together with the division. Doing an early
+/// "return B" before the loop made every value one unit too low and mislabelled
+/// it — 125829120 bytes printed as "120.0 KB" instead of "120.0 MB".
+/// </summary>
+public static string Size(long? bytes)
     {
         double v = bytes ?? 0;
-        if (v < 1024) return $"{(int)v} B";
-        for (var i = 0; i < Units.Length; i++)
+        var i = 0;
+        while (v >= 1024 && i < Units.Length - 1)
         {
             v /= 1024;
-            if (v < 1024) return $"{v:0.0} {Units[i]}";
+            i++;
         }
-        return $"{v:0.0} PB";
+        return i == 0 ? $"{(int)v} B" : $"{v:0.0} {Units[i]}";
     }
 
     public static string Speed(long bytesPerSecond)

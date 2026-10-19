@@ -175,7 +175,9 @@ public static class Palettes
 
     public static readonly Palette Light = new()
     {
-        Window = "#f5f7fa",
+        // Same reason as the dark palette: this is the colour DWM uses for the
+        // title bar, so it must match the toolbar directly below it.
+        Window = "#ffffff",
         Surface = "#ffffff",
         SurfaceAlt = "#fafbfc",
         Hover = "#f3f4f6",
@@ -204,7 +206,10 @@ public static class Palettes
 
     public static readonly Palette Dark = new()
     {
-        Window = "#16181d",
+        // Must equal Surface: DWM paints the extended title-bar frame with the
+        // window background, so a darker Window showed up as a black band above
+        // the lighter toolbar.
+        Window = "#1e2128",
         Surface = "#1e2128",
         SurfaceAlt = "#23262e",
         Hover = "#2a2e37",

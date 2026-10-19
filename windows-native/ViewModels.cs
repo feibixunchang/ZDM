@@ -23,17 +23,30 @@ public sealed class TaskRow
 
     public string Url => Task.Url;
 
-    public string SizeText => Task.Size > 0
-        ? $"{Human.Size(Task.Downloaded)} / {Human.Size(Task.Size)}"
-        : "—";
+    /// <summary>
+    /// Total size only. The downloaded amount used to be prefixed here
+    /// ("71.2 MB / 71.2 MB"), which never fit the column and was cut to
+    /// "71.2 MB / 7" — and it duplicated what the progress column already
+    /// reports as a percentage and a bar.
+    /// </summary>
+    public string SizeText => Task.Size > 0 ? Human.Size(Task.Size) : "—";
 
     public string ProgressText => $"{Task.Progress:0.0}%";
 
     public double Progress => Task.Size > 0 ? Math.Clamp(Task.Progress / 100.0, 0, 1) : 0;
 
-    public string SpeedText => Task.Status == TaskStatus.Downloading
-        ? Human.Speed(Task.SpeedForDisplay)
-        : "—";
+    /// <summary>
+    /// Speed column. Only a running download has a speed; a paused or finished
+    /// one shows an em dash rather than a misleading "0 B/s".
+    /// </summary>
+    public string SpeedText => Task.Status switch
+    {
+        TaskStatus.Downloading => Human.Speed(Task.SpeedForDisplay),
+        // A finished transfer still has samples in the meter; showing that
+        // stale rate would imply it is still going.
+        TaskStatus.Queued or TaskStatus.Merging => "准备中",
+        _ => "—",
+    };
 
     public Core.TaskStatus Status => Task.Status;
 

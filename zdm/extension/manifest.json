@@ -1,10 +1,18 @@
 {
   "manifest_version": 3,
   "name": "ZDM Connector",
-  "version": "1.2.0",
-  "description": "接管浏览器下载，交给本机 ZDM 多线程下载器加速",
+  "version": "1.2.1",
+  "description": "接管浏览器下载，交给本机 ZDM 多线程下载器加速；ZDM 没开着会自动唤醒它",
   "minimum_chrome_version": "100",
-  "permissions": ["downloads", "downloads.open", "contextMenus", "storage", "notifications"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkQimyU1MHQNQKGftct6bGvCks+rIcRWTBUVdhkHeMz92llA53zOt8f/0fEcOgeVG4osI63sobXHkmk1ukEqG4OMcFrwgAeb26tdzC0z0hOWZxOu3nK7zYDynszsxSQgc1P/3FWiG3wavtiCBDlAPDV4RKa5gBODtnmWKRxct3vc76URaE0bGlq5Wo8r+byjuRLMFQJukwDyXzJNMNcLH6BR20EybzpgKYzWEmRM9ZoGdlJ7dZi8oB+f9nV97ov5mv1qVa4JK8YOsKAq8/4b0jQbE4VMYqjN3THZFGQyjyeNW+4Rm6MWrFfokT9aRGgkzCSGGY8A8yEEgl5NeSTKMMQIDAQAB",
+  "permissions": [
+    "downloads",
+    "downloads.open",
+    "contextMenus",
+    "storage",
+    "notifications",
+    "nativeMessaging"
+  ],
   "host_permissions": ["http://127.0.0.1:*/", "http://localhost:*/"],
   "background": { "service_worker": "background.js" },
   "action": {

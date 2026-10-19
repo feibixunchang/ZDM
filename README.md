@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.2.0**
+当前版本：Python 三端 **v1.2.0** ｜ Windows 原生客户端 **v1.9.1**
 
 ## 仓库结构
 
@@ -12,6 +12,7 @@
 |---|---|
 | `zdm/` | 完整源码（引擎、服务、CLI、桌面端、浏览器扩展、安装脚本） |
 | `zdm/zdm_launcher.m` | macOS 原生 App 启动器源码（`install.sh` 用 clang 编译成 `ZDM.app` 主程序） |
+| `windows-native/` | **Windows 原生客户端**（C# / WPF / .NET），独立于 PyQt5 桌面端的 Windows 实现 |
 | `dist/` | 三端正式安装包 |
 | `docs/` | 安装与使用说明文档 |
 | `build_dist.py` | 打包脚本：重新生成 `dist/` 下各平台安装包 |
@@ -25,6 +26,8 @@
 | Linux | `zdm_1.2.0_all.deb` | `sudo dpkg -i zdm_1.2.0_all.deb`（自动装 PyQt5） |
 | Linux | `zdm-linux.tar.gz` | 免 root：解压后 `./install.sh` |
 | Windows | `ZDM-Setup-1.2.0.exe` | 双击运行，用户级安装、无需管理员 |
+| Windows（原生） | `ZDM-Setup-1.9.1.exe` | C#/WPF 客户端，双击安装，见下方专节 |
+| 浏览器扩展 | `ZDM-Connector-1.2.1.zip` | 解压后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-Setup-*.exe` 在 `ubuntu-latest`
 > 上构建，`ZDM-<version>.dmg` 在 `macos-latest` 上构建（由
@@ -47,6 +50,33 @@
 ```bash
 python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
 ```
+
+## Windows 原生客户端（v1.9.1）
+
+Windows 上除 PyQt5 版之外，还提供一套 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`。
+安装包 `ZDM-Setup-1.9.1.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
+
+- 注册 `zdm://` 协议，浏览器里点链接可直接把下载任务交给 ZDM；
+- 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`），
+  **ZDM 没运行时**，扩展一点下载就能把它拉起来，再把任务接过去；
+- 校验并修复「开机自启」注册项。
+
+安装包参数 `Zdm.exe --register` 可在无界面下重做上述注册（安装器与「设置 → 浏览器自动唤醒」按钮走的是同一段代码）。
+
+**为什么是 Native Messaging 而不是 `zdm://`**：Chrome 只在**有用户手势**的页面里才允许跳转到外部协议，
+扩展自己开的隐藏标签页没有手势，`zdm://` 导航会被静默丢弃——这正是 1.8.0 自动唤醒失效的原因。
+扩展改为先 `chrome.runtime.connectNative("com.zdm.launcher")` 拉起一个短命宿主进程，由宿主 `ShellExecute`
+打开 `zdm://add?url=…`，`zdm://` 只作为兜底。
+
+构建：
+
+```bash
+cd windows-native
+dotnet publish Zdm.App.csproj -c Release -r win-x64 --self-contained -o publish
+```
+
+打包安装器需要 Inno Setup 6：`iscc installer.iss`（版本号在 `installer.iss` 的 `AppVersion` 与
+`Zdm.App.csproj` 的 `<Version>` 两处保持一致）。
 
 ## macOS：真正的原生 App（v1.2.0 起）
 
@@ -75,5 +105,8 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
   浅色或深色。所有颜色统一取自一套调色板（`zdm/theme.py`），深浅两套完全一致，
   切换时表格、进度条、状态色等自定义绘制部分同步刷新，不留异色碎片。
 - 浏览器扩展一键接管下载
+- **未启动也能接管**：ZDM 没开着时，浏览器里点下载会**自动把它拉起来**再接手任务（Windows 原生客户端
+  通过 Native Messaging 实现，`zdm://` 协议兜底；其他平台靠协议唤起）
+- 开机自启（设置里可勾选，macOS / Windows / Linux 三端均支持）
 
 详见 [`zdm/README.md`](zdm/README.md)；macOS 踩坑与修复记录见 [`docs/ZDM_安装与使用说明.md`](docs/ZDM_安装与使用说明.md)。
