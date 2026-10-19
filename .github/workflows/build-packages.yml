@@ -1,0 +1,88 @@
+name: build packages
+
+# Builds the Linux .deb + tarball and the Windows .exe on every push / release.
+# The macOS .dmg is built on macOS and committed under dist/ by the maintainer,
+# because it requires hdiutil (and, for the native launcher, Xcode/clang).
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Ubuntu has dpkg-deb; Windows has no 7z by default, so we build the .exe on
+    # Ubuntu with p7zip (which provides the 7zS.sfx-compatible 7z binary).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full dpkg-dev
+
+      - name: Show versions
+        run: |
+          python3 --version
+          7z | head -2
+          dpkg-deb --version | head -1
+
+      - name: Build packages
+        run: python3 build_dist.py
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Sanity-check the .deb
+        run: |
+          set -e
+          DEB=$(ls dist/zdm_*_all.deb)
+          echo "==> inspecting $DEB"
+          dpkg-deb --info "$DEB"
+          dpkg-deb --contents "$DEB" | head -20
+          # version in the control file must match the tag we are building
+          dpkg-deb --field "$DEB" Version
+
+      - name: Verify the .deb installs cleanly (container smoke test)
+        run: |
+          set -e
+          DEB=$(ls dist/zdm_*_all.deb)
+          sudo apt-get install -y "$DEB"
+          # the CLI wrapper must exist and be executable
+          test -x /usr/local/bin/zdm
+          command -v zdm || ls -l /usr/local/bin/zdm
+          # the desktop entry + icon must be installed
+          test -f /usr/local/share/applications/zdm.desktop
+          test -f /usr/local/share/icons/hicolor/128x128/apps/zdm.png
+          # core engine must import and report its version
+          python3 -c "import sys; sys.path.insert(0,'/usr/local/share/zdm'); import zdm; print('engine version', zdm.__version__)"
+          # CLI must run and show help without a TTY
+          /usr/local/bin/zdm --help | head -5
+          echo "==> .deb install smoke test passed"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zdm-packages
+          path: |
+            dist/zdm_*_all.deb
+            dist/zdm-linux.tar.gz
+            dist/ZDM-Setup-*.exe
+            dist/README.txt
+
+      # Attach the freshly built packages to the GitHub release when a tag is pushed.
+      - name: Attach packages to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/zdm_*_all.deb
+            dist/zdm-linux.tar.gz
+            dist/ZDM-Setup-*.exe
+          fail_on_unmatched_files: false
