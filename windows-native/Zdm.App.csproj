@@ -22,7 +22,7 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
 
-    <Version>1.6.3</Version>
+    <Version>1.6.4</Version>
     <Product>ZDM Download Manager</Product>
     <AssemblyTitle>ZDM 下载管理器</AssemblyTitle>
     <Company>ZDM</Company>
