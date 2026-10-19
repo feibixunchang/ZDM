@@ -299,37 +299,43 @@ public partial class MainWindow : Window
 
     private TaskRow? Selected => TaskGrid.SelectedItem as TaskRow;
 
+    /// <summary>
+    /// Row the context menu should act on: the one captured when the menu
+    /// opened, falling back to the current selection for keyboard use.
+    /// </summary>
+    private TaskRow? MenuRow => _menuRow ?? Selected;
+
     private async void OnPauseSelected(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
         await _manager.PauseAsync(row.Id);
         Poll();
     }
 
     private async void OnResumeSelected(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
         await _manager.ResumeAsync(row.Id);
         Poll();
     }
 
     private async void OnRestartSelected(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
         await _manager.RestartAsync(row.Id);
         Poll();
     }
 
     private async void OnDeleteSelected(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
         await _manager.RemoveAsync(row.Id);
         Poll();
     }
 
     private async void OnCancelSelected(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
         await _manager.CancelAsync(row.Id);
         Poll();
     }
@@ -337,7 +343,7 @@ public partial class MainWindow : Window
     /// <summary>Open the downloaded file itself with its default app.</summary>
     private void OnOpenFile(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
         var path = Path.Combine(row.Directory, row.Filename);
 
         if (row.Status != Core.TaskStatus.Completed)
@@ -365,7 +371,7 @@ public partial class MainWindow : Window
     /// <summary>Reveal the file in Explorer, or open the folder when incomplete.</summary>
     private void OnOpenRowFolder(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
 
         var folder = row.Directory;
         var file = Path.Combine(folder, row.Filename);
@@ -390,7 +396,7 @@ public partial class MainWindow : Window
 
     private void OnCopyUrl(object sender, RoutedEventArgs e)
     {
-        if (Selected is not { } row) return;
+        if (MenuRow is not { } row) return;
         try
         {
             Clipboard.SetText(row.Url);
@@ -410,13 +416,24 @@ public partial class MainWindow : Window
     /// selection.
     /// </summary>
     /// <summary>
+    /// Row the context menu acts on.
+    ///
+    /// Menu actions must NOT read DataGrid.SelectedItem: opening a ContextMenu
+    /// moves focus into the popup, and the DataGrid drops its selection as a
+    /// result, so every action would see null and silently do nothing —
+    /// which is exactly the "menu opens but nothing happens" symptom.
+    /// Double-click already worked because it resolves the row from the mouse
+    /// position instead. The menu now does the same and caches it here.
+    /// </summary>
+    private TaskRow? _menuRow;
+
+    /// <summary>
     /// Prepare the row context menu.
     ///
     /// ContextMenuOpening is raised *on the DataGrid*, so its OriginalSource is
-    /// the grid itself — walking up looking for a DataGridRow finds nothing and
-    /// silently clears the selection, which makes every menu action a no-op.
+    /// the grid itself — walking up looking for a DataGridRow finds nothing.
     /// The row under the cursor therefore has to be resolved by hit-testing the
-    /// mouse position instead.
+    /// mouse position.
     ///
     /// Visibility and PlacementTarget are left alone: WPF opens an assigned
     /// DataGrid.ContextMenu by itself, and forcing it visible here breaks that.
@@ -424,6 +441,7 @@ public partial class MainWindow : Window
     private void OnGridContextMenu(object sender, ContextMenuEventArgs e)
     {
         TaskRow? hit = RowUnderCursor();
+        _menuRow = hit;
 
         if (hit is null)
         {
@@ -433,15 +451,13 @@ public partial class MainWindow : Window
         }
 
         TaskGrid.SelectedItem = hit;
-        TaskGrid.Focus();
 
-        var completed = hit.Status == Core.TaskStatus.Completed;
+        // Only "open file" needs the file to exist; everything else applies
+        // regardless of state.
         foreach (var item in RowMenu.Items.OfType<MenuItem>())
         {
-            // Only "open file" needs the file to exist; everything else applies
-            // regardless of state.
             if (item.Header as string == "打开文件")
-                item.IsEnabled = completed;
+                item.IsEnabled = hit.Status == Core.TaskStatus.Completed;
         }
     }
 
@@ -469,6 +485,7 @@ public partial class MainWindow : Window
     {
         if (RowUnderCursor() is not { } row) return;
         TaskGrid.SelectedItem = row;
+        _menuRow = row;
         if (row.Status == Core.TaskStatus.Completed)
             OnOpenFile(sender, new RoutedEventArgs());
     }
