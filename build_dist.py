@@ -2,9 +2,9 @@
 """Build distributable packages for ZDM on all three platforms.
 
 Outputs (into ./dist):
-  - zdm_1.2.0_all.deb          Linux  (apt/dpkg installable, real .deb)
+  - zdm_1.3.0_all.deb          Linux  (apt/dpkg installable, real .deb)
   - zdm-linux.tar.gz           Linux  (fallback, user-level, no root)
-  - ZDM-Setup-1.2.0.exe        Windows (.exe self-extracting installer, no admin)
+  - ZDM-Setup-1.3.0.exe        Windows (.exe self-extracting installer, no admin)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
 The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
 SFX = os.path.join(ROOT, "7zS.sfx")
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 
 def which(cmd):
@@ -260,7 +260,7 @@ def main():
     os.makedirs(DIST, exist_ok=True)
     clean_pycache()
     # Remove previously built artifacts FIRST. Otherwise a stale zdm_1.0.0_all.deb
-    # sitting next to a freshly built zdm_1.2.0_all.deb makes any downstream
+    # sitting next to a freshly built zdm_1.3.0_all.deb makes any downstream
     # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
     import glob
     for pat in ("dist/zdm_*_all.deb", "dist/ZDM-Setup-*.exe",
@@ -294,8 +294,8 @@ def main():
     # dist-level README
     with open(os.path.join(DIST, "README.txt"), "w", encoding="utf-8") as fh:
         fh.write(
-            "ZDM 三端安装包\n"
-            "=============\n\n"
+            f"ZDM 三端安装包 — v{VERSION}\n"
+            "====================\n\n"
             "1) Linux\n"
             f"   - zdm_{VERSION}_all.deb   （推荐，需 root：sudo dpkg -i zdm_{VERSION}_all.deb）\n"
             "       ※ .deb 需在 Linux 上用 dpkg-deb 构建；若当前生成的包里没有它，\n"
@@ -309,6 +309,15 @@ def main():
             "3) Windows\n"
             f"   - ZDM-Setup-{VERSION}.exe\n"
             "       双击运行，按提示安装（用户级、无需管理员；自动检测/安装 Python 与 PyQt5）\n\n"
+            f"本版新增（v{VERSION}）：\n"
+            "  · 每个任务行前面有 ⏸ / ▶（单文件暂停 / 继续）；筛选标签右侧是「全部暂停 / 全部继续」\n"
+            "  · macOS 菜单栏图标弹出毛玻璃菜单（vibrancy），深浅色自动匹配\n"
+            "  · 「打开」打开下载的文件本身（.dmg 直接进安装界面），另设「目录」定位文件\n"
+            "  · 桌面端未运行时，浏览器扩展 / zdm add 发起下载会自动拉起窗口\n"
+            "  · 窗口标题、状态栏、托盘、关于框显示版本号\n"
+            "  · 有新版本时主界面弹横幅，可一键下载并打开安装包（也可忽略该版本）\n"
+            "  · 修复点菜单栏图标时菜单文字发灰、点不了的问题\n"
+            "  · 安装包不再依赖本机的 Xcode / Python（内嵌运行时，移机可运行）\n\n"
             "安装后在桌面端「设置」或托盘图标右键菜单里，可随时开关「开机自启」与「退出」。\n"
             "浏览器扩展：加载各包内 extension/ 目录即可接管下载。\n"
         )

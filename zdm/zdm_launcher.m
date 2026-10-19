@@ -16,14 +16,49 @@
  */
 
 #include <Python.h>
+#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+/* Compiled-in last-resort path. The build passes the staging dir, which is only
+ * valid while the app sits where it was built, so this must never take priority
+ * over runtime discovery -- otherwise a shipped .dmg would look for its Python
+ * runtime inside the developer's build directory and fail to start. */
 #ifndef ZDM_APP_DIR
 #define ZDM_APP_DIR ""
 #endif
+
+/* True when <dir> looks like a usable ZDM app resource dir. */
+static int zdm_dir_ok(const char *dir) {
+    char probe[4096];
+    if (!dir || !*dir) return 0;
+    snprintf(probe, sizeof(probe), "%s/zdm.py", dir);
+    return access(probe, R_OK) == 0;
+}
+
+/* Derive <exe>/../Resources from our own executable path. This is the only
+ * source that stays correct after the .app is moved (dmg -> /Applications,
+ * dragged to another folder, renamed, ...). */
+static int zdm_app_dir_from_exe(char *out, size_t n) {
+    char exe_path[4096];
+    uint32_t exe_size = sizeof(exe_path);
+    char real[4096];
+    char *slash;
+
+    out[0] = '\0';
+    if (_NSGetExecutablePath(exe_path, &exe_size) != 0) return 0;
+    if (!realpath(exe_path, real)) return 0;
+    slash = strrchr(real, '/'); /* .../Contents/MacOS/ZDM -> .../Contents/MacOS */
+    if (!slash) return 0;
+    *slash = '\0';
+    slash = strrchr(real, '/'); /* .../Contents/MacOS -> .../Contents */
+    if (!slash) return 0;
+    *slash = '\0';
+    snprintf(out, n, "%s/Resources", real); /* keep the path free of ".." */
+    return zdm_dir_ok(out);
+}
 
 static void zdm_bail(const char *msg) {
     fprintf(stderr, "ZDM: %s\n", msg);
@@ -34,11 +69,43 @@ static void zdm_bail(const char *msg) {
 }
 
 int main(int argc, char **argv) {
-    const char *app_dir = getenv("ZDM_APP_DIR");
-    if (!app_dir || !*app_dir) app_dir = ZDM_APP_DIR;
-    if (!app_dir || !*app_dir) {
-        zdm_bail("ZDM_APP_DIR not set and no compiled-in fallback");
+    /* Resolution order, most reliable first:
+     *   1. <own executable>/../Resources  -- correct wherever the app is moved
+     *   2. $ZDM_APP_DIR                   -- set by installers / wrappers
+     *   3. compiled-in path               -- only valid in the build tree
+     * Each candidate is validated, so a stale one is skipped instead of
+     * silently pointing Python at a directory that no longer exists. */
+    char resolved_dir[4096];
+    const char *app_dir = NULL;
+
+    if (zdm_app_dir_from_exe(resolved_dir, sizeof(resolved_dir))) {
+        app_dir = resolved_dir;
     }
+    if (!app_dir) {
+        const char *env_dir = getenv("ZDM_APP_DIR");
+        if (zdm_dir_ok(env_dir)) app_dir = env_dir;
+    }
+    if (!app_dir && zdm_dir_ok(ZDM_APP_DIR)) {
+        app_dir = ZDM_APP_DIR;
+    }
+    if (!app_dir) {
+        zdm_bail("cannot locate the app resource directory");
+    }
+
+    /* Debug hook used by the build's relocation test: report the discovered
+     * resource dir and exit before touching Python/Qt. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--zdm-print-app-dir") == 0) {
+            printf("%s\n", app_dir);
+            fflush(stdout);
+            return 0;
+        }
+    }
+
+    /* Export it: the bootstrap Python below reads ZDM_APP_DIR to locate zdm.py
+     * and the bundled venv. Without this the service would never be started
+     * (getenv() returned NULL and the inline script silently did nothing). */
+    setenv("ZDM_APP_DIR", app_dir, 1);
 
     /* Make sure a stale ZDM desktop instance does not fight this one for the
      * single-instance local socket. gui.py handles the real single-instance
@@ -92,21 +159,31 @@ int main(int argc, char **argv) {
         Py_XDECREF(p2);
     }
 
-    /* Start the backend service if it is not already listening. */
+    /* Start the backend service if it is not already listening.
+     *
+     * NOTE: the port comes from the user's config (default 9000) so an app on a
+     * custom port still finds/starts the right service. */
     PyRun_SimpleString(
         "import os,sys,subprocess,time,urllib.request\n"
         "app_dir = os.environ.get('ZDM_APP_DIR','')\n"
+        "try:\n"
+        "    from zdm.manager import load_config\n"
+        "    port = int(load_config().get('port') or 9000)\n"
+        "except Exception:\n"
+        "    port = 9000\n"
         "def _alive():\n"
         "    try:\n"
-        "        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:9000/api/state', timeout=2):\n"
-        "            return True\n"
+        "        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+        "        opener.open('http://127.0.0.1:%d/api/state' % port, timeout=2)\n"
+        "        return True\n"
         "    except Exception:\n"
         "        return False\n"
         "if app_dir and not _alive():\n"
         "    py = os.path.join(app_dir,'venv','bin','python')\n"
+        "    if not os.path.exists(py): py = sys.executable\n"
         "    sc = os.path.join(app_dir,'zdm.py')\n"
         "    try:\n"
-        "        subprocess.Popen([py,sc,'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, start_new_session=True)\n"
+        "        subprocess.Popen([py,sc,'serve','--port',str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, start_new_session=True)\n"
         "    except Exception:\n"
         "        pass\n"
         "    for _ in range(30):\n"

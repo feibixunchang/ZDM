@@ -11,10 +11,11 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional, Tuple
 
+from . import __version__ as VERSION
+from . import desktop
 from .manager import Manager
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
-VERSION = "1.2.0"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -166,6 +167,14 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except ValueError as e:
                 return self._error(400, str(e))
+            # If the desktop client is not open (typical when the download comes
+            # from the browser extension), bring it up so the user sees the task.
+            if self.manager.config.get("auto_show_gui", True):
+                threading.Thread(
+                    target=desktop.ensure_desktop,
+                    args=([url], int(self.manager.config.get("port") or 9000)),
+                    daemon=True,
+                ).start()
             return self._json({"ok": True, "id": d.id, "task": d.to_dict()})
 
         if len(parts) == 3 and parts[0] == "tasks":
@@ -182,8 +191,17 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "cancel":
                 self.manager.cancel(tid, remove_files=body.get("files", True))
             elif action == "open":
-                target = d.target_path if d.status == "completed" else d.directory
-                self.manager.open_path(target)
+                # "打开" means open the downloaded file itself (a .dmg brings up
+                # the installer), not its folder. Unfinished tasks have no file
+                # yet, so those reveal the download directory instead.
+                if d.status == "completed":
+                    self.manager.open_file(d.target_path)
+                else:
+                    self.manager.open_path(d.directory)
+            elif action == "reveal":
+                self.manager.reveal_path(
+                    d.target_path if d.status == "completed" else d.directory
+                )
             else:
                 return self._error(400, f"unknown action {action}")
             return self._json({"ok": True, "task": d.to_dict()})
@@ -210,7 +228,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if parts == ["open"]:
             path = body.get("path") or str(self.manager.config["download_dir"])
-            return self._json({"ok": self.manager.open_path(path)})
+            mode = (body.get("mode") or "dir").lower()
+            if mode == "file":
+                ok = self.manager.open_file(path)
+            elif mode == "reveal":
+                ok = self.manager.reveal_path(path)
+            else:
+                ok = self.manager.open_path(path)
+            return self._json({"ok": ok})
 
         return self._error(404, "not found")
 

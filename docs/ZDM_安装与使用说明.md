@@ -1,9 +1,10 @@
-# ZDM 本机安装与使用说明
+ZDM 本机安装与使用说明
 
-> 来源仓库：https://github.com/feibixunchang/ZDM
+> 来源仓库：<https://github.com/feibixunchang/ZDM>  
 > 安装时间：2026-10-19 ｜ 系统：macOS（arm64）
 
 ## 已安装位置
+
 - 程序代码：`~/Library/Application Support/ZDM`（含 `zdm/`、`web/`、`extension/`、`zdm.py`、`gui.py`）
 - 运行环境：专属虚拟环境 `~/Library/Application Support/ZDM/venv`（基于系统 `/usr/bin/python3` 3.9.6，已装 PyQt5 5.15.11）
 - 桌面 App：`~/Applications/ZDM.app`（双击即用，已去除隔离属性）
@@ -12,29 +13,114 @@
 - 配置/状态：`~/Library/Application Support/ZDM/zdm.json`（默认下载目录 `~/Downloads`，端口 9000）
 
 ## 三种使用入口
-| 入口 | 命令 | 说明 |
-|---|---|---|
-| 桌面端 | `zdm gui` 或双击 `~/Applications/ZDM.app` | 原生 Qt 窗口，关闭后收进托盘，下载继续后台跑 |
-| 网页端 | `zdm open` 或浏览器打开 http://127.0.0.1:9000/ | 适合远程/多设备管理；桌面端点「打开网页版」按钮即可跳转 |
-| 命令行 | `zdm add/list/pause/resume/...` | 终端与脚本使用 |
+
+| 入口  | 命令                                         | 说明                           |
+| --- | ------------------------------------------ | ---------------------------- |
+| 桌面端 | `zdm gui` 或双击 `~/Applications/ZDM.app`     | 原生 Qt 窗口，关闭后收进托盘，下载继续后台跑     |
+| 网页端 | `zdm open` 或浏览器打开 <http://127.0.0.1:9000/> | 适合远程/多设备管理；桌面端点「打开网页版」按钮即可跳转 |
+| 命令行 | `zdm add/list/pause/resume/...`            | 终端与脚本使用                      |
 
 三者共享同一后台服务与任务队列，可同时打开。
 
-桌面端工具栏按钮：`＋ 下载`、`全部暂停`、`全部继续`、`清除已完成`、**`打开网页版`**、`打开目录`、`设置`。
+桌面端工具栏按钮：`＋ 下载`、`⏸`（全部暂停）、`▶`（全部继续）、`清除已完成`、**`打开网页版`**、`打开目录`、`设置`。  
+右下角常显当前版本号，点一下即可检查更新。
 
 ## 深色 / 浅色模式（v1.2.0）
-桌面端默认**跟随系统的深浅色外观自动切换**：macOS 切换「系统设置 → 外观」，
-Windows 切换「设置 → 个性化 → 颜色」、Linux 切换 GNOME/KDE 的深色主题后，
+
+桌面端默认**跟随系统的深浅色外观自动切换**：macOS 切换「系统设置 → 外观」，  
+Windows 切换「设置 → 个性化 → 颜色」、Linux 切换 GNOME/KDE 的深色主题后，  
 ZDM 窗口会自动跟着变，无需重启。
 
-若想固定为某一种，在「设置 → 外观（深浅色）」里选择「浅色」或「深色」；
+若想固定为某一种，在「设置 → 外观（深浅色）」里选择「浅色」或「深色」；  
 选「跟随系统」则恢复自动。三端（macOS / Linux / Windows）行为一致。
 
-所有界面颜色（背景、文字、边框、表格、进度条、各状态色）都来自同一套调色板
-定义在 `zdm/theme.py`，因此深浅两套配色完全统一，不存在深色背景配浅色控件的情况。
+所有界面颜色（背景、文字、边框、表格、进度条、各状态色）都来自同一套调色板  
+定义在 `zdm/theme.py`，因此深浅两套配色完全统一，不存在深色背景配浅色控件的情况。  
 托盘（菜单栏）图标右键同样提供「打开网页版」。
 
+## v1.3.0 修复与新增
+
+### 1. 点菜单栏图标时菜单文字发灰、点不了
+
+**根因**：macOS 上点状态栏（菜单栏）图标**不会**让 App 变成活动应用。非活动 App 弹出的菜单会  
+被系统按「未激活」渲染成灰色，且第一次点击只被用于激活、不会落在菜单项上——所以要「先点一下主  
+页面」才能用。
+
+**处理**：托盘改为「先激活 App、再自己弹出菜单」（`activate_app()` + `QMenu.popup`），并且这次  
+激活不会顺带把主窗口拽出来（用 `_suppress_restore_until` 抑制唤回钩子）。窗口显示走统一的  
+`_show_front()`：先激活 → 再 show/raise/activateWindow，避免出现可见但半激活的灰窗口。
+
+顺带修掉一个判断错误：Qt 的 `applicationState()` 在 macOS 上会**停留在 ApplicationActive**（实测  
+另一 App 在前台时它仍报 active），所以「窗口是否需要恢复」「点托盘是显示还是隐藏」改用  
+`NSApp.isActive()`（`app_is_active()`）判断，恢复条件再加一条 `isActiveWindow()`。
+
+菜单本身也换成了 macOS 原生的**毛玻璃**（vibrancy）：背景真的会模糊菜单后面的内容，圆角 12px，  
+浅色用 VibrantLight、深色用 VibrantDark，文字/分隔线跟着主题走。做法是在菜单自己的 NSWindow 里  
+把 `NSVisualEffectView` 作为**同级视图**放到 Qt 视图**下方**（当子视图会盖住文字），并让窗口  
+非不透明；QSS 只画文字、发丝边框和圆角，不再画底色。PyQt 没有这个能力，属于 macOS 专属增强：  
+其它平台或 PyObjC 缺失时自动退回原来的不透明菜单。
+
+### 2. 每个任务行都有暂停 / 继续按钮
+
+暂停 / 继续是**针对单个文件**的：每行操作区最前面就是 `⏸`（下载中/排队中）或 `▶`（已暂停/出错/  
+已取消）图标按钮，鼠标悬停提示「暂停这个任务 / 继续这个任务」。图标用当前调色板现画，深浅色都清晰。
+
+**每一行都保留这个按钮位**：已完成的行同样显示 `⏸`，只是置灰不可点（提示「已完成，无需暂停」）。  
+这样按钮不会因为任务状态变化而忽隐忽现——看不到按钮容易让人以为功能不存在。
+
+「全部暂停 / 全部继续」也在主界面上：筛选标签（全部 / 进行中 / 已暂停 / 已完成）右侧并排两个  
+中文按钮 `⏸ 全部暂停`、`▶ 全部继续`，作用于所有任务；托盘菜单和任务右键菜单里同样有这两项。  
+没有可暂停（或可继续）的任务时，对应按钮自动置灰。
+
+### 3. 没开桌面端时，下载会自动拉起
+
+新增 `zdm/desktop.py`：任务创建后若桌面端未运行则自动启动（macOS 用 `open -a ZDM.app`，  
+Windows 找 `ZDM.exe`，Linux 找 `zdm-gui`，都找不到再退回 `python gui.py`）。  
+已运行的情况下，`open -a` 只是把窗口激活；Windows/Linux 由单实例守卫把第二次启动变成「唤醒」。  
+带 5 秒节流，连续多个下载只拉一次；「设置 → 下载时自动打开桌面端」可关闭。
+
+### 4. 「打开」打开的是文件本身
+
+- 任务行：`打开` = 用默认程序打开文件（`.dmg` 直接进安装界面），`目录` = 在文件管理器中定位
+- 双击任务行 = 打开文件；右键菜单另有「打开文件 / 在文件夹中显示」
+- 网页版：📂 = 打开文件，🗂 = 在文件夹中显示
+- 未完成的任务没有文件，仍然打开下载目录
+
+### 5. 显示版本号
+
+窗口标题、状态栏右下角、托盘 tooltip、托盘「关于 ZDM（vX）」、设置里的「当前版本」都显示版本，  
+版本号唯一来源是 `zdm/zdm/__init__.py` 的 `__version__`（服务端 `/api/` 也返回它）。
+
+### 6. 更新提示与一键更新
+
+新增 `zdm/update.py`（纯标准库）：
+
+- 启动 2 秒后静默查 `api.github.com/repos/feibixunchang/ZDM/releases/latest`
+- 有新版 → 主界面顶部横幅「发现新版本 vX（当前 vY）」+ 托盘通知
+- 横幅按钮：`下载并安装`（按平台挑 `.dmg/.exe/.deb` 下载到 `~/Downloads` 后自动打开安装程序）、  
+  `更新说明`、`忽略此版本`（记住该版本，不再提示）、`✕`
+- 设置里可关「启动时自动检查更新」，也可「立即检查更新」；托盘也有「检查更新」
+- 网络不可达时静默失败，不打扰使用（手动检查才提示）
+
+### 7. 安装包不再依赖本机的 Xcode / Python
+
+排查上面几项时发现两个只会在**别人机器**上才炸的打包问题，一并修掉了：
+
+- **启动器把构建目录的绝对路径编进了二进制**，而且优先级高于运行时推导。装到 `/Applications`  
+  后它会去构建目录找自己的运行库，找不到就直接退出（表现为「双击没反应」）。现在改为**先按自身  
+  可执行文件位置推导** `<App>/Contents/Resources`，环境变量与编译期路径只作兜底，并且每级都会先  
+  校验目录里确实有 `zdm.py` 才采用。
+- **内置 venv 的解释器指向 `/Applications/Xcode.app/...`**（建 venv 时用的系统 Python），  
+  `pyvenv.cfg` 里也是同一个绝对路径。没有装 Xcode 的 Mac 上，GUI 能开、但后台服务进程起不来，  
+  也就是「界面正常却完全下不动」。现在 `venv/bin/python` 换成指向**内嵌 framework** 的**相对**软链、  
+  删掉 `pyvenv.cfg`，再用一个 `.pth` 文件把 framework 的 site-packages 指回 venv 的包目录。  
+  包里不再有任何绝对路径，解释器按自身位置解析 prefix，整个 `.app` 复制/移动到任何地方都能独立运行。
+
+构建脚本里还加了两道自检，防止这两类问题复发：把成品 `.app` **改名搬到另一个目录**再跑，  
+断言①启动器报出的资源目录就是新位置，②新位置的解释器能导入 PyQt5 且 `sys.prefix` 落在包内。
+
 ## 已验证可用
+
 - 服务启动正常，Web UI 返回 200，`/api/state` 正常。
 - 真实下载测试成功：从 `ftp.gnu.org` 多线程（8 连接）下载 `wget-1.21.4.tar.gz`，落盘 5,059,591 字节、校验为合法 gzip、100% 完成。
 - 引擎容错正常：对不支持/被代理拦截的 URL 会正确回退 curl 后端并上报错误（不会静默丢文件）。
@@ -43,50 +129,57 @@ ZDM 窗口会自动跟着变，无需重启。
 ## 已修复的三个问题（2026-10-19）
 
 ### 1. 下载一直失败（界面正常但下不动）
-**根因**：后台服务被从自动化沙箱启动，继承了沙箱的代理变量；且该服务长期占用 9000 端口，
-导致你从自己终端/双击 `.app` 启动时，启动脚本探测到"服务已在运行"就**跳过启动服务**，
-只拉起 GUI —— 结果你的界面连的仍是我在沙箱里启动的那个连不上 GitHub 的引擎。
+
+**根因**：后台服务被从自动化沙箱启动，继承了沙箱的代理变量；且该服务长期占用 9000 端口，  
+导致你从自己终端/双击 `.app` 启动时，启动脚本探测到"服务已在运行"就**跳过启动服务**，  
+只拉起 GUI —— 结果你的界面连的仍是我在沙箱里启动的那个连不上 GitHub 的引擎。  
 **处理**：已停掉沙箱服务并清理 pid。现在请**从你自己的终端**启动一次，让引擎归属你的网络：
+
 ```bash
 zdm stop && zdm start
 ```
+
 之后所有下载都走你本机真实网络。
 
 ### 2. Dock / 启动器显示通用占位图标（⊘）
-**根因**：`install.sh` 生成 icns 的 iconset 不规范 —— 只嵌了 @1x 尺寸、命名也不标准（缺全部 `@2x`），
-产出**残缺 icns**，macOS 解析失败就回退到通用图标。
-**处理**：已用标准 iconset 规范重建完整 icns（含 16/32/128/256/512 全部 @1x + @2x，1024px，`ic12`），
+
+**根因**：`install.sh` 生成 icns 的 iconset 不规范 —— 只嵌了 @1x 尺寸、命名也不标准（缺全部 `@2x`），  
+产出**残缺 icns**，macOS 解析失败就回退到通用图标。  
+**处理**：已用标准 iconset 规范重建完整 icns（含 16/32/128/256/512 全部 @1x + @2x，1024px，`ic12`），  
 同步进 `.app`，并刷新了 Dock/Finder 图标缓存。若仍显示旧图标，重启 Dock 或注销重登一次即可。
 
 ### 3. 关闭主窗口后，点 Dock 图标唤不回主界面
-**最终根因（重要）**：不是唤醒逻辑的问题，而是 **ZDM 在 Dock 里没有自己的身份**。
-实测发现运行中的进程可执行文件是 `Python.app`（`com.apple.python3`），不是 ZDM.app——因为原 `.app` 的
-`Contents/MacOS/ZDM` 是 shell 脚本，它 exec venv python 后，进程镜像变成 Python.app，macOS 的
-Dock / LaunchServices / reopen 回调全部按 Python.app 处理，所以点 Dock 相当于点 Python 图标，
+
+**最终根因（重要）**：不是唤醒逻辑的问题，而是 **ZDM 在 Dock 里没有自己的身份**。  
+实测发现运行中的进程可执行文件是 `Python.app`（`com.apple.python3`），不是 ZDM.app——因为原 `.app` 的  
+`Contents/MacOS/ZDM` 是 shell 脚本，它 exec venv python 后，进程镜像变成 Python.app，macOS 的  
+Dock / LaunchServices / reopen 回调全部按 Python.app 处理，所以点 Dock 相当于点 Python 图标，  
 ZDM 的 reopen 钩子永远收不到（而菜单栏 tray 属于 ZDM 自己的 Qt 代码，所以一直正常）。
 
 **彻底修复 —— 改造成真正的原生 App（已落地）**：
-- 新增 `zdm/zdm_launcher.m`：一个真正的 Mach-O 主程序，用 **Python C API 把 CPython 解释器内嵌进
-  ZDM.app 自己的进程**（`Py_InitializeFromConfig` + `import gui`）。整个 App 只有一个进程，且这个进程
+
+- 新增 `zdm/zdm_launcher.m`：一个真正的 Mach-O 主程序，用 **Python C API 把 CPython 解释器内嵌进  
+  ZDM.app 自己的进程**（`Py_InitializeFromConfig` + `import gui`）。整个 App 只有一个进程，且这个进程  
   就是 ZDM.app。
-- `install.sh` 现在会用 clang 编译这个 launcher，并把 `Python3.framework` 嵌入
+- `install.sh` 现在会用 clang 编译这个 launcher，并把 `Python3.framework` 嵌入  
   `ZDM.app/Contents/Frameworks/`，rpath 指向 `@executable_path/../Frameworks`。
-- 因为 PyQt5 的 `QApplication` 本身就是原生 NSApplication，它在 ZDM.app 进程内运行时，
+- 因为 PyQt5 的 `QApplication` 本身就是原生 NSApplication，它在 ZDM.app 进程内运行时，  
   Dock 图标归属 ZDM、`applicationShouldHandleReopen:`（Dock 点击）也由 Qt 原生处理，窗口即可唤回。
 - 若系统没有 clang，脚本会自动回退到旧的脚本启动器（功能可用，仅 Dock 行为受限）。
 
-> 现在 `ZDM.app` 是**真正的原生 App**（Mach-O arm64 可执行文件 + 内嵌 Python 运行时 + adhoc 签名），
+> 现在 `ZDM.app` 是**真正的原生 App**（Mach-O arm64 可执行文件 + 内嵌 Python 运行时 + adhoc 签名），  
 > 不是脚本壳。Dock 图标应显示 ZDM 自己的图标，点它即可唤回关掉的主窗口。
 
 > 注意：修改过 `gui.py` 后，**必须完全退出旧的 ZDM 进程再重开**（托盘右键「退出」或 `pkill -f
 > "Contents/MacOS/ZDM"`），否则仍在跑旧代码。
 
-> 说明：以上修复已同步到**已安装目录**（`~/Library/Application Support/ZDM`）和你现有的
-> `~/Applications/ZDM.app`，同时也改回了仓库源码（`zdm/install.sh`、`zdm/gui.py`、`zdm/zdm_launcher.m`），
+> 说明：以上修复已同步到**已安装目录**（`~/Library/Application Support/ZDM`）和你现有的  
+> `~/Applications/ZDM.app`，同时也改回了仓库源码（`zdm/install.sh`、`zdm/gui.py`、`zdm/zdm_launcher.m`），  
 > 以后重新安装/打包不会再复现这三个问题。
 
 ## 关于“登录自启”（重要）
-本机 macOS 版本已移除 `launchctl load`，原 `install.sh` 用的就是这条废弃命令，导致代理无法被加载。
+
+本机 macOS 版本已移除 `launchctl load`，原 `install.sh` 用的就是这条废弃命令，导致代理无法被加载。  
 已修改 `install.sh` 的 macOS 分支，改用现代 API：
 
 ```bash
@@ -95,20 +188,21 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zdm.service.p
 launchctl kickstart -k "gui/$(id -u)/com.zdm.service"
 ```
 
-由于当前自动安装的执行环境无法与 per-user launchd 通信，上述命令需**你在自己的终端（Terminal.app）里跑一次**才能让“登录自启/崩溃重启”立即生效；
-通常下次正常登录时，系统也会自动加载 `~/Library/LaunchAgents` 下的代理。
+由于当前自动安装的执行环境无法与 per-user launchd 通信，上述命令需**你在自己的终端（Terminal.app）里跑一次**才能让“登录自启/崩溃重启”立即生效；  
+通常下次正常登录时，系统也会自动加载 `~/Library/LaunchAgents` 下的代理。  
 当前服务是由安装脚本手动以守护方式拉起的，现在就能直接使用。
 
 ## ⚠️ 重要：如果你在自动化/沙箱环境里启动过 ZDM（下载失败时看这里）
 
-在 WorkBuddy 这类带网络沙箱的环境里启动 ZDM 服务，会出现**所有走 curl 的下载失败**，报错形如：
+在 WorkBuddy 这类带网络沙箱的环境里启动 ZDM 服务，会出现**所有走 curl 的下载失败**，报错形如：  
 `curl: (7) Failed to connect to 127.0.0.1 port xxxxx: Couldn't connect to server`。
 
-原因：服务进程继承了沙箱注入的代理环境变量（`http_proxy/https_proxy`），而系统 `curl` 会自动读取它们，
+原因：服务进程继承了沙箱注入的代理环境变量（`http_proxy/https_proxy`），而系统 `curl` 会自动读取它们，  
 于是所有请求都被塞进那个（可能已失效的）本地代理端口里，导致失败。ZDM 本身没配代理（配置里 `proxy` 为空）。
 
 **解决办法（任选，推荐第 1 种）**：
-1. **在你自己的终端里启动 ZDM**（Terminal.app 执行 `zdm start`，或直接双击 `~/Applications/ZDM.app`）。
+
+1. **在你自己的终端里启动 ZDM**（Terminal.app 执行 `zdm start`，或直接双击 `~/Applications/ZDM.app`）。  
    这样进程不带沙箱代理变量，走正常直连/你自己的网络。
 2. 若必须在沙箱里跑，用清空代理变量的方式启动：
    ```bash
@@ -116,16 +210,18 @@ launchctl kickstart -k "gui/$(id -u)/com.zdm.service"
    ```
    注意：这只解决“坏代理”问题，**沙箱本身可能仍屏蔽部分站点**（例如 GitHub 在本环境直连与经代理都返回 000，属于环境限制，ZDM 无过错）。
 
-补充说明：GitHub 的 `.dmg` 等 Release 下载走 GitHub 的对象存储/CDN，部分网络（含本沙箱）本就难以连通；
-在你自己能正常访问 GitHub 的网络里，ZDM 可正常下载。若你日常需要代理，可在 ZDM「设置」或
+补充说明：GitHub 的 `.dmg` 等 Release 下载走 GitHub 的对象存储/CDN，部分网络（含本沙箱）本就难以连通；  
+在你自己能正常访问 GitHub 的网络里，ZDM 可正常下载。若你日常需要代理，可在 ZDM「设置」或  
 `zdm config proxy http://127.0.0.1:<你的代理端口>` 里显式指定。
 
 ## 浏览器扩展接管下载（Chrome / Edge）
+
 1. 打开 `chrome://extensions` → 右上角开启「开发者模式」
 2. 「加载已解压的扩展程序」→ 选择 `~/Library/Application Support/ZDM/extension`
 3. 点扩展图标 → ⚙ → 「测试连接」→ 勾选「自动接管浏览器下载」
 
 ## 常用命令
+
 ```bash
 zdm start --daemon          # 后台启动服务
 zdm status                  # 查看服务与任务
@@ -136,7 +232,9 @@ zdm stop                   # 停止服务
 ```
 
 ## 卸载
+
 ```bash
 cd <仓库>/zdm && ./install.sh --uninstall
 ```
+
 （会移除程序、App、LaunchAgent 与命令行链接；已下载文件和 `~/Downloads` 配置保留。）

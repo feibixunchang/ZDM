@@ -81,6 +81,9 @@ LIGHT = Palette(
     # QR / dialog surface
     selection="#eff4ff",
     selection_text="#1f2937",
+    # hairline around a vibrancy (frosted glass) popup: the menu is transparent
+    # on macOS so the NSVisualEffectView behind it shows through.
+    glass_border="rgba(0, 0, 0, 0.14)",
 )
 
 # Dark theme: neutral slate surfaces, same hue family for accents so the UI keeps
@@ -112,6 +115,7 @@ DARK = Palette(
     status_merging="#a78bfa",
     selection="#24334f",
     selection_text="#e6e8ec",
+    glass_border="rgba(255, 255, 255, 0.18)",
 )
 
 PALETTES = {"light": LIGHT, "dark": DARK}
@@ -133,6 +137,8 @@ QPushButton {{ background: {p.surface}; border: 1px solid {p.border};
     border-radius: 7px; padding: 5px 12px; color: {p.text}; }}
 QPushButton:hover {{ background: {p.hover}; }}
 QPushButton:pressed {{ background: {p.pressed}; }}
+QPushButton:disabled {{ background: {p.surface_alt}; border-color: {p.border_soft};
+    color: {p.text_muted}; }}
 QPushButton:checked {{ background: {p.accent_soft}; border-color: {p.accent_soft_border};
     color: {p.accent}; font-weight: 600; }}
 QTableWidget {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: 10px;
@@ -163,6 +169,15 @@ QMenu {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: 8
 QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: 6px; color: {p.text}; }}
 QMenu::item:selected {{ background: {p.accent_soft}; color: {p.accent}; }}
 QMenu::separator {{ height: 1px; background: {p.border}; margin: 4px 8px; }}
+/* Frosted-glass popup (macOS only): the widget paints nothing but text and a
+   hairline, the blur itself comes from an NSVisualEffectView placed behind the
+   menu window. Radius must match GLASS_RADIUS in gui.py. */
+QMenu#glassMenu {{ background: transparent; border: 1px solid {p.glass_border};
+    border-radius: 12px; padding: 5px; }}
+QMenu#glassMenu::item {{ padding: 7px 24px 7px 14px; border-radius: 7px; color: {p.text}; }}
+QMenu#glassMenu::item:selected {{ background: {p.accent_soft}; color: {p.accent}; }}
+QMenu#glassMenu::item:disabled {{ color: {p.text_muted}; }}
+QMenu#glassMenu::separator {{ height: 1px; background: {p.glass_border}; margin: 4px 10px; }}
 QCheckBox, QRadioButton {{ color: {p.text}; spacing: 6px; }}
 QCheckBox::indicator, QRadioButton::indicator {{ width: 15px; height: 15px; }}
 QComboBox {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: 7px;
@@ -180,6 +195,15 @@ QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px;
 QSpinBox::up-button, QSpinBox::down-button {{ background: {p.surface_alt};
     border: none; width: 16px; }}
 QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {p.hover}; }}
+/* update banner (new release available) */
+QFrame#updateBar {{ background: {p.accent_soft}; border: 1px solid {p.accent_soft_border};
+    border-radius: 9px; }}
+QLabel#updateText {{ color: {p.text}; font-weight: 600; background: transparent; }}
+QLabel#versionLabel {{ color: {p.text_muted}; padding: 0 8px; }}
+QPushButton#updatePrimary {{ background: {p.accent}; border: 1px solid {p.accent};
+    color: {p.accent_text}; font-weight: 600; }}
+QPushButton#updatePrimary:hover {{ background: {p.accent_hover}; border-color: {p.accent_hover}; }}
+QPushButton#updatePrimary:pressed {{ background: {p.accent_pressed}; }}
 """
 
 
@@ -336,9 +360,16 @@ class ThemeManager:
                     NSWorkspace,
                     NSWorkspaceDidChangeNotification,
                 )
-                token = NSWorkspace.sharedWorkspace().notificationCenter() \
-                    .addObserverForName_object_queue_options_handler_(
-                        NSWorkspaceDidChangeNotification, None, None,
+                from Foundation import NSNotificationCenter, NSOperationQueue
+
+                # NOTE: the selector is ..._usingBlock_ (not ..._options_handler_).
+                # Getting the name wrong raises AttributeError, which used to be
+                # swallowed here and silently downgraded us to the polling path.
+                token = NSNotificationCenter.defaultCenter() \
+                    .addObserverForName_object_queue_usingBlock_(
+                        NSWorkspaceDidChangeNotification,
+                        NSWorkspace.sharedWorkspace().notificationCenter(),
+                        NSOperationQueue.mainQueue(),
                         lambda _n: self._on_system_change(),
                     )
                 self._watchers.append(token)

@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.2.0**
+当前版本：**v1.3.0**
 
 ## 仓库结构
 
@@ -20,11 +20,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.2.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.3.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.2.0_all.deb` | `sudo dpkg -i zdm_1.2.0_all.deb`（自动装 PyQt5） |
+| Linux | `zdm_1.3.0_all.deb` | `sudo dpkg -i zdm_1.3.0_all.deb`（自动装 PyQt5） |
 | Linux | `zdm-linux.tar.gz` | 免 root：解压后 `./install.sh` |
-| Windows | `ZDM-Setup-1.2.0.exe` | 双击运行，用户级安装、无需管理员 |
+| Windows | `ZDM-Setup-1.3.0.exe` | 双击运行，用户级安装、无需管理员 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-Setup-*.exe` 在 `ubuntu-latest`
 > 上构建，`ZDM-<version>.dmg` 在 `macos-latest` 上构建（由
@@ -48,7 +48,7 @@
 python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
 ```
 
-## macOS：真正的原生 App（v1.2.0 起）
+## macOS：真正的原生 App（v1.3.0 起）
 
 `ZDM.app` 的主程序 `Contents/MacOS/ZDM` 是**用 clang 编译的原生 Mach-O**（源码 `zdm/zdm_launcher.m`），
 它通过 Python C API 把CPython 解释器内嵌进 App 自身的进程，再运行 Qt 客户端——全程只有一个进程，
@@ -70,6 +70,21 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
 - HTTP/2-only CDN 自动回退 curl 传输
 - 桌面端单实例 + 系统托盘（右键含「开机自启」「退出」）
 - 桌面端工具栏可一键「打开网页版」
+- **每个任务行都有暂停 / 继续**：每行操作区最前面是 `⏸` / `▶` 图标按钮（主题感知绘制，
+  深浅色都清晰），针对单个文件；已完成的行保留同位置的按钮但置灰（没有可暂停的东西），
+  按钮不会随状态忽隐忽现
+- **「全部暂停 / 全部继续」在主界面**：筛选标签右侧的中文按钮（`⏸ 全部暂停`、`▶ 全部继续`），
+  没有可操作任务时自动置灰；托盘与右键菜单里也保留同名项
+- **菜单栏图标弹出的是毛玻璃菜单**（macOS vibrancy）：背景模糊菜单后的内容、12px 圆角，
+  浅色/深色自动匹配（VibrantLight / VibrantDark）；其它平台自动退回不透明菜单
+- **「打开」打开的是文件本身**：下载完的 `.dmg` 双击直接进安装界面、`.pdf` 用默认阅读器打开；
+  另设「目录」按钮 / 右键「在文件夹中显示」，用于定位文件
+- **下载时自动拉起桌面端**：桌面端没开时，浏览器扩展（或 `zdm add`）把任务交给本地服务后
+  会自动打开 ZDM 窗口；已在运行则直接激活。可在「设置」里关闭
+- **版本号可见**：窗口标题、状态栏右下角、托盘提示、关于对话框都显示当前版本
+- **更新提示 + 一键更新**：启动时静默检查 GitHub Releases，有新版本会在主界面顶部弹横幅
+  （下载并安装 / 更新说明 / 忽略此版本），自动下载对应平台的安装包并打开安装程序；
+  也可在「设置 → 立即检查更新」或托盘「检查更新」手动触发
 - **深色 / 浅色模式**：默认**跟随系统外观**自动切换（macOS 读 AppleInterfaceStyle、
   Windows 读 AppsUseLightTheme、Linux 读 gsettings），也可在「设置 → 外观」手动锁定为
   浅色或深色。所有颜色统一取自一套调色板（`zdm/theme.py`），深浅两套完全一致，

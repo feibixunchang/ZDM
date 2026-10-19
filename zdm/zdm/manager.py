@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -57,6 +58,10 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "auto_resume": True,
     "intercept_browser": False,
     "history_limit": 200,
+    # Bring the desktop window up when a download is created while it is closed.
+    "auto_show_gui": True,
+    # Look for a newer release on startup (GitHub Releases).
+    "check_updates": True,
 }
 
 
@@ -404,6 +409,76 @@ class Manager:
         self.save_state()
 
     # ---------------- shell helpers ----------------
+    @staticmethod
+    def open_file(path: str) -> bool:
+        """Open the *file itself* with its default application.
+
+        This is what the "打开" button means: a downloaded ``.dmg`` should bring up
+        the macOS installer, a ``.pdf`` should open in Preview, and so on. When
+        the file is missing we fall back to revealing its folder so the user can
+        see what happened instead of getting a silent no-op.
+        """
+        try:
+            devnull = subprocess.DEVNULL
+            if not path:
+                return False
+            if os.path.isdir(path):
+                return Manager.open_path(path)
+            if not os.path.exists(path):
+                return Manager.reveal_path(path)
+            if IS_WIN:
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif IS_MAC:
+                subprocess.Popen(["open", path], stdout=devnull, stderr=devnull)
+            else:
+                subprocess.Popen(["xdg-open", path], stdout=devnull, stderr=devnull)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def reveal_path(path: str) -> bool:
+        """Show the file (or folder) inside the OS file manager, selected."""
+        try:
+            devnull = subprocess.DEVNULL
+            p = path or os.path.expanduser("~")
+            if IS_WIN:
+                if os.path.isdir(p):
+                    os.startfile(p)  # type: ignore[attr-defined]
+                else:
+                    subprocess.Popen(
+                        ["explorer", "/select,", os.path.normpath(p)],
+                        stdout=devnull, stderr=devnull,
+                    )
+            elif IS_MAC:
+                if os.path.isdir(p):
+                    subprocess.Popen(["open", p], stdout=devnull, stderr=devnull)
+                else:
+                    subprocess.Popen(["open", "-R", p], stdout=devnull, stderr=devnull)
+            else:
+                if not os.path.isdir(p) and shutil.which("dbus-send"):
+                    import urllib.parse
+
+                    uri = "file://" + urllib.parse.quote(os.path.abspath(p))
+                    r = subprocess.run(
+                        [
+                            "dbus-send", "--session",
+                            "--dest=org.freedesktop.FileManager1",
+                            "--type=method_call",
+                            "/org/freedesktop/FileManager1",
+                            "org.freedesktop.FileManager1.ShowItems",
+                            "array:string:" + uri, "string:",
+                        ],
+                        stdout=devnull, stderr=devnull, timeout=5,
+                    )
+                    if r.returncode == 0:
+                        return True
+                target = p if os.path.isdir(p) else (os.path.dirname(p) or ".")
+                subprocess.Popen(["xdg-open", target], stdout=devnull, stderr=devnull)
+            return True
+        except Exception:
+            return False
+
     @staticmethod
     def open_path(path: str) -> bool:
         """Open a file's folder (or the folder itself) in the OS file manager."""

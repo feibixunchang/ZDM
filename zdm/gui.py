@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -17,7 +18,8 @@ import urllib.request
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-from zdm import autostart  # noqa: E402
+from zdm import __version__ as VERSION  # noqa: E402
+from zdm import autostart, desktop, update  # noqa: E402
 import theme as _theme  # noqa: E402
 
 # Global theme manager. Created lazily in main() (it needs the QApplication),
@@ -49,7 +51,9 @@ def palette():
 def build_style_sheet():
     return _theme.build_stylesheet(palette())
 
+
 APP_NAME = "ZDM"
+APP_TITLE = "ZDM 下载管理器"
 ICON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "extension", "icons", "icon128.png"
 )
@@ -68,14 +72,49 @@ STATUS_TEXT = {
     "merging": "合并中",
 }
 
-_DOCK_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dock.log")
+_DOCK_LOG = None  # resolved lazily by _dock_log_file()
+
+
+def _dock_log_file() -> str:
+    """Path of the diagnostic log (Dock / tray troubleshooting).
+
+    Preferred location is the per-user config dir, so the log survives app
+    upgrades and never pollutes the .app bundle itself (writing into
+    ``Contents/Resources`` also invalidates the code signature). Only when that
+    is unwritable do we fall back to the directory next to gui.py. Never raises:
+    a broken log must not break the app.
+    """
+    global _DOCK_LOG
+    if _DOCK_LOG:
+        return _DOCK_LOG
+    candidates = []
+    try:
+        from zdm.manager import config_dir
+
+        candidates.append(os.path.join(config_dir(), "dock.log"))
+    except Exception:
+        pass
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dock.log"))
+    except Exception:
+        pass
+    for path in candidates:
+        try:
+            with open(path, "a", encoding="utf-8"):
+                pass
+            _DOCK_LOG = path
+            return path
+        except Exception:
+            continue
+    _DOCK_LOG = os.devnull
+    return _DOCK_LOG
 
 
 def _dlog(msg: str) -> None:
     """Append a diagnostic line (Dock/window troubleshooting)."""
     try:
-        with open(_DOCK_LOG, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
+        with open(_dock_log_file(), "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except Exception:
         pass
 
@@ -94,6 +133,61 @@ def _safe_print(msg: str) -> None:
             sys.stdout.write(msg.encode("utf-8", "replace").decode("ascii", "replace") + "\n")
         except Exception:
             pass
+
+
+def app_is_active() -> bool:
+    """True when ZDM itself is the frontmost application.
+
+    Qt's ``applicationState()`` on macOS can keep reporting
+    ``Qt.ApplicationActive`` while another app is actually in front (verified by
+    driving AppKit directly), so on macOS we ask Cocoa instead of trusting it.
+    Getting this wrong makes ``toggle_window()`` hide a window the user wanted
+    brought forward.
+    """
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSApplication
+
+            return bool(NSApplication.sharedApplication().isActive())
+        except Exception:
+            pass
+    app = QApplication.instance()
+    return app is not None and app.applicationState() == Qt.ApplicationActive
+
+
+def activate_app() -> None:
+    """Bring the ZDM process to the front (macOS only, no-op elsewhere).
+
+    Why this is needed: clicking our menu-bar (status item) icon does NOT make
+    the app active. macOS renders the menu of an inactive app greyed out, and the
+    menu is not key, so clicks do nothing - exactly the "文字全灰、点不了，先点
+    一下主页面才能用" bug.
+
+    Which API: ``-[NSApplication activate]`` (macOS 14+) only works when the app
+    already has "user activation", which a status-item click does not grant -
+    measured: it silently does nothing here. ``activateIgnoringOtherApps:`` is the
+    deprecated-but-working variant and does flip NSApp.isActive() (verified from
+    inside the bundle), so it is what we use.
+
+    Ordering matters: activate BEFORE showing anything. Forcing the activation
+    after the window is already up can leave it visible but non-interactive
+    (a half-activated state), which is a different bug we hit before.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSApplication
+
+        ns = NSApplication.sharedApplication()
+        try:
+            ns.activateIgnoringOtherApps_(True)
+        except Exception:
+            try:
+                ns.activate()  # in case the old selector is ever removed
+            except Exception:
+                pass
+    except Exception as e:  # noqa: BLE001
+        _dlog(f"[activate] failed: {type(e).__name__}: {e}")
 
 
 def default_port() -> int:
@@ -182,11 +276,37 @@ class Api:
     def open_path(self, path: str):
         return self._req("POST", "open", {"path": path})
 
+    def open_file(self, path: str):
+        """Ask the service to open the file with its default application."""
+        return self._req("POST", "open", {"path": path, "mode": "file"})
+
+    def reveal(self, path: str):
+        """Ask the service to show the file inside its folder."""
+        return self._req("POST", "open", {"path": path, "mode": "reveal"})
+
 
 # --------------------------------------------------------------------------- Qt
-from PyQt5.QtCore import QRect, Qt, QThread, QTimer, pyqtSignal  # noqa: E402
+from PyQt5.QtCore import (  # noqa: E402
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
-from PyQt5.QtGui import QColor, QFont, QIcon, QPainter  # noqa: E402
+from PyQt5.QtGui import (  # noqa: E402
+    QColor,
+    QCursor,
+    QFont,
+    QIcon,
+    QPainter,
+    QPixmap,
+    QPolygonF,
+)
 from PyQt5.QtWidgets import (  # noqa: E402
     QAbstractItemView,
     QApplication,
@@ -314,9 +434,10 @@ class ZDMApplication(QApplication):
                 win.refresh_theme()
             except Exception:
                 pass
-        self._dock_watch = None
-        self._reopen_delegate = None
-        self._active_observer = None
+        # NOTE: never touch self._reopen_delegate / self._active_observer here.
+        # NSApplication keeps an *unretained* delegate reference, so dropping our
+        # Python reference on a theme switch would leave Cocoa pointing at a
+        # freed object (Dock click stops working, or the app crashes).
 
     def set_main_window(self, win):
         self._main_window = win
@@ -400,6 +521,11 @@ class ZDMApplication(QApplication):
         win = self._main_window
         if win is None:
             return
+        # We activate the app on purpose right before popping the tray menu;
+        # that activation must not also yank the window on screen.
+        if getattr(win, "_suppress_restore_until", 0.0) > time.time():
+            _dlog(f"[restore:{_tag}] suppressed (tray menu opening)")
+            return
         # NOTE: on macOS, QWidget.isVisible() only reflects "not explicitly hidden"
         # and flips to True as soon as show() is called -- even if the window has
         # not actually been mapped to the screen yet. Trusting isVisible() here
@@ -408,15 +534,17 @@ class ZDMApplication(QApplication):
         # active window as "needs restoring" too.
         visible = win.isVisible()
         minimized = win.isMinimized()
-        is_active = (self.applicationState() == Qt.ApplicationActive)
-        _dlog(f"[restore:{_tag}] visible={visible} minimized={minimized} active={is_active}")
+        is_active = app_is_active()
+        is_key = win.isActiveWindow()
+        _dlog(f"[restore:{_tag}] visible={visible} minimized={minimized} "
+              f"active={is_active} key={is_key}")
         try:
             if minimized:
                 win.setWindowState(
                     (win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive
                 )
-            elif visible and is_active:
-                # Already on screen and focused - nothing to do.
+            elif visible and is_active and is_key:
+                # Already on screen, frontmost and focused - nothing to do.
                 return
             # Guard: don't force the window up while a modal dialog (e.g. the
             # settings / new-download sheet) is the active window.
@@ -525,6 +653,141 @@ class ProgressCell(QWidget):
             p.drawRoundedRect(QRect(bar.left(), bar.top(), max(4, w), bar.height()), 3, 3)
 
 
+def glyph_icon(kind: str, size: int = 18, alpha: int = 255) -> QIcon:
+    """Draw a pause / play glyph with the active palette.
+
+    Qt's built-in media icons are black bitmaps that vanish on a dark toolbar,
+    so we paint our own from ``palette().text`` - that keeps icon buttons legible
+    in both themes, and ``refresh_theme()`` simply rebuilds them after a switch.
+
+    ``alpha`` is used for the disabled state: QIcon has no Disabled pixmap here,
+    so Qt would otherwise draw the normal glyph on a disabled button and it
+    would look clickable.
+    """
+    pal = palette()
+    ratio = 2  # crisp on retina displays
+    pm = QPixmap(size * ratio, size * ratio)
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    ink = QColor(pal.text)
+    if alpha < 255:
+        ink.setAlpha(alpha)
+    p.setBrush(ink)
+    s = float(size)
+    if kind == "pause":
+        w = s * 0.20
+        p.drawRoundedRect(QRectF(s * 0.24, s * 0.17, w, s * 0.66), 1.6, 1.6)
+        p.drawRoundedRect(QRectF(s * 0.56, s * 0.17, w, s * 0.66), 1.6, 1.6)
+    elif kind == "play":
+        p.drawPolygon(
+            QPolygonF(
+                [QPointF(s * 0.28, s * 0.16), QPointF(s * 0.80, s * 0.50),
+                 QPointF(s * 0.28, s * 0.84)]
+            )
+        )
+    p.end()
+    return QIcon(pm)
+
+
+GLASS_RADIUS = 12.0  # must match QMenu#glassMenu border-radius in theme.py
+
+
+def apply_menu_glass(menu: QMenu) -> None:
+    """Give a popup menu the real macOS frosted-glass background.
+
+    macOS menus are not just semi-transparent, they *blur* whatever is behind
+    them (vibrancy). Qt has no API for that, so we drop a native
+    ``NSVisualEffectView`` into the menu's own NSWindow and let the widget paint
+    nothing but text on top of it.
+
+    Two details decide whether it works at all:
+
+    * the effect view must be a *sibling below* Qt's view, not a child - as a
+      child it paints over the menu items and you get an empty grey slab;
+    * the NSWindow must be non-opaque with a clear background, otherwise
+      "behind window" blending samples the window's own (solid) fill and the
+      result is flat grey instead of a blur.
+
+    Failure is never fatal: without vibrancy the menu simply keeps its plain
+    themed background.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import objc
+        from AppKit import (
+            NSAppearance,
+            NSColor,
+            NSViewHeightSizable,
+            NSViewWidthSizable,
+            NSVisualEffectBlendingModeBehindWindow,
+            NSVisualEffectMaterialPopover,
+            NSVisualEffectStateActive,
+            NSVisualEffectView,
+            NSWindowBelow,
+        )
+    except Exception as e:  # pragma: no cover - only on a broken PyObjC install
+        _dlog(f"[glass] PyObjC unavailable: {type(e).__name__}: {e}")
+        return
+    try:
+        menu.setAttribute(Qt.WA_TranslucentBackground, True)
+        wid = menu.winId()
+        if not wid:
+            return
+        view = objc.objc_object(c_void_p=int(wid))
+        win = view.window()
+        if win is not None:
+            win.setOpaque_(False)
+            win.setBackgroundColor_(NSColor.clearColor())
+        old = getattr(menu, "_glass_view", None)
+        if old is not None:
+            try:
+                old.removeFromSuperview()
+            except Exception:
+                pass
+        host = view.superview() or view
+        eff = NSVisualEffectView.alloc().initWithFrame_(host.bounds())
+        eff.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        eff.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        eff.setMaterial_(NSVisualEffectMaterialPopover)
+        eff.setState_(NSVisualEffectStateActive)
+        # VibrantDark / VibrantLight is what makes the material (and therefore
+        # the text contrast) match the app's light or dark theme.
+        dark = _theme.DARK is palette()
+        name = "NSAppearanceNameVibrantDark" if dark else "NSAppearanceNameVibrantLight"
+        appearance = NSAppearance.appearanceNamed_(name)
+        if appearance is not None:
+            eff.setAppearance_(appearance)
+        eff.setWantsLayer_(True)
+        layer = eff.layer()
+        if layer is not None:
+            layer.setCornerRadius_(GLASS_RADIUS)
+            layer.setMasksToBounds_(True)
+        host.addSubview_positioned_relativeTo_(eff, NSWindowBelow, view)
+        menu._glass_view = eff
+    except Exception as e:  # noqa: BLE001 - cosmetic only, never break the menu
+        _dlog(f"[glass] failed: {type(e).__name__}: {e}")
+
+
+def style_glass_menu(menu: QMenu) -> None:
+    """Mark a menu as a vibrancy popup and (re)apply the blur before each show."""
+    if sys.platform != "darwin":
+        return
+    menu.setObjectName("glassMenu")
+    menu.setAttribute(Qt.WA_TranslucentBackground, True)
+    # The app-wide stylesheet already exists by now, so trigger a re-polish to
+    # pick up the QMenu#glassMenu rule for this menu instance.
+    try:
+        menu.style().unpolish(menu)
+        menu.style().polish(menu)
+    except Exception:
+        pass
+    menu.aboutToShow.connect(lambda: apply_menu_glass(menu))
+
+
 class SingleApp:
     """Single-instance guard: a second launch just wakes the running window."""
 
@@ -576,13 +839,19 @@ class MainWindow(QMainWindow):
         self.autostart_action = None
         self.filter = "all"
 
-        self.setWindowTitle("ZDM 下载管理器")
+        self.setWindowTitle(f"{APP_TITLE}  v{VERSION}")
         self.setWindowIcon(QIcon(ICON))
-        self.resize(1080, 640)
+        self.resize(1080, 660)
+
+        self._update_info = None
+        self._update_checking = False
+        self._suppress_restore_until = 0.0
 
         self._build_ui()
         self._build_tray()
         self._start_polling()
+        # Silent update check a moment after the window is up (never blocks).
+        QTimer.singleShot(2200, self._auto_check_update)
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -602,13 +871,14 @@ class MainWindow(QMainWindow):
         btn_add.clicked.connect(self._new_download)
         tb.addWidget(btn_add)
 
+        # Per-task pause / resume live on each row (see _render); the global
+        # "pause everything / resume everything" sit next to the filter chips in
+        # plain Chinese, so the two levels never look alike.
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
 
         for text, fn in (
-            ("全部暂停", lambda: self._bulk("pause_all")),
-            ("全部继续", lambda: self._bulk("resume_all")),
             ("清除已完成", lambda: self._bulk("clear_finished")),
             ("打开网页版", self._open_web),
             ("打开目录", self._open_dir),
@@ -633,6 +903,12 @@ class MainWindow(QMainWindow):
             self.filter_btns[key] = b
             hl.addWidget(b)
         hl.addStretch(1)
+        self.btn_pause_all = self._bulk_button(
+            hl, "pause", "全部暂停", "暂停所有正在下载的任务", lambda: self._bulk("pause_all")
+        )
+        self.btn_resume_all = self._bulk_button(
+            hl, "play", "全部继续", "继续所有已暂停的任务", lambda: self._bulk("resume_all")
+        )
         self.filter_btns["all"].setChecked(True)
 
         self.table = QTableWidget(0, 6)
@@ -649,7 +925,9 @@ class MainWindow(QMainWindow):
         hh.setFixedHeight(38)
         hh.setHighlightSections(False)
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        for col, w in ((1, 150), (2, 240), (3, 110), (4, 90), (5, 190)):
+        # 5 (the action column) must fit the pause glyph plus three text
+        # buttons (34 + 50*3 + gaps + margins ~= 210).
+        for col, w in ((1, 150), (2, 240), (3, 110), (4, 90), (5, 216)):
             self.table.setColumnWidth(col, w)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
@@ -660,12 +938,52 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(12, 10, 12, 6)
         v.setSpacing(8)
         v.addWidget(tabs)
+        self.update_bar = self._build_update_bar()
+        v.addWidget(self.update_bar)
         v.addWidget(self.table)
         self.setCentralWidget(central)
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("正在连接本地服务…")
+        # Always-visible version number, bottom right.
+        self.version_label = QLabel(f"v{VERSION}")
+        self.version_label.setObjectName("versionLabel")
+        self.version_label.setToolTip(f"ZDM 桌面端 当前版本 v{VERSION}（点击检查更新）")
+        self.version_label.setCursor(Qt.PointingHandCursor)
+        self.version_label.mousePressEvent = lambda _e: self._check_update(silent=False)
+        self.statusBar().addPermanentWidget(self.version_label)
         self.setAcceptDrops(True)
+
+    def _build_update_bar(self) -> QFrame:
+        """Banner shown when a newer release exists ("下载并安装" / "忽略")."""
+        bar = QFrame()
+        bar.setObjectName("updateBar")
+        bar.setVisible(False)
+        hl = QHBoxLayout(bar)
+        hl.setContentsMargins(12, 8, 10, 8)
+        hl.setSpacing(8)
+        self.update_label = QLabel("")
+        self.update_label.setObjectName("updateText")
+        hl.addWidget(self.update_label, 1)
+        self.update_download_btn = QPushButton("下载并安装")
+        self.update_download_btn.setObjectName("updatePrimary")
+        self.update_download_btn.setCursor(Qt.PointingHandCursor)
+        self.update_download_btn.clicked.connect(self._download_update)
+        hl.addWidget(self.update_download_btn)
+        notes_btn = QPushButton("更新说明")
+        notes_btn.setCursor(Qt.PointingHandCursor)
+        notes_btn.clicked.connect(self._show_release_notes)
+        hl.addWidget(notes_btn)
+        ignore_btn = QPushButton("忽略此版本")
+        ignore_btn.setCursor(Qt.PointingHandCursor)
+        ignore_btn.clicked.connect(self._ignore_update)
+        hl.addWidget(ignore_btn)
+        close_btn = QPushButton("✕")
+        close_btn.setFixedWidth(34)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(bar.hide)
+        hl.addWidget(close_btn)
+        return bar
 
     def _build_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -673,8 +991,13 @@ class MainWindow(QMainWindow):
             return
         self.tray = QSystemTrayIcon(QIcon(ICON), self)
         menu = QMenu()
+        style_glass_menu(menu)
         menu.addAction("显示/隐藏", self.toggle_window)
         menu.addAction("新建下载", self._new_download)
+        menu.addSeparator()
+        menu.addAction("全部暂停", lambda: self._bulk("pause_all"))
+        menu.addAction("全部继续", lambda: self._bulk("resume_all"))
+        menu.addSeparator()
         menu.addAction("打开网页版", self._open_web)
         menu.addAction("打开下载目录", self._open_dir)
         menu.addSeparator()
@@ -682,13 +1005,66 @@ class MainWindow(QMainWindow):
         self.autostart_action.setCheckable(True)
         self.autostart_action.setChecked(autostart.is_enabled())
         self.autostart_action.triggered.connect(self._toggle_autostart)
+        menu.addAction("检查更新", lambda: self._check_update(silent=False))
+        menu.addAction(f"关于 ZDM（v{VERSION}）", self._about)
         menu.addSeparator()
         menu.addAction("退出", self._quit)
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self.toggle_window()
-                                    if reason == QSystemTrayIcon.Trigger else None)
-        self.tray.setToolTip("ZDM 下载管理器")
+        self.tray_menu = menu
+
+        if sys.platform == "darwin":
+            # On macOS a QSystemTrayIcon with a context menu has the menu popped
+            # up by Qt *without activating the app*. A menu belonging to an
+            # inactive app renders greyed out and ignores clicks - the bug where
+            # "点菜单栏图标，文字全灰、选不了，得先点一下主页面". We therefore pop
+            # the menu ourselves, right after activating ZDM.
+            self.tray.setContextMenu(None)
+            self.tray.activated.connect(self._on_tray_activated)
+        else:
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(self._on_tray_activated)
+        self.tray.setToolTip(f"ZDM 下载管理器 v{VERSION}")
         self.tray.show()
+
+        # Debug aid: `ZDM_TRAY_PREVIEW=x,y` pops the menu on startup so the
+        # popup (and its vibrancy) can be inspected without clicking the icon.
+        preview = os.environ.get("ZDM_TRAY_PREVIEW")
+        if preview:
+            try:
+                px, py = (int(v) for v in preview.split(","))
+            except ValueError:
+                px, py = 200, 200
+            QTimer.singleShot(2500, lambda: self.tray_menu.popup(QPoint(px, py)))
+
+    def _on_tray_activated(self, reason):
+        """Left click on the tray/menu-bar icon.
+
+        macOS: activate the app, then show our menu (see _build_tray).
+        Windows/Linux: plain show/hide toggle, menu on right click.
+        """
+        if sys.platform == "darwin":
+            if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.Context,
+                          QSystemTrayIcon.DoubleClick):
+                self._show_tray_menu()
+            return
+        if reason == QSystemTrayIcon.Trigger:
+            self.toggle_window()
+
+    def _show_tray_menu(self):
+        # Activating is what makes the popup menu interactive; suppress the
+        # window restore that this activation would otherwise trigger.
+        self._suppress_restore_until = time.time() + 4.0
+        _dlog(f"[tray] click, active_before={app_is_active()}")
+        activate_app()
+        _dlog(f"[tray] active_after_activate={app_is_active()}")
+        QTimer.singleShot(80, self._popup_tray_menu)
+
+    def _popup_tray_menu(self):
+        try:
+            _dlog(f"[tray] popup, active={app_is_active()}")
+            self.tray_menu.popup(QCursor.pos())
+            QTimer.singleShot(400, lambda: _dlog(f"[tray] after_popup active={app_is_active()}"))
+        except Exception as e:  # noqa: BLE001
+            _dlog(f"[tray] popup failed: {type(e).__name__}: {e}")
 
     # ---------------- data ----------------
     def _start_polling(self):
@@ -704,12 +1080,21 @@ class MainWindow(QMainWindow):
         self.config = st.get("config") or {}
         self.tasks = st.get("tasks") or []
         self._render()
+        # Don't clobber a transient message ("正在检查更新…", "设置已保存", …)
+        # that was just shown: the poll runs every 0.8s.
+        if time.time() < getattr(self, "_status_hold_until", 0.0):
+            return
         running = [t for t in self.tasks if t["status"] == "downloading"]
         total_speed = sum(t.get("speed") or 0 for t in running)
         self.statusBar().showMessage(
-            f"已连接 · 端口 {self.config.get('port', self.port)} · 进行中 {len(running)} · "
-            f"总速度 {fmt_size(total_speed)}/s · 共 {len(self.tasks)} 项"
+            f"已连接 · v{VERSION} · 端口 {self.config.get('port', self.port)} · "
+            f"进行中 {len(running)} · 总速度 {fmt_size(total_speed)}/s · 共 {len(self.tasks)} 项"
         )
+
+    def _status(self, msg: str, hold: float = 3.0):
+        """Show a message in the status bar and keep the poller off it briefly."""
+        self.statusBar().showMessage(msg)
+        self._status_hold_until = time.time() + hold
 
     def _set_filter(self, key: str):
         self.filter = key
@@ -730,12 +1115,15 @@ class MainWindow(QMainWindow):
         # ProgressCell paints with QColor() so it must be told to reload.
         for cell in self.table.findChildren(ProgressCell):
             cell.apply_palette()
-        # Table text colours (status / size / speed) are set in _render.
+        # Row buttons draw their glyph pixmaps from the palette, and _render()
+        # rebuilds them (plus the global pause/resume glyphs) with the new
+        # colours.
         self._render()
 
     def _render(self):
         items = self._visible()
         items.sort(key=lambda t: t["created_at"], reverse=True)
+        self._sync_bulk_buttons()
         self.table.setRowCount(len(items))
         pal = palette()
         colors = {
@@ -784,12 +1172,22 @@ class MainWindow(QMainWindow):
             hl = QHBoxLayout(w)
             hl.setContentsMargins(2, 0, 2, 0)
             hl.setSpacing(6)
+            # Per-task pause / resume: an icon on the row itself (the text would
+            # not fit, and it makes "this pauses *this* file" unmistakable).
+            # Every row keeps this slot -- on a finished task there is nothing to
+            # pause, so the button is shown disabled instead of disappearing
+            # (a control that comes and goes per status reads like a bug).
             if status in ("downloading", "queued"):
-                self._btn(hl, "暂停", lambda _=False, i=t["id"]: self._act(i, "pause"))
-            if status in ("paused", "error", "canceled"):
-                self._btn(hl, "继续", lambda _=False, i=t["id"]: self._act(i, "resume"))
+                self._glyph_btn(hl, "pause", "暂停这个任务", lambda _=False, i=t["id"]: self._act(i, "pause"))
+            elif status in ("paused", "error", "canceled"):
+                self._glyph_btn(hl, "play", "继续这个任务", lambda _=False, i=t["id"]: self._act(i, "resume"))
+            else:
+                self._glyph_btn(hl, "pause", "已完成，无需暂停", None, enabled=False)
             if status == "completed":
+                # "打开" opens the downloaded file itself (a .dmg starts the
+                # installer); "目录" reveals it in the file manager.
                 self._btn(hl, "打开", lambda _=False, i=t["id"]: self._act(i, "open"))
+                self._btn(hl, "目录", lambda _=False, i=t["id"]: self._act(i, "reveal"))
             else:
                 self._btn(hl, "重下", lambda _=False, i=t["id"]: self._act(i, "restart"))
             self._btn(hl, "删除", lambda _=False, i=t["id"]: self._remove(i))
@@ -806,6 +1204,50 @@ class MainWindow(QMainWindow):
         b.clicked.connect(fn)
         layout.addWidget(b)
 
+    def _glyph_btn(self, layout, kind, tip, fn, enabled: bool = True):
+        """Compact icon-only action button for a task row."""
+        b = QPushButton()
+        # A disabled QIcon without a Disabled pixmap is drawn at full strength,
+        # which makes the button look usable -- fade the glyph ourselves.
+        b.setIcon(glyph_icon(kind, 17, alpha=255 if enabled else 70))
+        b.setIconSize(QSize(17, 17))
+        b.setFixedSize(34, 26)
+        b.setToolTip(tip)
+        b.setEnabled(enabled)
+        if enabled:
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(fn)
+        layout.addWidget(b)
+
+    def _bulk_button(self, layout, kind, text, tip, fn):
+        """Global action button: Chinese label plus a small theme-aware glyph."""
+        b = QPushButton(text)
+        b.setIcon(glyph_icon(kind, 13))
+        b.setIconSize(QSize(13, 13))
+        b.setToolTip(tip)
+        b.setMinimumWidth(96)
+        b.setCursor(Qt.PointingHandCursor)
+        b.clicked.connect(fn)
+        layout.addWidget(b)
+        return b
+
+    def _sync_bulk_buttons(self):
+        """Grey out 全部暂停 / 全部继续 when the list has nothing for them.
+
+        The glyph is a painted pixmap, so it has to be redrawn at reduced alpha
+        as well -- otherwise a disabled button still looks clickable.
+        """
+        if not hasattr(self, "btn_pause_all"):
+            return
+        active = any(t["status"] in ("downloading", "queued", "merging") for t in self.tasks)
+        resumable = any(t["status"] in ("paused", "error", "canceled") for t in self.tasks)
+        for btn, kind, on in (
+            (self.btn_pause_all, "pause", active),
+            (self.btn_resume_all, "play", resumable),
+        ):
+            btn.setEnabled(on)
+            btn.setIcon(glyph_icon(kind, 13, 255 if on else 70))
+
     # ---------------- actions ----------------
     def _run(self, fn, *args):
         w = OpWorker(fn, *args)
@@ -816,9 +1258,176 @@ class MainWindow(QMainWindow):
     def _on_op_done(self, status, res, worker):
         if status == "err" or (isinstance(res, dict) and not res.get("ok")):
             msg = str(res) if status == "err" else res.get("error", "操作失败")
-            self.statusBar().showMessage(f"操作失败：{msg}")
+            self._status(f"操作失败：{msg}")
         if worker in self._workers:
             self._workers.remove(worker)
+
+    # ---------------- updates ----------------
+    def _background(self, fn, on_done, *args):
+        """Run ``fn(*args)`` off the UI thread and call ``on_done(result)``."""
+        w = OpWorker(fn, *args)
+        self._workers.append(w)
+
+        def _done(status, res, _w=w):
+            if status == "ok":
+                try:
+                    on_done(res)
+                except Exception as e:  # noqa: BLE001
+                    _dlog(f"[bg] callback failed: {type(e).__name__}: {e}")
+            self._on_op_done(status, res, _w)
+
+        w.done.connect(_done)
+        w.start()
+
+    def _auto_check_update(self):
+        """Silent startup check (only when enabled in Settings)."""
+        if not (self.config or {}).get("check_updates", True):
+            return
+        self._check_update(silent=True)
+
+    def _check_update(self, silent: bool = False):
+        if self._update_checking:
+            return
+        self._update_checking = True
+        if not silent:
+            self._status("正在检查更新…")
+        proxy = str((self.config or {}).get("proxy") or "")
+        self._background(
+            lambda: update.latest_release(proxy=proxy),
+            lambda info: self._on_update_checked(info, silent),
+        )
+
+    def _on_update_checked(self, info, silent: bool):
+        self._update_checking = False
+        cur = VERSION
+        if not info or not info.get("version"):
+            if not silent:
+                self._message("检查更新",
+                              "暂时连不上更新服务器（可能是网络或代理问题），请稍后再试。")
+            return
+        latest = info["version"]
+        if not update.is_newer(latest, cur):
+            if not silent:
+                self._message("检查更新", f"当前已是最新版本 v{cur}。")
+            self.update_bar.setVisible(False)
+            return
+        if silent and update.load_ignored() == latest:
+            return
+        self._update_info = info
+        self.update_label.setText(f"发现新版本 v{latest}（当前 v{cur}）")
+        self.update_bar.setVisible(True)
+        if silent and self.tray is not None:
+            try:
+                self.tray.showMessage(
+                    "ZDM 有新版本",
+                    f"v{latest} 已发布，点“下载并安装”即可更新。",
+                    QSystemTrayIcon.Information, 4000,
+                )
+            except Exception:
+                pass
+
+    def _download_update(self):
+        info = self._update_info or {}
+        asset = update.pick_asset(info.get("assets") or [])
+        if not asset:
+            # No installer for this platform: send the user to the release page.
+            self._open_url(info.get("url") or update.PROJECT_URL)
+            return
+        dest = os.path.join(os.path.expanduser("~/Downloads"), asset["name"])
+        proxy = str((self.config or {}).get("proxy") or "")
+        self.update_download_btn.setEnabled(False)
+        self.update_download_btn.setText("下载中…")
+        self._status(f"正在下载更新 {asset['name']} …", hold=60)
+        self._background(
+            lambda: update.download(asset["url"], dest, proxy=proxy),
+            lambda path: self._on_update_downloaded(path, info),
+        )
+
+    def _on_update_downloaded(self, path, info):
+        self.update_download_btn.setEnabled(True)
+        self.update_download_btn.setText("下载并安装")
+        if not path:
+            if self._message_yes_no(
+                "下载失败",
+                "安装包下载失败（网络或代理问题）。要打开 Releases 页面手动下载吗？",
+            ):
+                self._open_url((info or {}).get("url") or update.PROJECT_URL)
+            return
+        self._status(f"已下载 {os.path.basename(path)}，正在打开安装包…", hold=6)
+        # "打开" = hand the file to the OS: a .dmg mounts and shows the installer,
+        # a .exe starts the setup wizard.
+        self._run(self.api.open_file, path)
+        self._message(
+            "更新已就绪",
+            f"安装包已保存到：\n{path}\n\n"
+            "已为你打开：按提示完成安装即可。\n"
+            "macOS 把 ZDM 拖进“应用程序”会自动覆盖旧版本；Windows 直接下一步。",
+        )
+
+    def _show_release_notes(self):
+        info = self._update_info or {}
+        notes = (info.get("notes") or "").strip() or "（该版本没有填写更新说明）"
+        box = QMessageBox(self)
+        box.setWindowTitle(f"更新说明 · v{info.get('version', '')}")
+        box.setText(notes[:3000])
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+
+    def _ignore_update(self):
+        info = self._update_info or {}
+        update.save_ignored(info.get("version", ""))
+        self.update_bar.setVisible(False)
+        self._status(
+            f"已忽略 v{info.get('version', '')}，可在“设置 → 检查更新”里重新检查", hold=6
+        )
+
+    # ---------------- misc ----------------
+    def _dialog_parent(self):
+        """Prefer the open modal dialog (e.g. Settings) so messages stay on top."""
+        return QApplication.activeModalWidget() or self
+
+    def _message(self, title: str, text: str):
+        box = QMessageBox(self._dialog_parent())
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+
+    def _message_yes_no(self, title: str, text: str) -> bool:
+        box = QMessageBox(self._dialog_parent())
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.Yes)
+        return box.exec_() == QMessageBox.Yes
+
+    def _open_url(self, url: str):
+        try:
+            import webbrowser
+
+            webbrowser.open(url)
+        except Exception as e:  # noqa: BLE001
+            self._status(f"打开链接失败：{e}")
+
+    def _about(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("关于 ZDM")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"<b>ZDM 下载管理器</b> &nbsp; v{VERSION}")
+        box.setInformativeText(
+            "多线程下载器：桌面端 + 网页版 + 浏览器扩展\n"
+            f"本地服务 http://127.0.0.1:{self.port}/\n"
+            f"更新来源 github.com/{update.REPO}"
+        )
+        check = box.addButton("检查更新", QMessageBox.ActionRole)
+        home = box.addButton("打开项目主页", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is check:
+            self._check_update(silent=False)
+        elif clicked is home:
+            self._open_url(update.PROJECT_URL)
 
     def _act(self, task_id, action):
         self._run(self.api.action, task_id, action)
@@ -918,6 +1527,10 @@ class MainWindow(QMainWindow):
         auto.setChecked(bool(cfg.get("auto_resume", True)))
         autostart_cb = QCheckBox("开机自动启动 ZDM 服务")
         autostart_cb.setChecked(autostart.is_enabled())
+        auto_gui_cb = QCheckBox("下载时自动打开桌面端（未运行时）")
+        auto_gui_cb.setChecked(bool(cfg.get("auto_show_gui", True)))
+        update_cb = QCheckBox("启动时自动检查更新")
+        update_cb.setChecked(bool(cfg.get("check_updates", True)))
         # ---- appearance: follow the OS appearance by default ----
         appearance = QComboBox()
         for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
@@ -938,6 +1551,18 @@ class MainWindow(QMainWindow):
         form.addRow("服务端口（重启服务后生效）", port)
         form.addRow("", auto)
         form.addRow("", autostart_cb)
+        form.addRow("", auto_gui_cb)
+        # ---- version + updates ----
+        ver_row = QWidget()
+        vh = QHBoxLayout(ver_row)
+        vh.setContentsMargins(0, 0, 0, 0)
+        vh.addWidget(QLabel(f"当前版本 v{VERSION}"))
+        check_now = QPushButton("立即检查更新")
+        check_now.clicked.connect(lambda: self._check_update(silent=False))
+        vh.addWidget(check_now)
+        vh.addStretch(1)
+        form.addRow("版本", ver_row)
+        form.addRow("", update_cb)
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
@@ -967,7 +1592,7 @@ class MainWindow(QMainWindow):
         try:
             autostart.set_enabled(autostart_cb.isChecked())
         except Exception as e:
-            self.statusBar().showMessage(f"开机自启设置失败：{e}")
+            self._status(f"开机自启设置失败：{e}")
         self._run(self.api.set_config, {
             "download_dir": directory.text().strip() or cfg.get("download_dir"),
             "connections": conns.value(),
@@ -976,10 +1601,12 @@ class MainWindow(QMainWindow):
             "proxy": proxy.text().strip(),
             "port": port.value(),
             "auto_resume": auto.isChecked(),
+            "auto_show_gui": auto_gui_cb.isChecked(),
+            "check_updates": update_cb.isChecked(),
         })
         if getattr(self, "autostart_action", None) is not None:
             self.autostart_action.setChecked(autostart.is_enabled())
-        self.statusBar().showMessage("设置已保存")
+        self._status("设置已保存")
 
     def _preview_theme(self, mode: str):
         """Live-preview an appearance without persisting it (Settings dialog)."""
@@ -1013,20 +1640,22 @@ class MainWindow(QMainWindow):
         try:
             import webbrowser
             webbrowser.open(f"http://127.0.0.1:{port}/")
-            self.statusBar().showMessage(f"已在浏览器打开网页版：http://127.0.0.1:{port}/")
+            self._status(f"已在浏览器打开网页版：http://127.0.0.1:{port}/")
         except Exception as e:
-            self.statusBar().showMessage(f"打开网页版失败：{e}")
+            self._status(f"打开网页版失败：{e}")
 
     def _open_selected_file(self, row):
+        """Double-click a row: open the finished file, or its folder otherwise."""
         item = self.table.item(row, 0)
         if not item:
             return
         t = next((x for x in self._visible() if x["filename"] == item.text()), None)
-        if t:
-            if t["status"] == "completed":
-                self._run(self.api.open_path, os.path.join(t["directory"], t["filename"]))
-            else:
-                self._run(self.api.open_path, t["directory"])
+        if not t:
+            return
+        if t["status"] == "completed":
+            self._act(t["id"], "open")   # opens the file itself (e.g. the .dmg)
+        else:
+            self._run(self.api.open_path, t["directory"])
 
     def _menu(self, pos):
         row = self.table.rowAt(pos.y())
@@ -1037,7 +1666,11 @@ class MainWindow(QMainWindow):
         if not t:
             return
         menu = QMenu(self)
+        style_glass_menu(menu)
         menu.addAction("复制链接", lambda: QApplication.clipboard().setText(t["url"]))
+        if t["status"] == "completed":
+            menu.addAction("打开文件", lambda: self._act(t["id"], "open"))
+            menu.addAction("在文件夹中显示", lambda: self._act(t["id"], "reveal"))
         menu.addSeparator()
         menu.addAction("暂停", lambda: self._act(t["id"], "pause"))
         menu.addAction("继续", lambda: self._act(t["id"], "resume"))
@@ -1048,27 +1681,29 @@ class MainWindow(QMainWindow):
 
     def wake(self, payload: str = ""):
         """Raise the existing window (used when a second instance starts)."""
+        self._show_front()
+        for token in (payload or "").split():
+            if token.lower().startswith(("http://", "https://")):
+                self._run(self.api.add, {"url": token})
+
+    def _show_front(self):
+        """Show the window and make it the key window of an *active* app."""
+        # On macOS an inactive app's window is drawn greyed out and eats the
+        # first click, so activate the app before showing anything.
+        activate_app()
         self.show()
         self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
         self.raise_()
         self.activateWindow()
-        for token in (payload or "").split():
-            if token.lower().startswith(("http://", "https://")):
-                self._run(self.api.add, {"url": token})
 
     def toggle_window(self):
         # isVisible() can be True while the window is not really on screen / not
         # focused (macOS show() is async). Treat "visible but not active" as
         # visible and just re-raise it instead of toggling.
-        app = QApplication.instance()
-        active = (app is not None and app.applicationState() == Qt.ApplicationActive)
-        if self.isVisible() and not self.isMinimized() and active:
+        if self.isVisible() and not self.isMinimized() and app_is_active():
             self.hide()
         else:
-            self.show()
-            self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
-            self.raise_()
-            self.activateWindow()
+            self._show_front()
 
     # ---------------- events ----------------
     def dragEnterEvent(self, e):
@@ -1108,12 +1743,12 @@ class MainWindow(QMainWindow):
         try:
             autostart.set_enabled(checked)
             ok = autostart.is_enabled() == checked
-            self.statusBar().showMessage(
+            self._status(
                 "开机自启：" + ("已开启" if checked else "已关闭")
                 + ("" if ok else "（无法写入，可能需要管理员/登录权限）")
             )
         except Exception as e:
-            self.statusBar().showMessage(f"开机自启设置失败：{e}")
+            self._status(f"开机自启设置失败：{e}")
 
 
 def main(argv=None) -> int:
@@ -1133,6 +1768,7 @@ def main(argv=None) -> int:
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
+    _dlog(f"[init] ZDM v{VERSION} starting (log={_dock_log_file()}, exe={sys.executable})")
 
     # Light/dark theme: follows the OS appearance by default, and the user can
     # override it in Settings. Applying the palette before any widget is created

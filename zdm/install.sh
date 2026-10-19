@@ -83,15 +83,26 @@ install_linux() {
   mkdir -p "$APP_DIR" "$BIN_DIR" "$PREFIX/share/applications" \
            "$PREFIX/share/icons/hicolor/128x128/apps"
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
-  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$APP_DIR/"
+  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$ROOT/theme.py" "$APP_DIR/"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  # gui.py imports theme.py from the app root (it is NOT inside the zdm package),
+  # so a missing copy means the desktop client cannot start at all.
+  [ -f "$APP_DIR/theme.py" ] || { echo "!! 安装不完整：theme.py 缺失" >&2; exit 1; }
 
   cat > "$BIN_DIR/zdm" <<EOF
 #!/bin/sh
 exec "$PY" "$APP_DIR/zdm.py" "\$@"
 EOF
   chmod +x "$BIN_DIR/zdm" "$APP_DIR/zdm.py"
+
+  # Direct desktop-client launcher. ``zdm gui`` asks the same module for a
+  # launcher, so this wrapper must run gui.py itself (no recursion).
+  cat > "$BIN_DIR/zdm-gui" <<EOF
+#!/bin/sh
+exec "$PY" "$APP_DIR/gui.py" "\$@"
+EOF
+  chmod +x "$BIN_DIR/zdm-gui"
   cp "$ROOT/extension/icons/icon128.png" "$PREFIX/share/icons/hicolor/128x128/apps/zdm.png"
 
   cat > "$PREFIX/share/applications/zdm.desktop" <<EOF
@@ -169,9 +180,12 @@ install_mac() {
   echo "==> 安装到 $APP_DIR"
   mkdir -p "$APP_DIR" "$LA" "$APPS" "$HOME/.local/bin"
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
-  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$APP_DIR/"
+  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$ROOT/theme.py" "$APP_DIR/"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  # gui.py imports theme.py from the app root (it is NOT inside the zdm package),
+  # so a missing copy means the desktop client cannot start at all.
+  [ -f "$APP_DIR/theme.py" ] || { echo "!! 安装不完整：theme.py 缺失" >&2; exit 1; }
 
   mkdir -p "$HOME/.local/bin"
   cat > "$HOME/.local/bin/zdm" <<EOF
@@ -179,6 +193,13 @@ install_mac() {
 exec "$PY" "$APP_DIR/zdm.py" "\$@"
 EOF
   chmod +x "$HOME/.local/bin/zdm" "$APP_DIR/zdm.py"
+
+  # Same direct launcher as on Linux (used when ZDM.app is missing/moved).
+  cat > "$HOME/.local/bin/zdm-gui" <<EOF
+#!/bin/sh
+exec "$PY" "$APP_DIR/gui.py" "\$@"
+EOF
+  chmod +x "$HOME/.local/bin/zdm-gui"
 
   # launchd agent: starts on login and restarts on crash
   cat > "$LA/com.zdm.service.plist" <<EOF
@@ -303,7 +324,7 @@ EOF
   <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>
   <key>CFBundleExecutable</key><string>ZDM</string>
   <key>CFBundleIconFile</key><string>zdm</string>
-  <key>CFBundleVersion</key><string>1.2.0</string>
+  <key>CFBundleVersion</key><string>1.3.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

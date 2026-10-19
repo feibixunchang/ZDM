@@ -76,8 +76,19 @@ jobs:
               print('MISSING top-level modules:', missing); sys.exit(1)
           import theme
           assert theme.build_stylesheet(theme.DARK)
-          print('desktop modules OK (theme + gui present)')
+          # desktop.py (auto-launch) and update.py (self-update) live inside the
+          # package; make sure the packaging step really shipped them.
+          from zdm import desktop, update
+          assert update.parse_version('v1.2.3') == (1, 2, 3)
+          assert update.is_newer('1.3.0', '1.2.9')
+          assert callable(desktop.ensure_desktop)
+          print('desktop modules OK (theme + gui + update + desktop)')
           PYEOF
+          # the version the engine reports must match the package version
+          V=$(python3 -c "import sys;sys.path.insert(0,'/usr/local/share/zdm');import zdm;print(zdm.__version__)")
+          D=$(dpkg-deb --field "$DEB" Version)
+          echo "engine version: $V / deb version: $D"
+          [ "$D" = "$V" ] || { echo "ERROR: version mismatch ($D != $V)"; exit 1; }
           # CLI must run and show help without a TTY
           /usr/local/bin/zdm --help | head -5
           echo "==> .deb install smoke test passed"
@@ -133,6 +144,26 @@ jobs:
       - name: Build ZDM.app and .dmg (with launch smoke test)
         run: |
           bash zdm/build_macos_app.sh "$RUNNER_TEMP/zdm-macos" "${{ steps.ver.outputs.version }}"
+
+      - name: Verify app bundle contents and version
+        run: |
+          set -e
+          APP="$RUNNER_TEMP/zdm-macos/ZDM.app"
+          RES="$APP/Contents/Resources"
+          test -f "$RES/theme.py"
+          test -f "$RES/zdm/update.py"
+          test -f "$RES/zdm/desktop.py"
+          PLIST_V=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
+          SRC_V=$(grep -E '^__version__' zdm/zdm/__init__.py | head -1 | cut -d'"' -f2)
+          echo "plist=$PLIST_V source=$SRC_V"
+          [ "$PLIST_V" = "$SRC_V" ] || { echo "ERROR: version mismatch in bundle"; exit 1; }
+          # update/desktop must import inside the bundle's own runtime
+          "$RES/venv/bin/python" -c "
+          import sys; sys.path.insert(0, '$RES')
+          from zdm import update, desktop
+          assert update.is_newer('1.3.0', '1.2.0')
+          print('bundle update+desktop modules OK')
+          "
 
       - name: Upload the .dmg
         uses: actions/upload-artifact@v4
