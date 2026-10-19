@@ -1,0 +1,378 @@
+﻿<Window x:Class="Zdm.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Zdm.App"
+        Title="ZDM 下载管理器"
+        Height="720" Width="1180"
+        MinHeight="520" MinWidth="940"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource Surface}"
+        FontFamily="{StaticResource UiFont}"
+        FontSize="{StaticResource UiFontSize}"
+        TextOptions.TextFormattingMode="Display"
+        UseLayoutRounding="True">
+        <!--
+          The root background is what DWM paints into the extended title-bar
+          frame. It is Surface (not AppBg) so the caption matches the toolbar
+          strip directly beneath it and the two read as one block.
+        -->
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>   <!-- toolbar -->
+            <RowDefinition Height="Auto"/>   <!-- filters -->
+            <RowDefinition Height="*"/>      <!-- tasks -->
+            <RowDefinition Height="Auto"/>   <!-- status -->
+        </Grid.RowDefinitions>
+
+        <!-- ================= toolbar ================= -->
+        <Border Grid.Row="0" Background="{DynamicResource Surface}"
+                BorderBrush="{DynamicResource BorderBrushSoft}" BorderThickness="0,0,0,1">
+            <Grid Margin="14,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MinWidth="250"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!--
+                  A horizontal StackPanel here clipped its tail at narrow
+                  widths: the URL box kept its 420px and the connection box and
+                  the 下载 button were pushed out of view. A star column with a
+                  MaxWidth lets the URL box give way instead.
+                -->
+                <Grid Grid.Column="0" Margin="0,0,12,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!--
+                      The URL box uses a real placeholder overlay instead of
+                      WPF's Watermark because a TextBox watermark must be
+                      re-templated anyway, and the hint needs to be muted in
+                      both themes.
+
+                      Height must stay Auto: pinning an explicit height clips
+                      the text vertically once the font metric exceeds it.
+                    -->
+                    <Grid Grid.Column="0" MinWidth="150" MaxWidth="420">
+                        <TextBox x:Name="UrlBox" Style="{StaticResource AppTextBox}"
+                                 KeyDown="OnUrlKeyDown"
+                                 TextChanged="OnUrlTextChanged"
+                                 ToolTip="粘贴下载链接后回车"/>
+                        <TextBlock x:Name="UrlHint" Text="在此处粘贴下载链接"
+                                   Foreground="{DynamicResource TextMuted}"
+                                   VerticalAlignment="Center" Margin="11,0,0,0"
+                                   IsHitTestVisible="False" Opacity="0.75"/>
+                    </Grid>
+                    <Grid Grid.Column="1" Width="52" Margin="8,0,0,0">
+                        <TextBox x:Name="ConnectionBox"
+                                 Style="{StaticResource AppTextBox}"
+                                 TextAlignment="Center"
+                                 TextChanged="OnUrlTextChanged"
+                                 ToolTip="连接数（1-32）"/>
+                        <TextBlock x:Name="ConnHint" Text="8"
+                                   Foreground="{DynamicResource TextMuted}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   IsHitTestVisible="False" Opacity="0.75"/>
+                    </Grid>
+                    <Button Grid.Column="2" Content="下载" Style="{StaticResource PrimaryButton}"
+                            Margin="10,0,0,0" Click="OnAddClick" IsDefault="True"
+                            VerticalAlignment="Center"/>
+                </Grid>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="全部暂停" Style="{StaticResource FlatButton}" Click="OnPauseAll"/>
+                    <Button Content="全部继续" Style="{StaticResource FlatButton}" Click="OnResumeAll"/>
+                    <Button Content="清除已完成" Style="{StaticResource FlatButton}" Click="OnClearFinished"/>
+                    <Border Width="1" Height="16" Background="{DynamicResource BorderBrushSoft}" Margin="8,0"/>
+                    <Button Content="打开目录" Style="{StaticResource FlatButton}" Click="OnOpenFolder"/>
+                    <Button Content="网页版" Style="{StaticResource FlatButton}" Click="OnOpenWebUi"
+                            ToolTip="在浏览器中打开同一套界面"/>
+                    <Button Content="设置" Style="{StaticResource FlatButton}" Click="OnOpenSettings"
+                            ToolTip="外观、下载目录、连接数等"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ================= filters ================= -->
+        <!-- Surface, not AppBg: the whole top block reads as one continuous panel -->
+        <Border Grid.Row="1" Background="{DynamicResource Surface}">
+            <StackPanel Orientation="Horizontal" Margin="14,10,14,8">
+                <Border x:Name="FilterAll" Background="Transparent" CornerRadius="999" Margin="0,0,6,0">
+                    <ToggleButton Content="全部" Tag="all" Style="{StaticResource FilterTab}"
+                                  IsHitTestVisible="False"/>
+                </Border>
+                <Border x:Name="FilterActive" Background="Transparent" CornerRadius="999" Margin="0,0,6,0">
+                    <ToggleButton Content="进行中" Tag="active" Style="{StaticResource FilterTab}"
+                                  IsHitTestVisible="False"/>
+                </Border>
+                <Border x:Name="FilterPaused" Background="Transparent" CornerRadius="999" Margin="0,0,6,0">
+                    <ToggleButton Content="已暂停" Tag="paused" Style="{StaticResource FilterTab}"
+                                  IsHitTestVisible="False"/>
+                </Border>
+                <Border x:Name="FilterDone" Background="Transparent" CornerRadius="999">
+                    <ToggleButton Content="已完成" Tag="completed" Style="{StaticResource FilterTab}"
+                                  IsHitTestVisible="False"/>
+                </Border>
+            </StackPanel>
+        </Border>
+
+        <!-- ================= task grid ================= -->
+        <!--
+          Row height is auto (RowHeight left unset) so the three-line "missing
+          file" cell can grow instead of clipping its last line, while
+          MinRowHeight keeps ordinary rows at a uniform 46px. RowHeight cannot
+          be written as "Auto": it is a plain double and the length converter is
+          not applied to it.
+        -->
+        <Grid Grid.Row="2" Margin="14,0,14,10">
+            <DataGrid x:Name="TaskGrid"
+                      AutoGenerateColumns="False"
+                      CanUserAddRows="False"
+                      CanUserDeleteRows="False"
+                      CanUserResizeRows="False"
+                      HeadersVisibility="Column"
+                      GridLinesVisibility="None"
+                      MinRowHeight="46"
+                      SelectionMode="Single"
+                      SelectionUnit="FullRow"
+                      Background="{DynamicResource Surface}"
+                      Foreground="{DynamicResource TextPrimary}"
+                      BorderBrush="{DynamicResource BorderBrushSoft}"
+                      BorderThickness="1"
+                      RowHeaderWidth="0"
+                      IsSynchronizedWithCurrentItem="False"
+                      EnableRowVirtualization="True"
+                      VirtualizingPanel.IsVirtualizing="True"
+                      VirtualizingPanel.VirtualizationMode="Recycling"
+                      MouseDoubleClick="OnGridDoubleClick"
+                      ContextMenuOpening="OnGridContextMenu">
+                <DataGrid.Columns>
+
+                    <DataGridTemplateColumn Header="文件" Width="*">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Filename}" FontWeight="SemiBold"
+                                               Foreground="{Binding FilenameBrush}"
+                                               TextTrimming="CharacterEllipsis"/>
+                                    <!-- Shown only when the completed file is gone -->
+                                    <TextBlock Text="⚠ 文件已不存在"
+                                               FontSize="11" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource StatusPaused}"
+                                               Visibility="{Binding ShowMissingHint, Converter={StaticResource BoolToVis}}"/>
+                                    <TextBlock Text="{Binding Url}" FontSize="11"
+                                               Foreground="{DynamicResource TextMuted}"
+                                               TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <DataGridTemplateColumn Header="大小" Width="94">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding SizeText}"
+                                           Foreground="{DynamicResource TextMuted}"
+                                           VerticalAlignment="Center"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <DataGridTemplateColumn Header="进度" Width="190">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Foreground="{DynamicResource TextStrong}"
+                                               TextTrimming="CharacterEllipsis">
+                                        <Run Text="{Binding ProgressText, Mode=OneWay}"/>
+                                        <Run Text="{Binding EtaText, Mode=OneWay}"/>
+                                    </TextBlock>
+                                    <ProgressBar Height="6" Margin="0,5,0,0"
+                                                 Minimum="0" Maximum="1"
+                                                 Value="{Binding Progress, Mode=OneWay}"
+                                                 Foreground="{Binding ProgressBrush}"
+                                                 Background="{DynamicResource Track}"
+                                                 BorderThickness="0"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <DataGridTemplateColumn Header="速度" Width="100">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding SpeedText}"
+                                           Foreground="{DynamicResource TextPrimary}"
+                                           VerticalAlignment="Center"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <!--
+                      Status text is four or five CJK glyphs ("文件已丢失" being
+                      the longest). The cell padding is trimmed on this column
+                      so the full label fits instead of being cut to "文件已丢…".
+                    -->
+                    <DataGridTemplateColumn Header="状态" Width="104">
+                        <DataGridTemplateColumn.CellStyle>
+                            <Style TargetType="DataGridCell"
+                                   BasedOn="{StaticResource GridCell}">
+                                <Setter Property="Padding" Value="12,0,4,0"/>
+                            </Style>
+                        </DataGridTemplateColumn.CellStyle>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding StatusText}"
+                                           Foreground="{Binding StatusBrush}"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center"
+                                           TextWrapping="NoWrap"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <!--
+                      Zero cell padding: the four icon buttons need the whole
+                      column width, otherwise the last one (delete) is clipped.
+                    -->
+                    <DataGridTemplateColumn Header="操作" Width="128">
+                        <DataGridTemplateColumn.CellStyle>
+                            <Style TargetType="DataGridCell"
+                                   BasedOn="{StaticResource GridCell}">
+                                <Setter Property="Padding" Value="0"/>
+                            </Style>
+                        </DataGridTemplateColumn.CellStyle>
+                        <DataGridTemplateColumn.HeaderStyle>
+                            <Style TargetType="DataGridColumnHeader"
+                                   BasedOn="{StaticResource GridHeader}">
+                                <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                                <Setter Property="Padding" Value="0,8"/>
+                            </Style>
+                        </DataGridTemplateColumn.HeaderStyle>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <!--
+                                  Icon buttons: pause and resume sit side by side
+                                  so "继续" is one click away instead of buried in
+                                  the context menu. No frame is drawn around the
+                                  glyphs — see RowIconButton.
+                                -->
+                                <StackPanel Orientation="Horizontal"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center">
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnPauseSelected" ToolTip="暂停">
+                                        <!-- Bare "vertical equals" — two bars, no box. -->
+                                        <Grid Width="9" Height="11" VerticalAlignment="Center">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="3"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Rectangle Grid.Column="0"
+                                                       Fill="{DynamicResource TextPrimary}"/>
+                                            <Rectangle Grid.Column="2"
+                                                       Fill="{DynamicResource TextPrimary}"/>
+                                        </Grid>
+                                    </Button>
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnResumeSelected" ToolTip="继续">
+                                        <TextBlock Text="&#x25B6;" FontSize="10"
+                                                   Foreground="{DynamicResource TextPrimary}"
+                                                   VerticalAlignment="Center"/>
+                                    </Button>
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnRestartSelected" ToolTip="重新下载">
+                                        <TextBlock Text="&#x21BB;" FontSize="13"
+                                                   Foreground="{DynamicResource TextPrimary}"
+                                                   VerticalAlignment="Center"/>
+                                    </Button>
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnDeleteSelected" ToolTip="删除"
+                                            Margin="0">
+                                        <TextBlock Text="&#x2715;" FontSize="11"
+                                                   Foreground="{DynamicResource TextPrimary}"
+                                                   VerticalAlignment="Center"/>
+                                    </Button>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                </DataGrid.Columns>
+
+                <DataGrid.ContextMenu>
+                    <ContextMenu x:Name="RowMenu">
+                        <MenuItem Header="打开文件" Click="OnOpenFile"/>
+                        <MenuItem Header="打开所在文件夹" Click="OnOpenRowFolder"/>
+                        <Separator/>
+                        <MenuItem Header="暂停" Click="OnPauseSelected"/>
+                        <MenuItem Header="继续" Click="OnResumeSelected"/>
+                        <MenuItem Header="重新下载" Click="OnRestartSelected"/>
+                        <Separator/>
+                        <MenuItem Header="复制链接" Click="OnCopyUrl"/>
+                        <MenuItem Header="取消（保留文件）" Click="OnCancelSelected"/>
+                        <MenuItem Header="删除" Click="OnDeleteSelected"/>
+                    </ContextMenu>
+                </DataGrid.ContextMenu>
+            </DataGrid>
+
+            <StackPanel x:Name="EmptyHint" VerticalAlignment="Center"
+                        HorizontalAlignment="Center" Visibility="Collapsed">
+                <TextBlock Text="还没有下载任务" FontSize="15"
+                           Foreground="{DynamicResource TextMuted}" HorizontalAlignment="Center"/>
+                <TextBlock Text="在上方粘贴链接即可开始" FontSize="12"
+                           Foreground="{DynamicResource TextMuted}" Opacity="0.7"
+                           HorizontalAlignment="Center" Margin="0,6,0,0"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- ================= status bar ================= -->
+        <Border Grid.Row="3" Background="{DynamicResource Surface}"
+                BorderBrush="{DynamicResource BorderBrushSoft}" BorderThickness="0,1,0,0">
+            <!--
+              Two real columns, not two StackPanels sharing one cell: when they
+              share a cell the right-hand buttons are laid over the left-hand
+              text and the text gets trimmed for no visible reason.
+            -->
+            <Grid Margin="14,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="StatusText" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextMuted}"
+                               FontSize="{StaticResource UiFontSize}"/>
+                    <TextBlock x:Name="StatusHint" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontSize="12"
+                               Foreground="{DynamicResource Accent}"
+                               TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="VersionBadge" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontSize="12"
+                               Foreground="{DynamicResource TextMuted}" Opacity="0.85"
+                               Text="{Binding VersionText, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                    <Button x:Name="UpdateButton" Content="检查更新" Margin="8,0,0,0"
+                            Style="{StaticResource FlatButton}" Padding="8,2"
+                            FontSize="12" Visibility="Collapsed"
+                            Click="OnOpenUpdatePage"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal"
+                            HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <TextBlock x:Name="FolderLabel" Foreground="{DynamicResource TextMuted}"
+                               FontSize="12" VerticalAlignment="Center" MaxWidth="420"
+                               TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+                    <Button Content="更改目录" Style="{StaticResource FlatButton}"
+                            Click="OnBrowseFolder" Padding="10,3"/>
+                    <Button Content="最小化到托盘" Style="{StaticResource FlatButton}"
+                            Click="OnMinimizeToTray" Padding="10,3"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

@@ -1,0 +1,173 @@
+name: build-windows
+
+# Builds the native WPF client into a single self-contained exe, wraps it in an
+# Inno Setup installer, and (on a tag) attaches the installer to the Release.
+#
+# Mirrors what the Linux job does for .deb, but on a Windows runner: the client
+# is C#/.NET 10, so no cross-compilation is involved and the "install and verify"
+# self-check runs the same installer a user would run.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Windows native client
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # ---------------------------------------------------------------- build
+      - name: Restore
+        working-directory: windows-native
+        run: dotnet restore
+
+      - name: Build
+        working-directory: windows-native
+        # -warnaserror is deliberate: CI is where the nullable and manifest
+        # warnings get caught, not on a developer machine that skips warnings.
+        run: dotnet build -c Release --no-restore -warnaserror
+
+      # Keep installer.iss in step with the single source of truth in the csproj.
+      - name: Sync installer version
+        shell: pwsh
+        working-directory: windows-native
+        run: |
+          $proj = Get-Content Zdm.App.csproj -Raw
+          if ($proj -notmatch '<Version>([^<]+)</Version>') { throw "no <Version> in csproj" }
+          $v = $Matches[1]
+          $iss = Get-Content installer.iss -Raw
+          $iss = [regex]::Replace($iss, '#define AppVersion "[^"]+"', "#define AppVersion `"$v`"")
+          Set-Content installer.iss $iss -NoNewline
+          Write-Host "installer version -> $v"
+
+      - name: Publish single-file exe
+        working-directory: windows-native
+        run: >
+          dotnet publish -c Release -o publish
+          -p:PublishSingleFile=true
+          -p:SelfContained=true
+          -p:RuntimeIdentifier=win-x64
+
+      # The tray icon loads this from disk at runtime.
+      - name: Stage runtime assets
+        shell: pwsh
+        working-directory: windows-native
+        run: |
+          New-Item -ItemType Directory -Force -Path publish/Assets | Out-Null
+          Copy-Item Assets/app.ico publish/Assets/app.ico -Force
+
+      # -------------------------------------------------------------- package
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # Inno ships only English by default; the installer needs the Simplified
+      # Chinese messages file, so pull the official translation.
+      - name: Fetch Chinese language file
+        shell: pwsh
+        run: |
+          $langs = "${env:ProgramFiles(x86)}\Inno Setup 6\Languages"
+          if (-not (Test-Path $langs)) {
+            $langs = "${env:ProgramFiles(x86)}\Inno Setup 7\Languages"
+          }
+          New-Item -ItemType Directory -Force -Path $langs | Out-Null
+
+          $target = Join-Path $langs 'ChineseSimplified.isl'
+          if (Test-Path $target) { Write-Host "already present"; exit 0 }
+
+          $url = 'https://raw.githubusercontent.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/main/ChineseSimplified.isl'
+          Invoke-WebRequest $url -OutFile $target -UseBasicParsing
+          Write-Host "downloaded -> $target"
+
+      - name: Build installer
+        shell: pwsh
+        working-directory: windows-native
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found" }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Locate installer
+        id: find
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem dist -Filter '*.exe' | Select-Object -First 1
+          if (-not $f) { throw "no installer produced" }
+          "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($f.Name)" >> $env:GITHUB_OUTPUT
+          "size=$([math]::Round($f.Length / 1MB, 1))MB" >> $env:GITHUB_OUTPUT
+
+      # ------------------------------------------------------------ self-check
+      # Run the installer for real, then launch the installed exe and make sure
+      # it binds its port and answers the API. This is what keeps a broken build
+      # from ever reaching a Release.
+      - name: Install and verify
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist -Filter '*.exe' | Select-Object -First 1).FullName
+          $log = Join-Path $env:RUNNER_TEMP 'install.log'
+
+          $p = Start-Process -FilePath $setup `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NORUN /LOG=$log" `
+            -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer failed: $($p.ExitCode)" }
+
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\ZDM\Zdm.exe'
+          if (-not (Test-Path $installed)) { throw "installed exe missing" }
+
+          $ver = (Get-Item $installed).VersionInfo.ProductVersion
+          Write-Host "installed version: $ver"
+          if (-not $ver) { throw "no version info on the installed exe" }
+
+          # The app writes this line after Kestrel binds successfully.
+          $logFile = Join-Path $env:APPDATA 'ZDM\zdm-native.log'
+          Remove-Item $logFile -ErrorAction SilentlyContinue
+
+          Start-Process -FilePath $installed | Out-Null
+          $deadline = (Get-Date).AddSeconds(45)
+          $ok = $false
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+            if (-not (Get-Process Zdm -ErrorAction SilentlyContinue)) {
+              throw "the installed exe exited right after launch"
+            }
+            try {
+              $r = Invoke-WebRequest 'http://127.0.0.1:9000/api/state' -TimeoutSec 4 -UseBasicParsing
+              if ($r.StatusCode -eq 200) { $ok = $true; break }
+            } catch { }
+          }
+          if (-not $ok) { throw "local API never answered on port 9000" }
+
+          Get-Content $logFile -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+          Write-Host "self-check passed"
+
+      # --------------------------------------------------------------- upload
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZDM-Windows-installer
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          fail_on_unmatched_files: true
