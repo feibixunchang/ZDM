@@ -325,6 +325,15 @@ public sealed class RateLimiter
 }
 
 /// <summary>Rolling speed estimate over a five second window.</summary>
+/// <summary>
+/// Rolling throughput estimate.
+///
+/// The divisor has to be the time actually covered by the samples, which is
+/// bounded by the window. Dividing by "now minus oldest sample" instead
+/// inflates the divisor once the oldest sample nears the window edge while the
+/// numerator still only holds part of the data — that reported 3 MB/s as
+/// roughly 170 KB/s.
+/// </summary>
 public sealed class SpeedMeter
 {
     private readonly object _gate = new();
@@ -337,27 +346,62 @@ public sealed class SpeedMeter
 
     public void Add(long n)
     {
+        if (n <= 0) return;
         lock (_gate)
         {
             Total += n;
-            var now = DateTime.UtcNow.Ticks / (double)TimeSpan.TicksPerSecond;
+            var now = Now();
             _samples.Enqueue((now, n));
             while (_samples.Count > 0 && now - _samples.Peek().Time > _window)
                 _samples.Dequeue();
         }
     }
 
+    private static double Now()
+        => DateTime.UtcNow.Ticks / (double)TimeSpan.TicksPerSecond;
+
     public double Speed()
     {
         lock (_gate)
         {
             if (_samples.Count == 0) return 0;
-            var now = DateTime.UtcNow.Ticks / (double)TimeSpan.TicksPerSecond;
-            var span = now - _samples.Peek().Time;
-            if (span <= 0.1) return 0;
+
             long sum = 0;
             foreach (var s in _samples) sum += s.Bytes;
-            return sum / span;
+            if (sum <= 0) return 0;
+
+            var now = Now();
+            var oldest = _samples.Peek().Time;
+            var newest = _samples.Last().Time;
+
+            // The divisor must be the time the samples actually cover, but the
+            // queue only spans that time once enough wall clock has passed. Right
+            // after a burst the samples are dense, so using their own span
+            // over-reports; using (now - oldest) under-reports once the oldest
+            // sample nears the window edge. Blend both and take the smaller
+            // result, which is the conservative answer in both regimes.
+            var observed = newest - oldest;
+            var sinceOldest = now - oldest;
+
+            double divisor;
+            if (observed < 0.05)
+            {
+                // A single sample or an instantaneous burst: no trustworthy
+                // span yet, so treat the sample as if it took the minimum time.
+                divisor = 0.05;
+            }
+            else if (sinceOldest >= _window - 0.05)
+            {
+                // The window is full: observed span is the honest divisor.
+                divisor = observed;
+            }
+            else
+            {
+                // Still filling the window; the true average is bounded by both.
+                divisor = Math.Max(observed, Math.Min(sinceOldest, _window));
+            }
+
+            return sum / Math.Min(divisor, _window);
         }
     }
 

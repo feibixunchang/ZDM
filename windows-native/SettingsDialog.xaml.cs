@@ -29,8 +29,17 @@ public partial class SettingsDialog : Window
         // preview below flips the dialog chrome together with the content.
         _theme.Changed += OnThemeChangedForChrome;
         TitleBarStyler.Apply(this, _theme.IsDark);
+        // DWM re-tints the caption on activation transitions; keep it pinned.
+        Activated += (_, _) => TitleBarStyler.Apply(this, _theme.IsDark);
+        Deactivated += (_, _) => TitleBarStyler.Apply(this, _theme.IsDark);
 
         VersionLabel.Text = $"当前版本 {AppVersion.Display}";
+
+        // Autostart is read straight from the registry rather than from a
+        // config field: the installer also writes that value, so the registry
+        // is the only truthful source.
+        AutoStartBox.IsChecked = AutoStart.IsEnabled();
+        RefreshProtocolLabel();
 
         DirBox.Text = manager.Config.DownloadDir;
         ConnBox.Text = manager.Config.Connections.ToString();
@@ -55,9 +64,20 @@ public partial class SettingsDialog : Window
         // Must run on the UI thread; ThemeManager.Changed fires from the
         // dispatcher timer in this app, but guard anyway.
         if (Dispatcher.CheckAccess())
+        {
             TitleBarStyler.Apply(this, _theme.IsDark);
+            // The label holds a brush captured at display time, so it has to be
+            // rebuilt for the new palette.
+            RefreshProtocolLabel();
+        }
         else
-            Dispatcher.BeginInvoke(() => TitleBarStyler.Apply(this, _theme.IsDark));
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                TitleBarStyler.Apply(this, _theme.IsDark);
+                RefreshProtocolLabel();
+            });
+        }
     }
 
     private void OnDialogLoaded(object sender, RoutedEventArgs e)
@@ -76,6 +96,47 @@ public partial class SettingsDialog : Window
             : ThemeLight.IsChecked == true ? AppThemeMode.Light
             : AppThemeMode.Dark;
         _theme.SetMode(mode);
+    }
+
+    /// <summary>
+    /// Show whether zdm:// currently points at this executable. A stale entry
+    /// (the app was moved or reinstalled elsewhere) is the usual reason a
+    /// browser handover silently opens nothing.
+    /// </summary>
+    private void RefreshProtocolLabel()
+    {
+        var protocol = ProtocolRegistrar.IsRegistered();
+        var native = NativeMessagingRegistrar.IsRegistered();
+
+        if (!protocol && !native)
+        {
+            ProtocolLabel.Text = "未注册 — 浏览器无法自动唤醒 ZDM。点右侧按钮注册。";
+            ProtocolLabel.Foreground = Palettes.Current.StatusBrush("paused");
+            return;
+        }
+
+        // The native host is the one that actually works without a click;
+        // the protocol is only a fallback for browsers that have no
+        // native-messaging channel. Say so instead of a flat "已注册".
+        var parts = new List<string>();
+        parts.Add(native ? "扩展直连：已注册（无需确认，直接唤醒）" : "扩展直连：未注册");
+        parts.Add(protocol ? "zdm:// 协议：已注册（兜底）" : "zdm:// 协议：未注册");
+
+        ProtocolLabel.Text = string.Join("\n", parts) + $"\n{AutoStart.ExePath}";
+        ProtocolLabel.Foreground = native
+            ? Palettes.Current.BTextMuted
+            : Palettes.Current.StatusBrush("paused");
+    }
+
+    private void OnRegisterProtocol(object sender, RoutedEventArgs e)
+    {
+        var ok = ProtocolRegistrar.Register() & NativeMessagingRegistrar.Register();
+        RefreshProtocolLabel();
+        if (!ok)
+        {
+            MessageBox.Show(this, "注册失败：无法写入注册表（HKCU\\Software\\Classes / NativeMessagingHosts）。",
+                "ZDM 下载管理器", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private async void OnCheckUpdate(object sender, RoutedEventArgs e)
@@ -136,6 +197,10 @@ public partial class SettingsDialog : Window
         var conn = int.TryParse(ConnBox.Text, out var c) ? Math.Clamp(c, 1, 32) : 8;
         var max = int.TryParse(MaxBox.Text, out var m) ? Math.Max(1, m) : 3;
         var mb = double.TryParse(SpeedBox.Text, out var s) ? Math.Max(0, s) : 0;
+
+        // Written to HKCU\...\Run here, together with the rest of the settings,
+        // so Cancel genuinely means "change nothing".
+        AutoStart.SetEnabled(AutoStartBox.IsChecked == true);
 
         var patch = new System.Text.Json.Nodes.JsonObject
         {

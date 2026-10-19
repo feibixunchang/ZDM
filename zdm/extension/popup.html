@@ -38,8 +38,16 @@
     <span>接管浏览器下载</span><span style="flex:1"></span>
     <input type="checkbox" id="intercept">
   </div>
+  <div class="row" id="diagRow" hidden>
+    <span id="diag" style="color:#dc2626;font-size:11px;line-height:1.4;white-space:pre-line"></span>
+  </div>
   <div id="tasks" style="max-height:230px;overflow:auto"></div>
-  <div class="empty" id="empty" hidden>服务未启动 · 终端运行 <code>zdm start --daemon</code></div>
+  <div class="empty" id="empty" hidden>
+    <div>ZDM 未运行</div>
+    <div style="margin-top:10px">
+      <button class="primary" id="wake">启动 ZDM</button>
+    </div>
+  </div>
 </div>
 <footer>
   <button class="primary" id="openUi" style="flex:1">打开管理界面</button>

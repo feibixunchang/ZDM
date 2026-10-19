@@ -39,6 +39,13 @@ public sealed class ApiServer : IDisposable
     private readonly int _port;
     private WebApplication? _app;
 
+    /// <summary>
+    /// Extension ids already whitelisted for native messaging. Seeded from the
+    /// manifest on disk so the first requests do not rewrite the file.
+    /// </summary>
+    private static readonly HashSet<string> KnownExtensionIds =
+        new(NativeMessagingRegistrar.AllowedOrigins(), StringComparer.Ordinal);
+
     public string Url { get; private set; } = "";
 
     public ApiServer(Manager manager, int port = 9000)
@@ -75,7 +82,16 @@ public sealed class ApiServer : IDisposable
             var headers = ctx.Response.Headers;
             headers.AccessControlAllowOrigin = "*";
             headers.AccessControlAllowMethods = "GET,POST,PUT,DELETE,OPTIONS";
-            headers.AccessControlAllowHeaders = "Content-Type,X-ZDM-Token";
+            headers.AccessControlAllowHeaders = "Content-Type,X-ZDM-Token,X-ZDM-Extension";
+
+            // Self-healing browser registration. The extension sends its own
+            // id with every call; if it is not yet whitelisted in the native
+            // messaging manifest (a reloaded or re-installed extension gets a
+            // new id), it is added here so the next wake-up works without the
+            // user touching anything.
+            var extId = ctx.Request.Headers["X-ZDM-Extension"].ToString();
+            if (extId.Length == 32 && KnownExtensionIds.Add(extId))
+                NativeMessagingRegistrar.Register(extId);
 
             if (ctx.Request.Method == HttpMethods.Options)
             {

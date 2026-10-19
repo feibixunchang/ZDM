@@ -9,7 +9,22 @@ namespace Zdm.App.Core;
 /// </summary>
 public sealed class Download
 {
-    private readonly CancellationTokenSource _stop = new();
+    /// <summary>
+    /// Cancellation for the current run.
+    ///
+    /// Replaced rather than reset: a CancellationTokenSource that has been
+    /// cancelled stays cancelled, and CancellationToken.TryReset only succeeds
+    /// when nobody is still observing it — in practice a paused download could
+    /// never be resumed because the old token was already dead by the time
+    /// StartAsync ran again.
+    /// </summary>
+    private CancellationTokenSource _stop = new();
+
+    /// <summary>
+    /// Token for the current run. Read through a property so a swap by
+    /// Resume() is picked up by workers on their next loop iteration.
+    /// </summary>
+    private CancellationToken CurrentToken => _stop.Token;
 
     public string Id { get; }
     public string Url { get; set; }
@@ -226,7 +241,7 @@ public sealed class Download
         if (Segments is null)
         {
             var probe = await Transport.Instance.ProbeAsync(
-                FinalUrl, Headers, Timeout, Proxy, _stop.Token);
+                FinalUrl, Headers, Timeout, Proxy, CurrentToken);
 
             FinalUrl = probe.FinalUrl;
             SupportsRange = probe.SupportsRange;
@@ -279,14 +294,17 @@ public sealed class Download
         }
 
         Status = TaskStatus.Downloading;
-        _stop.TryReset();
+        // No TryReset here: the CTS is swapped for a fresh one by Resume().
+        // PrepareAsync() above already consumed the token, so resetting it at
+        // this point was both too late and unreliable.
+        var token = CurrentToken;
         Meter.Reset();
         Emit("started");
 
         if (Size > 0 && SupportsRange)
-            await RunSegmentedAsync();
+            await RunSegmentedAsync(token);
         else
-            await RunSingleAsync();
+            await RunSingleAsync(token);
 
         // Worker tasks have all returned by now, so nothing else can advance
         // the byte counters: decide the outcome once, here.
@@ -328,9 +346,9 @@ public sealed class Download
                 c.Attempts = 0;
 
             if (Size > 0 && SupportsRange)
-                await RunSegmentedAsync();
+                await RunSegmentedAsync(CurrentToken);
             else
-                await RunSingleAsync();
+                await RunSingleAsync(CurrentToken);
 
             if (Segments is not null && Segments.IsComplete())
             {
@@ -359,29 +377,25 @@ public sealed class Download
         }
     }
 
-    private async Task RunSegmentedAsync()
+    private async Task RunSegmentedAsync(CancellationToken runToken)
     {
-        var cts = new CancellationTokenSource();
-        var token = cts.Token;
+        // Use the run token directly. Creating a private CTS here meant
+        // Pause() cancelled a different token, so the workers never saw it and
+        // the download kept going while the UI claimed it was paused.
         var tasks = new List<Task>();
-        var handles = new List<CancellationTokenSource> { cts };
-
         for (var i = 0; i < Connections; i++)
         {
             var wid = i;
-            tasks.Add(Task.Run(() => WorkerAsync(wid, token), CancellationToken.None));
+            tasks.Add(Task.Run(() => WorkerAsync(wid, runToken), CancellationToken.None));
         }
-        SetWorkers(handles);
+        SetWorkers(new List<CancellationTokenSource>());
         await Task.WhenAll(tasks);
     }
 
-    private async Task RunSingleAsync()
+    private async Task RunSingleAsync(CancellationToken runToken)
     {
-        var cts = new CancellationTokenSource();
-        var token = cts.Token;
-        var task = Task.Run(() => WorkerSingleAsync(token), CancellationToken.None);
-        SetWorkers(new List<CancellationTokenSource> { cts });
-        await task;
+        SetWorkers(new List<CancellationTokenSource>());
+        await Task.Run(() => WorkerSingleAsync(runToken), CancellationToken.None);
     }
 
     private async Task WorkerAsync(int wid, CancellationToken ct)
@@ -575,6 +589,13 @@ public sealed class Download
         if (Status is TaskStatus.Paused or TaskStatus.Error or TaskStatus.Canceled)
         {
             Error = null;
+            // A cancelled CTS can never be revived, so swap in a fresh one.
+            // Without this the resumed run starts already cancelled and exits
+            // immediately, which is what made "继续" appear broken.
+            var fresh = new CancellationTokenSource();
+            var old = _stop;
+            _stop = fresh;
+            try { old.Dispose(); } catch { /* best effort */ }
             Status = TaskStatus.Queued;
         }
     }

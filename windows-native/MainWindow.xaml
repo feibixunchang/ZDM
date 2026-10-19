@@ -30,11 +30,23 @@
                 BorderBrush="{DynamicResource BorderBrushSoft}" BorderThickness="0,0,0,1">
             <Grid Margin="14,10">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*" MinWidth="250"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                <!--
+                  A horizontal StackPanel here clipped its tail at narrow
+                  widths: the URL box kept its 420px and the connection box and
+                  the 下载 button were pushed out of view. A star column with a
+                  MaxWidth lets the URL box give way instead.
+                -->
+                <Grid Grid.Column="0" Margin="0,0,12,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
                     <!--
                       The URL box uses a real placeholder overlay instead of
                       WPF's Watermark because a TextBox watermark must be
@@ -43,9 +55,8 @@
 
                       Height must stay Auto: pinning an explicit height clips
                       the text vertically once the font metric exceeds it.
-                      The outer Grid therefore only pins the width.
                     -->
-                    <Grid Width="420">
+                    <Grid Grid.Column="0" MinWidth="150" MaxWidth="420">
                         <TextBox x:Name="UrlBox" Style="{StaticResource AppTextBox}"
                                  KeyDown="OnUrlKeyDown"
                                  TextChanged="OnUrlTextChanged"
@@ -55,7 +66,7 @@
                                    VerticalAlignment="Center" Margin="11,0,0,0"
                                    IsHitTestVisible="False" Opacity="0.75"/>
                     </Grid>
-                    <Grid Width="52" Margin="8,0,0,0">
+                    <Grid Grid.Column="1" Width="52" Margin="8,0,0,0">
                         <TextBox x:Name="ConnectionBox"
                                  Style="{StaticResource AppTextBox}"
                                  TextAlignment="Center"
@@ -66,10 +77,10 @@
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
                                    IsHitTestVisible="False" Opacity="0.75"/>
                     </Grid>
-                    <Button Content="下载" Style="{StaticResource PrimaryButton}"
+                    <Button Grid.Column="2" Content="下载" Style="{StaticResource PrimaryButton}"
                             Margin="10,0,0,0" Click="OnAddClick" IsDefault="True"
                             VerticalAlignment="Center"/>
-                </StackPanel>
+                </Grid>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button Content="全部暂停" Style="{StaticResource FlatButton}" Click="OnPauseAll"/>
@@ -105,14 +116,17 @@
                     <ToggleButton Content="已完成" Tag="completed" Style="{StaticResource FilterTab}"
                                   IsHitTestVisible="False"/>
                 </Border>
-
-                <TextBlock x:Name="StatusHint" Margin="14,0,0,0" VerticalAlignment="Center"
-                           Foreground="{DynamicResource TextMuted}"
-                           FontSize="{StaticResource UiFontSize}"/>
             </StackPanel>
         </Border>
 
         <!-- ================= task grid ================= -->
+        <!--
+          Row height is auto (RowHeight left unset) so the three-line "missing
+          file" cell can grow instead of clipping its last line, while
+          MinRowHeight keeps ordinary rows at a uniform 46px. RowHeight cannot
+          be written as "Auto": it is a plain double and the length converter is
+          not applied to it.
+        -->
         <Grid Grid.Row="2" Margin="14,0,14,10">
             <DataGrid x:Name="TaskGrid"
                       AutoGenerateColumns="False"
@@ -121,7 +135,7 @@
                       CanUserResizeRows="False"
                       HeadersVisibility="Column"
                       GridLinesVisibility="None"
-                      RowHeight="46"
+                      MinRowHeight="46"
                       SelectionMode="Single"
                       SelectionUnit="FullRow"
                       Background="{DynamicResource Surface}"
@@ -157,7 +171,7 @@
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
 
-                    <DataGridTemplateColumn Header="大小" Width="150">
+                    <DataGridTemplateColumn Header="大小" Width="94">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <TextBlock Text="{Binding SizeText}"
@@ -167,11 +181,12 @@
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
 
-                    <DataGridTemplateColumn Header="进度" Width="210">
+                    <DataGridTemplateColumn Header="进度" Width="190">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <StackPanel VerticalAlignment="Center">
-                                    <TextBlock Foreground="{DynamicResource TextStrong}">
+                                    <TextBlock Foreground="{DynamicResource TextStrong}"
+                                               TextTrimming="CharacterEllipsis">
                                         <Run Text="{Binding ProgressText, Mode=OneWay}"/>
                                         <Run Text="{Binding EtaText, Mode=OneWay}"/>
                                     </TextBlock>
@@ -186,7 +201,7 @@
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
 
-                    <DataGridTemplateColumn Header="速度" Width="104">
+                    <DataGridTemplateColumn Header="速度" Width="100">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <TextBlock Text="{Binding SpeedText}"
@@ -196,27 +211,92 @@
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
 
-                    <DataGridTemplateColumn Header="状态" Width="86">
+                    <!--
+                      Status text is four or five CJK glyphs ("文件已丢失" being
+                      the longest). The cell padding is trimmed on this column
+                      so the full label fits instead of being cut to "文件已丢…".
+                    -->
+                    <DataGridTemplateColumn Header="状态" Width="104">
+                        <DataGridTemplateColumn.CellStyle>
+                            <Style TargetType="DataGridCell"
+                                   BasedOn="{StaticResource GridCell}">
+                                <Setter Property="Padding" Value="12,0,4,0"/>
+                            </Style>
+                        </DataGridTemplateColumn.CellStyle>
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <TextBlock Text="{Binding StatusText}"
                                            Foreground="{Binding StatusBrush}"
                                            FontWeight="SemiBold"
-                                           VerticalAlignment="Center"/>
+                                           VerticalAlignment="Center"
+                                           TextWrapping="NoWrap"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
 
-                    <DataGridTemplateColumn Header="操作" Width="200">
+                    <!--
+                      Zero cell padding: the four icon buttons need the whole
+                      column width, otherwise the last one (delete) is clipped.
+                    -->
+                    <DataGridTemplateColumn Header="操作" Width="128">
+                        <DataGridTemplateColumn.CellStyle>
+                            <Style TargetType="DataGridCell"
+                                   BasedOn="{StaticResource GridCell}">
+                                <Setter Property="Padding" Value="0"/>
+                            </Style>
+                        </DataGridTemplateColumn.CellStyle>
+                        <DataGridTemplateColumn.HeaderStyle>
+                            <Style TargetType="DataGridColumnHeader"
+                                   BasedOn="{StaticResource GridHeader}">
+                                <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                                <Setter Property="Padding" Value="0,8"/>
+                            </Style>
+                        </DataGridTemplateColumn.HeaderStyle>
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                    <Button Content="暂停" Style="{StaticResource RowButton}"
-                                            Click="OnPauseSelected"/>
-                                    <Button Content="重下" Style="{StaticResource RowButton}"
-                                            Click="OnRestartSelected"/>
-                                    <Button Content="删除" Style="{StaticResource RowButton}"
-                                            Click="OnDeleteSelected"/>
+                                <!--
+                                  Icon buttons: pause and resume sit side by side
+                                  so "继续" is one click away instead of buried in
+                                  the context menu. No frame is drawn around the
+                                  glyphs — see RowIconButton.
+                                -->
+                                <StackPanel Orientation="Horizontal"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center">
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnPauseSelected" ToolTip="暂停">
+                                        <!-- Bare "vertical equals" — two bars, no box. -->
+                                        <Grid Width="9" Height="11" VerticalAlignment="Center">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="3"/>
+                                                <ColumnDefinition Width="3"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Rectangle Grid.Column="0"
+                                                       Fill="{DynamicResource TextPrimary}"/>
+                                            <Rectangle Grid.Column="2"
+                                                       Fill="{DynamicResource TextPrimary}"/>
+                                        </Grid>
+                                    </Button>
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnResumeSelected" ToolTip="继续">
+                                        <TextBlock Text="&#x25B6;" FontSize="10"
+                                                   Foreground="{DynamicResource TextPrimary}"
+                                                   VerticalAlignment="Center"/>
+                                    </Button>
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnRestartSelected" ToolTip="重新下载">
+                                        <TextBlock Text="&#x21BB;" FontSize="13"
+                                                   Foreground="{DynamicResource TextPrimary}"
+                                                   VerticalAlignment="Center"/>
+                                    </Button>
+                                    <Button Style="{StaticResource RowIconButton}"
+                                            Click="OnDeleteSelected" ToolTip="删除"
+                                            Margin="0">
+                                        <TextBlock Text="&#x2715;" FontSize="11"
+                                                   Foreground="{DynamicResource TextPrimary}"
+                                                   VerticalAlignment="Center"/>
+                                    </Button>
                                 </StackPanel>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
@@ -253,11 +333,25 @@
         <!-- ================= status bar ================= -->
         <Border Grid.Row="3" Background="{DynamicResource Surface}"
                 BorderBrush="{DynamicResource BorderBrushSoft}" BorderThickness="0,1,0,0">
+            <!--
+              Two real columns, not two StackPanels sharing one cell: when they
+              share a cell the right-hand buttons are laid over the left-hand
+              text and the text gets trimmed for no visible reason.
+            -->
             <Grid Margin="14,6">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                     <TextBlock x:Name="StatusText" VerticalAlignment="Center"
                                Foreground="{DynamicResource TextMuted}"
                                FontSize="{StaticResource UiFontSize}"/>
+                    <TextBlock x:Name="StatusHint" Margin="12,0,0,0"
+                               VerticalAlignment="Center" FontSize="12"
+                               Foreground="{DynamicResource Accent}"
+                               TextTrimming="CharacterEllipsis"/>
                     <TextBlock x:Name="VersionBadge" Margin="12,0,0,0"
                                VerticalAlignment="Center" FontSize="12"
                                Foreground="{DynamicResource TextMuted}" Opacity="0.85"
@@ -268,7 +362,8 @@
                             Click="OnOpenUpdatePage"/>
                 </StackPanel>
 
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <StackPanel Grid.Column="1" Orientation="Horizontal"
+                            HorizontalAlignment="Right" VerticalAlignment="Center">
                     <TextBlock x:Name="FolderLabel" Foreground="{DynamicResource TextMuted}"
                                FontSize="12" VerticalAlignment="Center" MaxWidth="420"
                                TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>

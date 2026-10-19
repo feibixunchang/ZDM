@@ -98,6 +98,13 @@ public partial class MainWindow : Window
             UrlBox.Focus();
         };
 
+        // DWM re-evaluates the caption colours when the window gains or loses
+        // activation, and on some builds it re-tints a custom caption colour
+        // for the inactive state. Re-applying on every transition keeps the
+        // title bar pinned to the page colour in both states.
+        Activated += (_, _) => TitleBarStyler.Apply(this, _theme.IsDark);
+        Deactivated += (_, _) => TitleBarStyler.Apply(this, _theme.IsDark);
+
         // Check for a newer release shortly after launch so the window is
         // already usable; never block startup on the network. The automatic
         // pass only surfaces a badge — a popup unprompted would be intrusive.
@@ -208,6 +215,37 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Take a download handed over from outside the app: a <c>zdm://</c> URI
+    /// from the browser (which is also what wakes the app up when it is not
+    /// running) or a URL on the command line. Always marshalled to the UI
+    /// thread by the caller.
+    /// </summary>
+    public void HandleExternal(ExternalRequest request)
+    {
+        try
+        {
+            var headers = request.Headers();
+            var task = _manager.Add(
+                request.Url,
+                directory: request.Directory,
+                filename: request.Filename,
+                connections: request.Connections,
+                headers: headers.Count > 0 ? headers : null);
+
+            Filter = "all";
+            StatusHint.Text = $"已接管浏览器下载：{task.Filename}";
+        }
+        catch (Exception ex)
+        {
+            // A rejected handover must still tell the user something: the
+            // browser tab it came from has already closed by now.
+            StatusHint.Text = $"接管失败：{ex.Message}";
+        }
+
+        ActivateFromAnotherInstance();
+    }
+
     private async void OnPauseAll(object sender, RoutedEventArgs e)
     {
         await _manager.PauseAllAsync();
@@ -313,31 +351,39 @@ public partial class MainWindow : Window
     /// </summary>
     private TaskRow? MenuRow => _menuRow ?? Selected;
 
-    private async void OnPauseSelected(object sender, RoutedEventArgs e)
+    private void OnPauseSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
-        await _manager.PauseAsync(row.Id);
+        _ = _manager.PauseAsync(row.Id);
+        // Reflect immediately; the manager finishes winding down in
+        // the background so the grid never feels stuck.
         Poll();
     }
 
-    private async void OnResumeSelected(object sender, RoutedEventArgs e)
+    private void OnResumeSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
-        await _manager.ResumeAsync(row.Id);
+        _ = _manager.ResumeAsync(row.Id);
+        // Reflect immediately; the manager finishes winding down in
+        // the background so the grid never feels stuck.
         Poll();
     }
 
-    private async void OnRestartSelected(object sender, RoutedEventArgs e)
+    private void OnRestartSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
-        await _manager.RestartAsync(row.Id);
+        _ = _manager.RestartAsync(row.Id);
+        // Reflect immediately; the manager finishes winding down in
+        // the background so the grid never feels stuck.
         Poll();
     }
 
-    private async void OnDeleteSelected(object sender, RoutedEventArgs e)
+    private void OnDeleteSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
-        await _manager.RemoveAsync(row.Id);
+        _ = _manager.RemoveAsync(row.Id);
+        // Reflect immediately; the manager finishes winding down in
+        // the background so the grid never feels stuck.
         Poll();
     }
 
@@ -542,7 +588,10 @@ public partial class MainWindow : Window
     {
         var all = _manager.All();
         var active = all.Count(d => d.Status == Core.TaskStatus.Downloading);
-        var speed = all.Sum(d => d.SpeedForDisplay);
+        // Only running tasks contribute; a finished one still holds samples in
+        // its meter and would inflate the total.
+        var speed = all.Where(d => d.Status == Core.TaskStatus.Downloading)
+            .Sum(d => d.SpeedForDisplay);
 
         StatusText.Text = string.Join(" · ", new[]
         {

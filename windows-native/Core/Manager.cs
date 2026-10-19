@@ -197,9 +197,15 @@ public sealed class Manager
     {
         var d = Get(id);
         if (d is null) return false;
+
+        // Download.Pause() flips the status synchronously and cancels the
+        // token; the workers then wind down on their own. Broadcasting before
+        // waiting keeps the UI responsive instead of blocking up to 12s on a
+        // slow connection to notice the cancellation.
         d.Pause();
-        await WaitIdleAsync(d);
         Emit("paused", d);
+
+        await WaitIdleAsync(d);
         return true;
     }
 
