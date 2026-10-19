@@ -50,6 +50,22 @@ def _dlog(msg: str) -> None:
         pass
 
 
+def _safe_print(msg: str) -> None:
+    """print() that never raises, even with a non-UTF8 stdout or a closed pipe.
+
+    When the app is launched from Finder (no TTY) the interpreter may still be
+    configured with the ASCII codec; a bare print() of Chinese text would then
+    raise UnicodeEncodeError and abort the caller.
+    """
+    try:
+        print(msg)
+    except Exception:
+        try:
+            sys.stdout.write(msg.encode("utf-8", "replace").decode("ascii", "replace") + "\n")
+        except Exception:
+            pass
+
+
 def default_port() -> int:
     home = os.path.expanduser("~")
     if sys.platform == "win32":
@@ -1023,7 +1039,7 @@ def main(argv=None) -> int:
     guard = SingleApp(f"zdm-gui-{port}")
     if guard.already:
         guard.send(" ".join(rest) or "wake")
-        print("ZDM 桌面端已在运行，已激活现有窗口")
+        _safe_print("ZDM 桌面端已在运行，已激活现有窗口")
         return 0
 
     api = Api(port)

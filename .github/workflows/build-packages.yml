@@ -1,8 +1,8 @@
 name: build packages
 
-# Builds the Linux .deb + tarball and the Windows .exe on every push / release.
-# The macOS .dmg is built on macOS and committed under dist/ by the maintainer,
-# because it requires hdiutil (and, for the native launcher, Xcode/clang).
+# Builds every platform package:
+#   ubuntu-latest -> Linux .deb + zdm-linux.tar.gz + Windows .exe
+#   macos-latest  -> macOS ZDM.app + ZDM-<version>.dmg (native Mach-O launcher)
 on:
   push:
     branches: [main]
@@ -15,9 +15,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    # Ubuntu has dpkg-deb; Windows has no 7z by default, so we build the .exe on
-    # Ubuntu with p7zip (which provides the 7zS.sfx-compatible 7z binary).
+  linux-windows:
+    # Ubuntu has dpkg-deb; Windows packages are assembled here with 7zS.sfx too.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,4 +89,48 @@ jobs:
             dist/zdm_*_all.deb
             dist/zdm-linux.tar.gz
             dist/ZDM-Setup-*.exe
+          fail_on_unmatched_files: false
+  macos:
+    # The .dmg needs hdiutil, and ZDM.app's native launcher needs clang +
+    # a Python.framework with libpython + headers (both ship with the Xcode
+    # command line tools, which macos-latest already has).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcode-select -p
+          clang --version | head -2
+          python3 -V
+          hdiutil help >/dev/null && echo "hdiutil ok"
+
+      - name: Resolve version from tag, else from zdm/__init__.py
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            V=$(grep -E '^__version__' zdm/zdm/__init__.py | head -1 | cut -d'"' -f2)
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+          fi
+          echo "building version ${{ steps.ver.outputs.version }}"
+
+      - name: Build ZDM.app and .dmg (with launch smoke test)
+        run: |
+          bash zdm/build_macos_app.sh "$RUNNER_TEMP/zdm-macos" "${{ steps.ver.outputs.version }}"
+
+      - name: Upload the .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: zdm-macos-dmg
+          path: ${{ runner.temp }}/zdm-macos/ZDM-*.dmg
+          if-no-files-found: error
+
+      - name: Attach the .dmg to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.temp }}/zdm-macos/ZDM-*.dmg
           fail_on_unmatched_files: false
