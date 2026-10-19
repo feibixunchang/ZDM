@@ -2,9 +2,9 @@
 """Build distributable packages for ZDM on all three platforms.
 
 Outputs (into ./dist):
-  - zdm_1.3.0_all.deb          Linux  (apt/dpkg installable, real .deb)
+  - zdm_1.10.0_all.deb          Linux  (apt/dpkg installable, real .deb)
   - zdm-linux.tar.gz           Linux  (fallback, user-level, no root)
-  - ZDM-Setup-1.3.0.exe        Windows (.exe self-extracting installer, no admin)
+  - ZDM-PyQt5-Setup-1.10.0.exe Windows (.exe self-extracting installer, no admin)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
 The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
 SFX = os.path.join(ROOT, "7zS.sfx")
-VERSION = "1.3.0"
+VERSION = "1.10.0"
 
 
 def which(cmd):
@@ -183,7 +183,7 @@ def build_windows_exe():
     with open(cfg, "w", encoding="utf-8") as fh:
         fh.write(config)
 
-    out = os.path.join(DIST, f"ZDM-Setup-{VERSION}.exe")
+    out = os.path.join(DIST, f"ZDM-PyQt5-Setup-{VERSION}.exe")
     with open(out, "wb") as out_fh:
         for part in (SFX, cfg, archive):
             with open(part, "rb") as pf:
@@ -260,10 +260,10 @@ def main():
     os.makedirs(DIST, exist_ok=True)
     clean_pycache()
     # Remove previously built artifacts FIRST. Otherwise a stale zdm_1.0.0_all.deb
-    # sitting next to a freshly built zdm_1.3.0_all.deb makes any downstream
+    # sitting next to a freshly built zdm_1.10.0_all.deb makes any downstream
     # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
     import glob
-    for pat in ("dist/zdm_*_all.deb", "dist/ZDM-Setup-*.exe",
+    for pat in ("dist/zdm_*_all.deb", "dist/ZDM-PyQt5-Setup-*.exe",
                 "dist/zdm-linux.tar.gz", "dist/zdm-macos.zip"):
         for stale in glob.glob(os.path.join(ROOT, pat)):
             if os.path.isfile(stale):
@@ -307,7 +307,7 @@ def main():
             f"       若要 .dmg：在 Mac 上执行包内 build_macos_dmg.sh 一键生成 ZDM-{VERSION}.dmg\n"
             "       （.dmg 需 macOS 的 hdiutil 生成，无法在 Linux 上构建）\n\n"
             "3) Windows\n"
-            f"   - ZDM-Setup-{VERSION}.exe\n"
+            f"   - ZDM-PyQt5-Setup-{VERSION}.exe\n"
             "       双击运行，按提示安装（用户级、无需管理员；自动检测/安装 Python 与 PyQt5）\n\n"
             f"本版新增（v{VERSION}）：\n"
             "  · 每个任务行前面有 ⏸ / ▶（单文件暂停 / 继续）；筛选标签右侧是「全部暂停 / 全部继续」\n"

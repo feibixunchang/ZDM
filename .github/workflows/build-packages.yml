@@ -100,7 +100,7 @@ jobs:
           path: |
             dist/zdm_*_all.deb
             dist/zdm-linux.tar.gz
-            dist/ZDM-Setup-*.exe
+            dist/ZDM-PyQt5-Setup-*.exe
             dist/README.txt
           if-no-files-found: error
 
@@ -112,7 +112,7 @@ jobs:
           files: |
             dist/zdm_*_all.deb
             dist/zdm-linux.tar.gz
-            dist/ZDM-Setup-*.exe
+            dist/ZDM-PyQt5-Setup-*.exe
           fail_on_unmatched_files: false
   macos:
     # The .dmg needs hdiutil, and ZDM.app's native launcher needs clang +
