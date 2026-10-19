@@ -127,6 +127,7 @@
                       EnableRowVirtualization="True"
                       VirtualizingPanel.IsVirtualizing="True"
                       VirtualizingPanel.VirtualizationMode="Recycling"
+                      MouseDoubleClick="OnGridDoubleClick"
                       ContextMenuOpening="OnGridContextMenu">
                 <DataGrid.Columns>
 

@@ -34,7 +34,7 @@ public partial class App : Application
 
         // Diagnostics and autostart must never be silently swallowed by the
         // single-instance guard, so they are exempt from it.
-        var headless = args.Contains("--selftest");
+        var headless = args.Contains("--selftest") || args.Contains("--uitest");
 
         if (!headless)
         {
