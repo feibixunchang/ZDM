@@ -3,13 +3,13 @@
 
 #define AppName "ZDM 下载管理器"
 #define AppNameEn "ZDM Download Manager"
-#define AppVersion "1.10.0"
+#define AppVersion "1.11.0"
 #define AppPublisher "ZDM"
 #define AppExeName "Zdm.exe"
 #define AppUrl "https://github.com/"
 
 [Setup]
-; AppId 保持与 1.1.0 一致，这样 1.10.0 会覆盖升级而不是并存两个版本
+; AppId 保持与 1.1.0 一致，这样 1.11.0 会覆盖升级而不是并存两个版本
 AppId={{7C5B8E11-4A2D-4F6B-9C3E-ZDM110000001}
 AppName={#AppName}
 AppVersion={#AppVersion}

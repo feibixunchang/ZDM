@@ -2,9 +2,9 @@
 """Build distributable packages for ZDM on all three platforms.
 
 Outputs (into ./dist):
-  - zdm_1.10.0_all.deb          Linux  (apt/dpkg installable, real .deb)
-  - zdm-linux.tar.gz           Linux  (fallback, user-level, no root)
-  - ZDM-PyQt5-Setup-1.10.0.exe Windows (.exe self-extracting installer, no admin)
+  - zdm_1.11.0_amd64.deb       Linux  (self-contained: bundled CPython + PyQt5)
+  - zdm-linux-amd64.tar.gz     Linux  (same bundle, user-level install, no root)
+  - ZDM-PyQt5-Setup-1.11.0.exe Windows (.exe self-extracting installer, no admin)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
 The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
 SFX = os.path.join(ROOT, "7zS.sfx")
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 
 
 def which(cmd):
@@ -67,97 +67,30 @@ def stage_files(dst):
             shutil.copy2(src, os.path.join(dst, f))
 
 
-# ----------------------------------------------------------------- Linux deb
-def build_deb():
-    staging = os.path.join(DIST, "deb_staging")
-    if os.path.exists(staging):
-        shutil.rmtree(staging)
-    app = os.path.join(staging, "usr", "local", "share", "zdm")
-    bindir = os.path.join(staging, "usr", "local", "bin")
-    appdir = os.path.join(staging, "usr", "local", "share", "applications")
-    icondir = os.path.join(staging, "usr", "local", "share", "icons", "hicolor",
-                          "128x128", "apps")
-    os.makedirs(app, exist_ok=True)
-    os.makedirs(bindir, exist_ok=True)
-    os.makedirs(appdir, exist_ok=True)
-    os.makedirs(icondir, exist_ok=True)
+# ----------------------------------------------------------------- Linux
+def build_linux_native():
+    """Build the self-contained Linux app (ZDM onedir + .deb + portable tar.gz).
 
-    for item in ("zdm", "web", "extension"):
-        shutil.copytree(os.path.join(ZDM, item), os.path.join(app, item),
-                        dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("__pycache__"))
-    for f in ("zdm.py", "gui.py", "theme.py", "README.md"):
-        shutil.copy2(os.path.join(ZDM, f), os.path.join(app, f))
+    The heavy lifting lives in zdm/build_linux_app.sh so that CI, a developer
+    machine and this script all use one code path. Linux packaging used to ship
+    a ~350 KB source-only .deb whose launcher was a 4-line shell script calling
+    the system python3 - it contained no interpreter and no PyQt5, so the window
+    never opened on a clean machine. The bundle produced here embeds CPython,
+    PyQt5/Qt and the resources, exactly like the macOS .dmg.
+    """
+    import glob
 
-    with open(os.path.join(bindir, "zdm"), "w", encoding="utf-8") as fh:
-        fh.write('#!/bin/sh\nPY="$(command -v python3 || command -v python)"\n'
-                 'exec "$PY" "/usr/local/share/zdm/zdm.py" "$@"\n')
-    os.chmod(os.path.join(bindir, "zdm"), 0o755)
-
-    shutil.copy2(os.path.join(ZDM, "extension", "icons", "icon128.png"),
-                 os.path.join(icondir, "zdm.png"))
-    with open(os.path.join(appdir, "zdm.desktop"), "w", encoding="utf-8") as fh:
-        fh.write(
-            "[Desktop Entry]\n"
-            "Type=Application\n"
-            "Name=ZDM 下载管理器\n"
-            "Comment=多线程下载管理器（浏览器扩展可接管下载）\n"
-            "Exec=/usr/local/bin/zdm gui\n"
-            "Icon=zdm\n"
-            "Terminal=false\n"
-            "Categories=Network;FileTransfer;\n"
-            "Keywords=download;zdm;下载;\n"
-            "StartupNotify=true\n"
-        )
-
-    debian = os.path.join(staging, "DEBIAN")
-    os.makedirs(debian, exist_ok=True)
-    size_mb = int(subprocess.check_output(["du", "-sm", staging]).split()[0]) + 1
-    with open(os.path.join(debian, "control"), "w", encoding="utf-8") as fh:
-        fh.write(
-            "Package: zdm\n"
-            f"Version: {VERSION}\n"
-            "Section: net\n"
-            "Priority: optional\n"
-            "Architecture: all\n"
-            f"Installed-Size: {size_mb}\n"
-            "Depends: python3 (>= 3.9)\n"
-            "Maintainer: ZDM <noreply@example.com>\n"
-            "Description: ZDM 跨平台多线程下载管理器\n"
-            " 纯标准库引擎 + PyQt5 桌面端；多线程分块、断点续传、暂停/继续、队列、限速；\n"
-            " 自带浏览器扩展接管下载；桌面端单实例 + 系统托盘（开机自启/退出）。\n"
-        )
-    with open(os.path.join(debian, "postinst"), "w", encoding="utf-8") as fh:
-        fh.write(
-            "#!/bin/sh\n"
-            "set -e\n"
-            "if command -v update-desktop-database >/dev/null 2>&1; then "
-            "update-desktop-database /usr/local/share/applications || true; fi\n"
-            "if command -v gtk-update-icon-cache >/dev/null 2>&1; then "
-            "gtk-update-icon-cache -f -t /usr/local/share/icons/hicolor || true; fi\n"
-            'PY="$(command -v python3 || command -v python)"\n'
-            'if [ -n "$PY" ] && ! "$PY" -c "import PyQt5.QtWidgets" >/dev/null 2>&1; then\n'
-            '  "$PY" -m pip install --user PyQt5 >/dev/null 2>&1 || true\n'
-            "fi\n"
-            "exit 0\n"
-        )
-    os.chmod(os.path.join(debian, "postinst"), 0o755)
-
-    out = os.path.join(DIST, f"zdm_{VERSION}_all.deb")
-    run("dpkg-deb", "--build", "--root-owner-group", staging, out)
-
-
-def build_linux_tarball():
-    name = "zdm-linux"
-    d = os.path.join(DIST, name)
-    if os.path.exists(d):
-        shutil.rmtree(d)
-    stage_files(d)
-    run("chmod", "+x", os.path.join(d, "install.sh"))
-    tar = os.path.join(DIST, f"{name}.tar.gz")
-    if os.path.exists(tar):
-        os.remove(tar)
-    run("tar", "-czf", tar, "-C", DIST, name)
+    if not which("dpkg-deb"):
+        # The .deb needs Debian tooling; a macOS/Windows host can still build
+        # the other packages instead of aborting the whole run.
+        print("==> Linux (native)  [跳过：本机缺少 dpkg-deb，请在 Debian/Ubuntu 上构建]")
+        return
+    out = os.path.join(DIST, "linux-build")
+    run("bash", os.path.join(ZDM, "build_linux_app.sh"), out, VERSION)
+    for pat in ("zdm_*_*.deb", "zdm-linux-*.tar.gz"):
+        for f in glob.glob(os.path.join(out, pat)):
+            shutil.copy2(f, os.path.join(DIST, os.path.basename(f)))
+            print(f"    -> dist/{os.path.basename(f)}")
 
 
 # ----------------------------------------------------------------- Windows exe
@@ -260,32 +193,24 @@ def main():
     os.makedirs(DIST, exist_ok=True)
     clean_pycache()
     # Remove previously built artifacts FIRST. Otherwise a stale zdm_1.0.0_all.deb
-    # sitting next to a freshly built zdm_1.10.0_all.deb makes any downstream
+    # sitting next to a freshly built zdm_1.11.0_all.deb makes any downstream
     # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
     import glob
-    for pat in ("dist/zdm_*_all.deb", "dist/ZDM-PyQt5-Setup-*.exe",
-                "dist/zdm-linux.tar.gz", "dist/zdm-macos.zip"):
+    for pat in ("dist/zdm_*.deb", "dist/ZDM-PyQt5-Setup-*.exe",
+                "dist/zdm-linux*.tar.gz", "dist/zdm-macos.zip"):
         for stale in glob.glob(os.path.join(ROOT, pat)):
             if os.path.isfile(stale):
                 os.remove(stale)
                 print(f"    (removed stale {os.path.basename(stale)})")
-    # The .deb is a Linux artifact and needs dpkg-deb (not available on macOS).
-    # Skip it gracefully so the other packages still build, instead of aborting
-    # the whole run on a missing Linux-only tool.
-    if which("dpkg-deb"):
-        print("==> Linux .deb")
-        build_deb()
-    else:
-        print("==> Linux .deb  [跳过：本机缺少 dpkg-deb，请在 Linux 上构建]")
-    print("==> Linux tarball")
-    build_linux_tarball()
+    print("==> Linux native bundle + .deb + portable tarball")
+    build_linux_native()
     print("==> Windows .exe (7z SFX)")
     build_windows_exe()
     print("==> macOS .zip (ZDM.app + dmg script)")
     build_macos_zip()
     # tidy intermediates
     for junk in ("zdm-payload.7z", "sfx_config.txt", "zdm-windows.zip",
-                 "zdm-windows", "zdm-macos", "deb_staging"):
+                 "zdm-windows", "zdm-macos", "deb_staging", "linux-build"):
         jp = os.path.join(DIST, junk)
         if os.path.isdir(jp):
             shutil.rmtree(jp, ignore_errors=True)
@@ -297,10 +222,10 @@ def main():
             f"ZDM 三端安装包 — v{VERSION}\n"
             "====================\n\n"
             "1) Linux\n"
-            f"   - zdm_{VERSION}_all.deb   （推荐，需 root：sudo dpkg -i zdm_{VERSION}_all.deb）\n"
-            "       ※ .deb 需在 Linux 上用 dpkg-deb 构建；若当前生成的包里没有它，\n"
-            "         请到 Linux 环境执行 python3 build_dist.py 补齐。\n"
-            "   - zdm-linux.tar.gz    （免 root：解压后 ./install.sh）\n\n"
+            f"   - zdm_{VERSION}_amd64.deb  （推荐，需 root：sudo apt install ./zdm_{VERSION}_amd64.deb）\n"
+            "       自带 Python 运行时 + PyQt5/Qt，装到 /opt/zdm，不需要系统 python3、pip 或联网装依赖。\n"
+            "       ※ .deb 需在 Debian/Ubuntu 上用 dpkg-deb 构建（CI 在 ubuntu-22.04 上产出）。\n"
+            f"   - zdm-linux-amd64.tar.gz   （同一份自带运行时；免 root：解压后 ./install.sh，装到 ~/.local）\n\n"
             "2) macOS\n"
             "   - zdm-macos.zip\n"
             "       解压后运行:  bash install.sh   （自动生成 ~/Applications/ZDM.app + 登录自启）\n"
@@ -310,6 +235,9 @@ def main():
             f"   - ZDM-PyQt5-Setup-{VERSION}.exe\n"
             "       双击运行，按提示安装（用户级、无需管理员；自动检测/安装 Python 与 PyQt5）\n\n"
             f"本版新增（v{VERSION}）：\n"
+            "  · Linux 安装包改为真正的自包含原生版：内嵌 CPython + PyQt5/Qt，"
+            "不再依赖系统 python3 / pip（旧包只有 87KB，桌面窗口其实起不来）\n"
+            "  · Linux 托盘 / 右键菜单改为圆角半透明磨砂面板（与 macOS 同一套配色与圆角）\n"
             "  · 每个任务行前面有 ⏸ / ▶（单文件暂停 / 继续）；筛选标签右侧是「全部暂停 / 全部继续」\n"
             "  · macOS 菜单栏图标弹出毛玻璃菜单（vibrancy），深浅色自动匹配\n"
             "  · 「打开」打开下载的文件本身（.dmg 直接进安装界面），另设「目录」定位文件\n"

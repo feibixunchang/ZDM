@@ -10,7 +10,7 @@ import sys
 import time
 from typing import Optional
 
-from . import desktop, server
+from . import desktop, runtime, server
 from .manager import Manager, config_dir, load_config
 
 PID_FILE = os.path.join(config_dir(), "zdm.pid")
@@ -69,12 +69,13 @@ def cmd_start(args) -> int:
         print(f"service already running on port {port}")
         return 0
     if args.daemon:
-        exe = sys.executable
-        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "zdm.py")
+        # Re-run ourselves, not "python3 zdm.py": in a frozen build there is no
+        # script on disk and sys.executable is the bundle's own executable.
+        cmd = runtime.cli_cmd("serve", "--port", str(port))
         log = os.path.join(config_dir(), "zdm.log")
         with open(log, "a", encoding="utf-8") as lf:
             p = subprocess.Popen(
-                [exe, script, "serve", "--port", str(port)],
+                cmd,
                 stdout=lf,
                 stderr=lf,
                 stdin=subprocess.DEVNULL,
@@ -252,9 +253,8 @@ def cmd_gui(args) -> int:
 
     port = _resolve_port(args)
     if not server.ping(port=port):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         subprocess.run(
-            [sys.executable, os.path.join(root, "zdm.py"), "start", "--daemon", "--port", str(port)],
+            runtime.cli_cmd("start", "--daemon", "--port", str(port)),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=30,

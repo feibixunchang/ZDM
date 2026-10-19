@@ -324,7 +324,7 @@ EOF
   <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>
   <key>CFBundleExecutable</key><string>ZDM</string>
   <key>CFBundleIconFile</key><string>zdm</string>
-  <key>CFBundleVersion</key><string>1.10.0</string>
+  <key>CFBundleVersion</key><string>1.11.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

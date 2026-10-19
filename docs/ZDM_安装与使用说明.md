@@ -38,7 +38,46 @@ ZDM 窗口会自动跟着变，无需重启。
 定义在 `zdm/theme.py`，因此深浅两套配色完全统一，不存在深色背景配浅色控件的情况。  
 托盘（菜单栏）图标右键同样提供「打开网页版」。
 
-## v1.10.0 修复与新增
+## Linux：真正的原生安装包（v1.11.0 重做）
+
+旧版 `zdm_1.10.0_all.deb` 只有 **87 KB**：里面是约 350 KB 的 `.py` 源码，加一个 4 行的 shell 启动器
+（`exec "$PY" /usr/local/share/zdm/zdm.py`）。它 `Depends: python3` 却没声明 PyQt5，`postinst` 里用
+`pip install --user PyQt5 || true` 兜底——以 root 跑时装进 `/root/.local`（普通用户读不到），
+Ubuntu 23.04+/Debian 12+ 还会被 PEP 668 拦下，失败又被静默吞掉。结果：`zdm gui` 拿不到 PyQt5，
+自动退回浏览器界面，用户以为装了个网页版。
+
+v1.11.0 起改为和 macOS `.dmg` 同一思路：**自带运行时**。
+
+| 项目 | 旧包（≤1.10.0） | 新包（1.11.0） |
+|---|---|---|
+| 体积 | 87 KB | 约 45–60 MB（xz 压缩后） |
+| 运行时 | 依赖系统 `python3` + 用户自己 pip 装 PyQt5 | 内嵌 CPython + PyQt5/Qt，全部在 `/opt/zdm` |
+| 安装位置 | `/usr/local/share/zdm`（源码） | `/opt/zdm/ZDM`（真正的 ELF 可执行文件） |
+| 启动器 | `/usr/local/bin/zdm` 是 4 行 sh 脚本 | `/usr/bin/zdm`、`/usr/bin/zdm-desktop` 都是指向 ELF 的符号链接 |
+| 依赖 | `python3` | Qt 运行所需的系统库（libGL/libxcb 等），不需要 Python、pip、`python3-pyqt5` |
+| 架构 | `all` | `amd64`（按构建机架构；arm64 同理） |
+| postinst | 以 root 执行 pip | 只刷新桌面数据库与图标缓存 |
+
+安装与验证：
+
+```bash
+sudo apt install ./zdm_1.11.0_amd64.deb
+zdm --version          # ZDM 1.11.0
+zdm --selfcheck        # 报告内嵌 Python / PyQt5 / 资源路径
+zdm-desktop            # 打开桌面窗口（菜单里也有「ZDM 下载管理器」图标）
+```
+
+免 root 版本 `zdm-linux-amd64.tar.gz` 是同一份 bundle：解压后 `./install.sh` 会装到
+`~/.local/share/zdm`，并在 `~/.local/bin` 建 `zdm` / `zdm-desktop` 两个链接。
+
+打包实现见 `zdm/build_linux_app.sh` 与 `zdm/zdm.spec`（PyInstaller onedir）。脚本自带自检：
+必须是 ELF、`--selfcheck` 必须通过、所有 `.so` 无未解析依赖、并在 xvfb 里真实启动一次 GUI 才出包。
+
+托盘/右键菜单在 Linux 上没有 `NSVisualEffectView` 这类系统级模糊 API，改为自绘**圆角半透明磨砂面板**
+（`GlassMenu`，12px 圆角、配色与 macOS 同一套调色板）；没有合成管理器（如裸 XFCE/i3）时自动退成
+不透明，避免出现黑底。
+
+## v1.11.0 修复与新增
 
 ### 1. 点菜单栏图标时菜单文字发灰、点不了
 

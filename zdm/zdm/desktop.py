@@ -29,6 +29,8 @@ import subprocess
 import sys
 import time
 
+from . import runtime
+
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
@@ -52,6 +54,8 @@ def last_error() -> str:
 
 def code_dir() -> str:
     """Directory holding ``gui.py`` / ``zdm.py`` (the runtime root)."""
+    if runtime.is_frozen():
+        return runtime.app_root()
     pkg = os.path.dirname(os.path.abspath(__file__))       # .../zdm
     root = os.path.dirname(pkg)                            # parent of the package
     if os.path.exists(os.path.join(root, "gui.py")):
@@ -130,23 +134,45 @@ def _python_with_qt(code: str) -> str:
 
 
 def _spawn_python_gui(urls, port: int) -> bool:
-    """Fallback: run ``gui.py`` directly with a PyQt5-capable interpreter."""
+    """Fallback: re-run the desktop client with a PyQt5-capable runtime.
+
+    A frozen build ships its own interpreter and has no ``gui.py`` on disk, so
+    we simply re-exec the bundle; ``zdm_app`` sees the ``gui`` subcommand and
+    opens the window. Everything else uses the script + an interpreter that
+    really can import PyQt5.
+    """
     code = code_dir()
-    gui = os.path.join(code, "gui.py")
-    if not os.path.exists(gui):
-        return False
-    py = _python_with_qt(code)
-    if not py:
-        return False
-    try:
+    args = [str(port)] + list(urls or [])
+    if runtime.is_frozen():
+        cmd = runtime.gui_cmd(*args)
+        # The bundle lives in /opt (root-owned, read-only for the user): write
+        # the child's log next to the config, never inside the bundle.
+        try:
+            from .manager import config_dir
+
+            log_path = os.path.join(config_dir(), "gui.log")
+            cwd = os.path.expanduser("~")
+        except Exception:
+            log_path = os.devnull
+            cwd = os.path.expanduser("~")
+    else:
+        gui = os.path.join(code, "gui.py")
+        if not os.path.exists(gui):
+            return False
+        py = _python_with_qt(code)
+        if not py:
+            return False
+        cmd = [py, gui] + args
         log_path = os.path.join(code, "gui.log")
+        cwd = code
+    try:
         with open(log_path, "a", encoding="utf-8") as log:
             subprocess.Popen(
-                [py, gui, str(port)] + list(urls or []),
+                cmd,
                 stdout=log,
                 stderr=log,
                 stdin=subprocess.DEVNULL,
-                cwd=code,
+                cwd=cwd,
                 **_detached(),
             )
         return True

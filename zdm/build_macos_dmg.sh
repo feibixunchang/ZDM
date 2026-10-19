@@ -2,8 +2,8 @@
 # Build a macOS .dmg installer for ZDM.
 # This script MUST run on macOS (it uses /usr/bin/hdiutil, which is macOS-only).
 #
-#   ./build_macos_dmg.sh            # produces ZDM-1.10.0.dmg in the current dir
-#   ZDM_VERSION=1.10.0 ./build_macos_dmg.sh
+#   ./build_macos_dmg.sh            # produces ZDM-1.11.0.dmg in the current dir
+#   ZDM_VERSION=1.11.0 ./build_macos_dmg.sh
 #
 # The repo already ships a ready-made ZDM.app (see zdm/install.sh, which builds it
 # on install). This script just wraps ZDM.app + the browser extension + a shortcut
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="${ZDM_VERSION:-1.10.0}"
+VERSION="${ZDM_VERSION:-1.11.0}"
 APP_NAME="ZDM"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 STAGING="$(mktemp -d)/${APP_NAME}"

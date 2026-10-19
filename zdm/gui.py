@@ -695,6 +695,73 @@ def glyph_icon(kind: str, size: int = 18, alpha: int = 255) -> QIcon:
 GLASS_RADIUS = 12.0  # must match QMenu#glassMenu border-radius in theme.py
 
 
+def _linux_composited() -> bool:
+    """Whether the desktop composites ARGB windows (i.e. can do translucency).
+
+    Without a compositing manager an ARGB popup shows black behind whatever we
+    paint, so the fill has to become fully opaque. Probing ``_NET_WM_CM_S0``
+    would need xcb bindings that PyQt5 does not expose portably; matching the
+    session name is dependency-free and good enough - every mainstream desktop
+    composites by default, XFCE/i3 without a compositor do not.
+    """
+    if sys.platform != "linux":
+        return False
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return True
+    session = " ".join(
+        filter(
+            None,
+            (
+                os.environ.get("XDG_CURRENT_DESKTOP", ""),
+                os.environ.get("DESKTOP_SESSION", ""),
+            ),
+        )
+    ).lower()
+    keys = ("gnome", "kde", "plasma", "unity", "cinnamon", "mate", "budgie",
+            "pantheon", "deepin", "ukui", "pop")
+    return any(k in session for k in keys)
+
+
+class GlassMenu(QMenu):
+    """Popup menu with a rounded, translucent "frosted" surface on Linux.
+
+    macOS gets real vibrancy from ``NSVisualEffectView``; X11/Wayland expose no
+    such API, so the closest honest thing is a translucent rounded panel that
+    lets the desktop show through slightly. The hairline border, radius and item
+    styling still come from ``QMenu#glassMenu`` in theme.py, so both platforms
+    look like the same popup.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._translucent = _linux_composited()
+        if self._translucent:
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):  # noqa: N802 - Qt override
+        try:
+            p = palette()
+            fill = QColor(p.glass_fill)
+            fill.setAlpha(int(p.glass_alpha) if self._translucent else 255)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(fill)
+            rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            painter.drawRoundedRect(rect, GLASS_RADIUS, GLASS_RADIUS)
+            painter.end()
+        except Exception as e:  # noqa: BLE001 - never break the menu
+            _dlog(f"[glass] paint failed: {type(e).__name__}: {e}")
+        super().paintEvent(event)
+
+
+def make_menu(parent=None) -> QMenu:
+    """The popup type for this platform: vibrancy host vs. self-painted panel."""
+    if sys.platform == "darwin":
+        return QMenu(parent) if parent is not None else QMenu()
+    return GlassMenu(parent)
+
+
 def apply_menu_glass(menu: QMenu) -> None:
     """Give a popup menu the real macOS frosted-glass background.
 
@@ -773,11 +840,13 @@ def apply_menu_glass(menu: QMenu) -> None:
 
 
 def style_glass_menu(menu: QMenu) -> None:
-    """Mark a menu as a vibrancy popup and (re)apply the blur before each show."""
-    if sys.platform != "darwin":
-        return
+    """Mark a menu as a frosted popup and (re)apply the blur before each show.
+
+    Both platforms share the ``QMenu#glassMenu`` styling: on macOS the blur is a
+    native NSVisualEffectView behind a transparent window, on Linux GlassMenu
+    paints the translucent fill itself.
+    """
     menu.setObjectName("glassMenu")
-    menu.setAttribute(Qt.WA_TranslucentBackground, True)
     # The app-wide stylesheet already exists by now, so trigger a re-polish to
     # pick up the QMenu#glassMenu rule for this menu instance.
     try:
@@ -785,7 +854,9 @@ def style_glass_menu(menu: QMenu) -> None:
         menu.style().polish(menu)
     except Exception:
         pass
-    menu.aboutToShow.connect(lambda: apply_menu_glass(menu))
+    if sys.platform == "darwin":
+        menu.setAttribute(Qt.WA_TranslucentBackground, True)
+        menu.aboutToShow.connect(lambda: apply_menu_glass(menu))
 
 
 class SingleApp:
@@ -990,7 +1061,7 @@ class MainWindow(QMainWindow):
             self.tray = None
             return
         self.tray = QSystemTrayIcon(QIcon(ICON), self)
-        menu = QMenu()
+        menu = make_menu()
         style_glass_menu(menu)
         menu.addAction("显示/隐藏", self.toggle_window)
         menu.addAction("新建下载", self._new_download)
@@ -1665,7 +1736,7 @@ class MainWindow(QMainWindow):
         t = next((x for x in self._visible() if x["filename"] == item.text()), None)
         if not t:
             return
-        menu = QMenu(self)
+        menu = make_menu(self)
         style_glass_menu(menu)
         menu.addAction("复制链接", lambda: QApplication.clipboard().setText(t["url"]))
         if t["status"] == "completed":
