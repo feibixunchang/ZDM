@@ -30,16 +30,36 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal">
-                    <TextBox x:Name="UrlBox" Width="420"
-                             Style="{StaticResource AppTextBox}"
-                             KeyDown="OnUrlKeyDown"
-                             ToolTip="粘贴下载链接后回车"/>
-                    <TextBox x:Name="ConnectionBox" Width="52" Margin="8,0,0,0"
-                             TextAlignment="Center"
-                             Style="{StaticResource AppTextBox}"
-                             ToolTip="连接数（1-32）"/>
+                    <!--
+                      The URL box uses a real placeholder overlay instead of
+                      WPF's Watermark because a TextBox watermark must be
+                      re-templated anyway, and the hint needs to be muted in
+                      both themes.
+                    -->
+                    <Grid Width="420" Height="30">
+                        <TextBox x:Name="UrlBox" Style="{StaticResource AppTextBox}"
+                                 KeyDown="OnUrlKeyDown"
+                                 TextChanged="OnUrlTextChanged"
+                                 ToolTip="粘贴下载链接后回车"/>
+                        <TextBlock x:Name="UrlHint" Text="在此处粘贴下载链接"
+                                   Foreground="{DynamicResource TextMuted}"
+                                   VerticalAlignment="Center" Margin="11,0,0,0"
+                                   IsHitTestVisible="False" Opacity="0.75"/>
+                    </Grid>
+                    <Grid Width="52" Height="30" Margin="8,0,0,0">
+                        <TextBox x:Name="ConnectionBox"
+                                 Style="{StaticResource AppTextBox}"
+                                 TextAlignment="Center"
+                                 TextChanged="OnUrlTextChanged"
+                                 ToolTip="连接数（1-32）"/>
+                        <TextBlock x:Name="ConnHint" Text="8"
+                                   Foreground="{DynamicResource TextMuted}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   IsHitTestVisible="False" Opacity="0.75"/>
+                    </Grid>
                     <Button Content="下载" Style="{StaticResource PrimaryButton}"
-                            Margin="10,0,0,0" Click="OnAddClick" IsDefault="True"/>
+                            Margin="10,0,0,0" Click="OnAddClick" IsDefault="True"
+                            MinHeight="30" Padding="18,4"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -189,12 +209,15 @@
                 </DataGrid.Columns>
 
                 <DataGrid.ContextMenu>
-                    <ContextMenu>
-                        <MenuItem Header="打开" Click="OnOpenSelected"/>
+                    <ContextMenu x:Name="RowMenu">
+                        <MenuItem Header="打开文件" Click="OnOpenFile"/>
+                        <MenuItem Header="打开所在文件夹" Click="OnOpenRowFolder"/>
+                        <Separator/>
                         <MenuItem Header="暂停" Click="OnPauseSelected"/>
                         <MenuItem Header="继续" Click="OnResumeSelected"/>
                         <MenuItem Header="重新下载" Click="OnRestartSelected"/>
                         <Separator/>
+                        <MenuItem Header="复制链接" Click="OnCopyUrl"/>
                         <MenuItem Header="取消（保留文件）" Click="OnCancelSelected"/>
                         <MenuItem Header="删除" Click="OnDeleteSelected"/>
                     </ContextMenu>

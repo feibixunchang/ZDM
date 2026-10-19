@@ -85,14 +85,15 @@ public partial class MainWindow : Window
         };
 
         // Check for a newer release shortly after launch so the window is
-        // already usable; never block startup on the network.
+        // already usable; never block startup on the network. The automatic
+        // pass only surfaces a badge — a popup unprompted would be intrusive.
         if (!autoStart)
         {
             var updater = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
             updater.Tick += (_, _) =>
             {
                 updater.Stop();
-                CheckUpdatesAsync();
+                CheckUpdatesAsync(interactive: false);
             };
             updater.Start();
         }
@@ -151,6 +152,19 @@ public partial class MainWindow : Window
         if (e.Key != Key.Enter) return;
         AddUrl();
         e.Handled = true;
+    }
+
+    /// <summary>
+    /// Hide each hint as soon as the box has content. Without this the grey
+    /// prompt sits on top of what the user typed.
+    /// </summary>
+    private void OnUrlTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (UrlHint is null || ConnectionBox is null) return;
+        UrlHint.Visibility = string.IsNullOrEmpty(UrlBox.Text)
+            ? Visibility.Visible : Visibility.Collapsed;
+        ConnHint.Visibility = string.IsNullOrEmpty(ConnectionBox.Text)
+            ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnAddClick(object sender, RoutedEventArgs e) => AddUrl();
@@ -298,19 +312,83 @@ public partial class MainWindow : Window
         Poll();
     }
 
-    private void OnOpenSelected(object sender, RoutedEventArgs e)
+    /// <summary>Open the downloaded file itself with its default app.</summary>
+    private void OnOpenFile(object sender, RoutedEventArgs e)
     {
         if (Selected is not { } row) return;
-        Human.OpenInExplorer(row.Status == Core.TaskStatus.Completed
-            ? Path.Combine(row.Directory, row.Filename)
-            : row.Directory);
+        var path = Path.Combine(row.Directory, row.Filename);
+        if (!File.Exists(path))
+        {
+            MessageBox.Show(this, "文件尚未下载完成。", "ZDM 下载管理器",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"无法打开文件：\n{ex.Message}", "ZDM 下载管理器",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
+    /// <summary>Reveal the file in Explorer, or open the folder when incomplete.</summary>
+    private void OnOpenRowFolder(object sender, RoutedEventArgs e)
+    {
+        if (Selected is not { } row) return;
+        var path = row.Status == Core.TaskStatus.Completed
+            ? Path.Combine(row.Directory, row.Filename)
+            : row.Directory;
+        Human.OpenInExplorer(path);
+    }
+
+    private void OnCopyUrl(object sender, RoutedEventArgs e)
+    {
+        if (Selected is not { } row) return;
+        try
+        {
+            Clipboard.SetText(row.Url);
+            StatusHint.Text = "链接已复制到剪贴板";
+        }
+        catch
+        {
+            StatusHint.Text = "复制失败";
+        }
+    }
+
+    private void OnOpenSelected(object sender, RoutedEventArgs e) => OnOpenFile(sender, e);
+
+    /// <summary>
+    /// Right-click on a row selects it and points the context menu at it, so the
+    /// menu always acts on the row under the cursor rather than a stale
+    /// selection.
+    /// </summary>
     private void OnGridContextMenu(object sender, ContextMenuEventArgs e)
     {
-        // Right-clicking empty space must not select a row first.
-        if (e.OriginalSource is DependencyObject src && Ancestor<DataGridRow>(src) is null)
+        if (e.OriginalSource is not DependencyObject src) return;
+
+        var row = Ancestor<DataGridRow>(src);
+        if (row?.Item is not TaskRow hit)
+        {
+            // Clicked empty space: clear the selection and show no row menu.
             TaskGrid.SelectedItem = null;
+            RowMenu.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        TaskGrid.SelectedItem = hit;
+        TaskGrid.Focus();
+
+        // "Open file" only makes sense once the file exists on disk.
+        var fileMenu = RowMenu.Items.OfType<MenuItem>()
+            .FirstOrDefault(m => m.Header as string == "打开文件");
+        if (fileMenu is not null)
+            fileMenu.IsEnabled = hit.Status == Core.TaskStatus.Completed;
+
+        RowMenu.PlacementTarget = TaskGrid;
+        RowMenu.Visibility = Visibility.Visible;
     }
 
     private static T? Ancestor<T>(DependencyObject node) where T : DependencyObject
@@ -376,16 +454,37 @@ public partial class MainWindow : Window
     private UpdateInfo? _pendingUpdate;
 
     /// <summary>
-    /// Check GitHub for a newer release. Runs once shortly after launch and on
-    /// demand from the tray. Network failures are silent by design.
+    /// Check GitHub for a newer release. Every outcome reports back explicitly —
+    /// a button that does nothing reads as broken. Failures never interrupt
+    /// downloads.
     /// </summary>
-    private async void CheckUpdatesAsync()
+    private async void CheckUpdatesAsync(bool interactive = true)
     {
+        SetUpdateButtonBusy(true);
         StatusHint.Text = "正在检查更新…";
-        var info = await _updates.CheckAsync();
+
+        UpdateInfo? info;
+        try
+        {
+            info = await _updates.CheckAsync();
+        }
+        catch
+        {
+            info = null;
+        }
+        finally
+        {
+            SetUpdateButtonBusy(false);
+        }
+
         if (info is null)
         {
-            StatusHint.Text = "检查更新失败，请稍后再试";
+            StatusHint.Text = "检查更新失败：无法连接到 GitHub";
+            UpdateButton.Visibility = Visibility.Collapsed;
+            if (interactive)
+                MessageBox.Show(this,
+                    "无法连接到 GitHub，请检查网络后重试。",
+                    "检查更新", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
@@ -393,24 +492,36 @@ public partial class MainWindow : Window
         {
             StatusHint.Text = $"已是最新版本（{AppVersion.Display}）";
             UpdateButton.Visibility = Visibility.Collapsed;
+            if (interactive)
+                MessageBox.Show(this,
+                    $"已是最新版本（{AppVersion.Display}）。",
+                    "检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
         _pendingUpdate = info;
         UpdateButton.Visibility = Visibility.Visible;
-        UpdateButton.Content = $"有新版本 {info.Tag}";
+        UpdateButton.Content = $"{info.Tag} 可更新";
+        StatusHint.Text = $"发现新版本 {info.Tag}";
+
+        if (!interactive)
+            return;
 
         var answer = MessageBox.Show(
             this,
             $"发现新版本 {info.Tag}（当前 {AppVersion.Display}）。\n\n是否打开下载页面？",
-            "ZDM 下载管理器",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Information);
+            "发现新版本",
+            MessageBoxButton.YesNo, MessageBoxImage.Information);
 
         if (answer == MessageBoxResult.Yes)
             OpenUrl(info.Url);
-        else
-            StatusHint.Text = $"有新版本 {info.Tag} 可下载";
+    }
+
+    private void SetUpdateButtonBusy(bool busy)
+    {
+        if (UpdateButton is null) return;
+        UpdateButton.IsEnabled = !busy;
+        UpdateButton.Content = busy ? "检查中…" : "检查更新";
     }
 
     private void OnOpenUpdatePage(object sender, RoutedEventArgs e)
@@ -451,7 +562,10 @@ public partial class MainWindow : Window
             _tray.Icon = new System.Drawing.Icon(iconPath);
 
         _tray.Text = "ZDM 下载管理器";
-        _tray.Visible = false;
+        // Windows users expect a tray icon whenever the app runs, not only after
+        // it is minimized: downloads continue in the background and the tray is
+        // the way back in.
+        _tray.Visible = true;
         _tray.DoubleClick += (_, _) => RunOnUi(ShowFromTray);
 
         var menu = new Forms.ContextMenuStrip();
@@ -470,7 +584,7 @@ public partial class MainWindow : Window
         menu.Items.Add("打开下载目录", null, (_, _) => RunOnUi(OpenFolderFromTray));
         menu.Items.Add("打开网页版", null, (_, _) => RunOnUi(OpenWebFromTray));
         menu.Items.Add("设置…", null, (_, _) => RunOnUi(OpenSettingsFromTray));
-        menu.Items.Add("检查更新", null, (_, _) => RunOnUi(CheckUpdatesAsync));
+        menu.Items.Add("检查更新", null, (_, _) => RunOnUi(() => CheckUpdatesAsync(interactive: true)));
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => RunOnUi(ExitApp));
 
@@ -488,7 +602,8 @@ public partial class MainWindow : Window
 
     private void ShowFromTray()
     {
-        _tray.Visible = false;
+        // The tray icon stays visible for the whole session, so restoring the
+        // window must not touch it.
         Show();
         WindowState = WindowState.Normal;
         Activate();
