@@ -55,7 +55,7 @@ PY=""
 for c in python3 python3.12 python3.11 python3.10 /usr/bin/python3; do
     command -v "$c" >/dev/null 2>&1 || continue
     "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null || continue
-    "$c" -c 'import venv, ensurepip' 2>/dev/null || continue
+    "$c" -c 'import venv' 2>/dev/null || continue
     PY="$c"; break
 done
 [ -n "$PY" ] || { echo "ERROR: python3 >= 3.9 with venv/ensurepip is required" >&2; exit 1; }
@@ -73,7 +73,18 @@ mkdir -p "$DIST" "$PYBUILD"
 # A throwaway venv keeps the build reproducible and keeps PyQt5/PyInstaller out
 # of the system interpreter (PEP 668 would refuse either way).
 echo "==> creating build venv"
-"$PY" -m venv "$VENV"
+# Debian/Ubuntu may ship venv without ensurepip (python3-venv split); create a
+# pip-less venv and bootstrap pip so the build also works outside CI.
+if "$PY" -c 'import ensurepip' 2>/dev/null; then
+    "$PY" -m venv "$VENV"
+else
+    "$PY" -m venv --without-pip "$VENV"
+fi
+if ! "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "==> bootstrapping pip (venv has no ensurepip)"
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py -o "$BUILD_DIR/get-pip.py"
+    "$VENV/bin/python" "$BUILD_DIR/get-pip.py" --quiet --disable-pip-version-check
+fi
 # shellcheck disable=SC1091
 . "$VENV/bin/activate"
 python -m pip install --upgrade --quiet pip wheel
