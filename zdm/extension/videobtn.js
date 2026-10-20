@@ -19,9 +19,19 @@
 
   // 统一记错误。content script 在 isolated world，页面看不到它的 console，
   // 但扩展的「检查视图」里能看到 console.warn。
+  // 注意：console.warn 会进 chrome://extensions 的「错误」页 —— 只留给
+  // 真正的故障；预期内的降级（桥接没起来之类）一律走 dbg（debug 级别，
+  // 用户不会被吓到）。
   const __err = (msg) => {
     try {
       console.warn("[ZDM] " + msg);
+    } catch (_) {
+      /* 忽略 */
+    }
+  };
+  const dbg = (msg) => {
+    try {
+      console.debug("[ZDM] " + msg);
     } catch (_) {
       /* 忽略 */
     }
@@ -133,7 +143,9 @@
         boot();
       } else if (waited >= 8000) {
         clearInterval(timer);
-        __err("站点适配器桥接超时");
+        // 桥接始终没起来（三条注入通道都失败）：不能让按钮整个消失，
+        // 退化为「无清晰度模式」—— 用内置最小配置把播放页按钮装出来。
+        bootWithFallbackConfig();
       }
     }, 100);
     document.addEventListener("zdm-sites-ready", function onReady() {
@@ -145,25 +157,63 @@
     });
   }
 
+  /* 内置最小站点配置：所有注入通道都失败时的最后兜底。
+     只配置播放器（播放页）、不配置卡片 —— 宁可少装按钮，也不用没验证过的
+     选择器把按钮钉到整页容器上（那正是第二轮反馈里「按钮飞出播放窗口」
+     的根因）。 */
+  const FALLBACK_SITES = [
+    {
+      match: /(^|\.)bilibili\.com$/i,
+      name: "bilibili",
+      player: ".bpx-player-video-area",
+    },
+    {
+      match: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/i,
+      name: "youtube",
+      player: "#movie_player",
+    },
+  ];
+
+  async function bootWithFallbackConfig() {
+    if (started) return;
+    const h = location.hostname.toLowerCase();
+    const site = FALLBACK_SITES.find((s) => s.match.test(h));
+    if (!site) {
+      dbg("不是支持的站点");
+      return;
+    }
+    siteName = site.name;
+    S = { name: site.name, player: site.player, cards: "", cardSpec: null };
+    PLAYER_SEL = site.player;
+    dbg("桥接超时，以下载按钮（无清晰度）模式运行: " + site.name);
+    start();
+  }
+
   /* 主路径：等 background.js 用 chrome.scripting 注册的 sites.js
-     （document_start 执行）把桥接建好。1.2 秒还没就绪才退回 <script src>
-     注入 —— 正常情况这个定时器会在 bridgeReady() 为真时直接 return，
-     一次兜底注入都不会发生，YouTube 上也就不会再看到 CSP 报错。 */
-  setTimeout(() => {
+     （document_start 执行）把桥接建好。1.2 秒还没就绪就请 background 用
+     executeScript(world:"MAIN") 现场补一枪 —— registerContentScripts 的
+     world 字段要 Chrome 111+，而 executeScript 的 world 从 Chrome 95 就
+     有，老浏览器上主路径静默失败时这条通道还能救。 */
+  setTimeout(async () => {
     if (fallbackTried || bridgeReady()) return;
     fallbackTried = true;
     const h = location.hostname.toLowerCase();
-    // 只有 B站放行 chrome-extension: 的站点才退回 <script src> 注入兜底。
-    // YouTube 的 CSP script-src 不含 chrome-extension:，注入必被拦并抛 CSP
-    // 报错（用户此前在扩展里看到的「错误」正是它）。YouTube 完全依赖
-    // background 的 registerContentScripts(MAIN world) —— 那条通道走浏览器
-    // 原生注入、不受页面 CSP 约束；若它失效则 YouTube 上优雅降级为
-    // 「无清晰度」，而不是抛错。
+    let ok = false;
+    try {
+      const r = await send({ type: "zdm-inject-sites" });
+      ok = !!(r && r.ok);
+    } catch (_) {
+      ok = false;
+    }
+    if (ok) return; // sites.js 起来后会广播 zdm-sites-ready → boot
+    // 最后才试 <script src>：只有 B站（CSP 放行 chrome-extension:）有效。
     if (h.includes("bilibili.com") || h.includes("bilivideo.com")) {
       injectMainWorld();
-    } else {
-      __err("站点适配器桥接未就绪且无法兜底注入（" + h + "）：YouTube 清晰度将不可用");
+      return;
     }
+    // YouTube 上三条注入通道都走不通：等 8 秒兜底超时后用内置最小配置
+    // 把按钮装出来（清晰度读不到，但按钮不能整个消失）。
+    dbg("站点适配器无法注入，播放按钮将以无清晰度模式运行");
   }, 1200);
   waitForBridge();
 
@@ -583,8 +633,10 @@
       // 先给个「读取中」，播放器初始化完清晰度才会进来
       menu.innerHTML = '<div class="tip">正在读取清晰度…</div>';
     }
+    // 桥接没起来时重试只是白等（MAIN world 里没人应答），一次就放弃
+    const tries = bridgeReady() ? 3 : 1;
     const info = isPlayer
-      ? await askWithRetry("playerFormats", 3)
+      ? await askWithRetry("playerFormats", tries)
       : await ask("formatsForCard", cssPathOf(card));
     if (!info) {
       menu.innerHTML = '<div class="tip">没能识别这个视频。</div>';
@@ -728,6 +780,8 @@
     // 播放器优先：它可能不是任何卡片的子元素
     const player = playerOf(el);
     if (player) return player;
+    // 兜底模式下没有卡片配置，closest("") 会直接抛 SyntaxError
+    if (!S || !S.cards) return null;
     const card = el.closest(S.cards);
     if (!card) return null;
     if (card === document.body || card === document.documentElement) return null;

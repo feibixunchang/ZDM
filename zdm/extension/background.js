@@ -162,7 +162,20 @@ function classifyResponse(details) {
   }
   if (!kind) return null;
   if (len && len < MIN_MEDIA_BYTES) return null;
-  return { url, kind, size: len, name: nameFromUrl(url, kind), from: "net" };
+  let size = len;
+  if (!size) {
+    // YouTube 的 videoplayback URL 自带 clen=<总字节数> 查询参数。响应头
+    // 没给 Content-Range / Content-Length 时它就是唯一的长度来源 ——
+    // 不解析它，YouTube 嗅探出来的条目大小永远是「未知」。
+    try {
+      const c = new URL(url).searchParams.get("clen");
+      if (c) size = parseInt(c, 10) || 0;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  if (size && size < MIN_MEDIA_BYTES) return null;
+  return { url, kind, size, name: nameFromUrl(url, kind), from: "net" };
 }
 
 function rememberMedia(tabId, item) {
@@ -246,6 +259,32 @@ function registerSitesScript() {
 }
 registerSitesScript();
 chrome.runtime.onInstalled.addListener(registerSitesScript);
+
+/* 第二注入通道：content script 桥接迟迟不就绪时，由它现场把 sites.js
+ * 打进页面的 MAIN world。
+ *
+ * 为什么需要它：registerContentScripts 的 world 字段要 Chrome 111+ 才
+ * 支持，老一点的浏览器（102~110）上注册会静默失败，YouTube 的 CSP 又
+ * 不放行 <script src> 兜底 —— 三条路全断，播放页按钮整个不出现。
+ * chrome.scripting.executeScript 的 world:"MAIN" 从 Chrome 95 就有，
+ * 这条通道覆盖面宽得多。 */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "zdm-inject-sites") {
+    const tabId = sender.tab && sender.tab.id;
+    if (tabId == null || !chrome.scripting || !chrome.scripting.executeScript) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    chrome.scripting.executeScript(
+      { target: { tabId }, files: ["sites.js"], world: "MAIN" },
+      () => {
+        const e = chrome.runtime.lastError;
+        sendResponse(e ? { ok: false, error: e.message } : { ok: true });
+      }
+    );
+    return true; // 异步应答
+  }
+});
 
 chrome.webRequest.onResponseStarted.addListener(
   (details) => {
