@@ -25,7 +25,7 @@
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
 | Linux | `zdm_1.12.0_amd64.deb` | `sudo apt install ./zdm_1.12.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.12.0.exe` | 双击运行，用户级安装、无需管理员 |
+| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.12.0.exe` | 双击运行，用户级安装、无需管理员；**联网安装器**，会自行装 Python 3.12 与 PyQt5（体积小是因为不含运行时） |
 | Windows（原生） | `ZDM-Setup-1.12.0.exe` | C#/WPF 客户端，双击安装，见下方专节 |
 | 浏览器扩展 | 随上面各包附带 | 装好后从 `~/Library/Application Support/ZDM/extension`（macOS）加载已解压的扩展程序 |
 
@@ -53,6 +53,12 @@ python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
 bash zdm/build_linux_app.sh ./linux-build 1.12.0
 ```
+
+> **Windows 有两个包，用途不同**：
+> `ZDM-PyQt5-Setup-*.exe` 是**联网安装器**（约 150 KB），运行时会在你机器上装 Python 3.12 + PyQt5，
+> 适合「想用同一套 PyQt5 界面」的场景；`ZDM-Setup-*.exe` 是 **C#/WPF 原生客户端**（约 70 MB），
+> 自带运行时，装完即用，无需管理员，也不依赖 Python。
+> 想要开箱即用、不想装 Python，选后者。
 
 ## Windows 原生客户端（v1.11.0）
 
