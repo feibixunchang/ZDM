@@ -476,6 +476,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       cookie: item.cookie,
       source: item.source || "sniffer",
       kind: item.kind || "video",
+      // DASH 视频轨的配套音频轨，后端下载后用 ffmpeg 合并
+      audio_url: item.audio_url,
     })
       .then((ok) => {
         sendResponse({ ok });

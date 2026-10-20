@@ -1,93 +1,66 @@
-/* ZDM Connector - 站点适配器（content script）
+/* ZDM Connector - 站点适配器（注入到页面的 MAIN world）
+ *
+ * 为什么要 MAIN world：
+ *   视频站的媒体数据（__playinfo__ / ytInitialPlayerResponse）是页面自己的
+ *   JS 变量，而 content script 默认跑在 isolated world —— 与页面共享 DOM，
+ *   但**不共享 JS 上下文**，读到的 window.__playinfo__ 永远是 undefined。
+ *   Chrome MV3 给 content_scripts 加了 "world": "MAIN"，脚本就注入到页面
+ *   主世界，能直接读这些变量。
+ *
+ * 代价：MAIN world 的脚本与页面脚本共享全局作用域，所以这里只挂一个
+ * 带前缀的对象（window.__zdmSites），不污染别的名字。
  *
  * 职责：把「页面上的一个视频」翻译成「可下载的清晰度列表」。
- *
- * 为什么要站点适配器：
- *   B站 / YouTube 的视频地址都藏在页面脚本里（不是 <video src>），
- *   而且带鉴权。要拿到「有哪些清晰度」必须读页面自己已经加载好的数据：
- *     - YouTube：播放器实例的 response / streamingData
- *     - B站：__playinfo__ / __INITIAL_STATE__ 里的 dash 或 durl
- *   直接发网络请求会被跨域和登录态挡住，在页面里就地解析最稳。
- *
- * 每个适配器返回统一结构：
- *   { site, title, pageUrl, cover, formats: [{ label, url, kind, size, mime, width, height }] }
+ *   - YouTube：播放器实例的 streamingData
+ *   - B站：__playinfo__ / __INITIAL_STATE__ 里的 dash（DASH 或 durl）
  */
 
 (() => {
-  if (window.__zdmSitesLoaded) return;
-  window.__zdmSitesLoaded = true;
+  if (window.__zdmSites) return;
+  window.__zdmSites = {};
 
-  /* ---------------------------------------------------------------- 工具 */
-
-  const abs = (u) => {
+  const S = window.__zdmSites;
+  S.abs = (u) => {
     try {
       return new URL(u, location.href).href;
     } catch (_) {
       return "";
     }
   };
-
   const num = (v) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
   };
 
-  /* 从字节数猜出大致体积，YouTube 的 format 里不一定给 contentLength。 */
-  const sizeFrom = (itag, width, height, bitrate) => {
-    if (num(itag) && width) {
-      // 经验值：按码率 × 长度估算不可靠，退回「按分辨率给个粗略上限」
-      void itag;
-    }
-    void bitrate;
-    return 0;
-  };
-
   /* ---------------------------------------------------------------- YouTube */
 
-  /* 从 ytInitialPlayerResponse 里挖出 streamingData。 */
   function ytPlayerResponse() {
     const w = window;
-    const pr =
-      (w.ytInitialPlayerResponse && w.ytInitialPlayerResponse.streamingData) ||
-      (w.ytplayer && w.ytplayer.config &&
-        w.ytplayer.config.args &&
-        w.ytplayer.config.args.player_response &&
-        JSON.parse(w.ytplayer.config.args.player_response).streamingData) ||
-      null;
-    if (pr) return pr;
-    // 播放过一次之后，播放器实例上会挂着 response
+    // 1) 页面初始化时注入的
+    let pr = w.ytInitialPlayerResponse;
+    // 2) 播放器启动参数里的（字符串形式）
+    if ((!pr || !pr.streamingData) && w.ytplayer && w.ytplayer.config && w.ytplayer.config.args) {
+      const raw = w.ytplayer.config.args.player_response || w.ytplayer.config.args.raw_player_response;
+      if (raw) {
+        try {
+          pr = typeof raw === "string" ? JSON.parse(raw) : raw;
+        } catch (_) {
+          pr = null;
+        }
+      }
+    }
+    if (pr && pr.streamingData) return pr.streamingData;
+    // 3) 播放器实例上的（播放过一次之后）
     const p = document.getElementById("movie_player");
-    const inst = p && (p.getPlayerResponse ? p.getPlayerResponse() : null);
-    return inst && inst.streamingData ? inst.streamingData : null;
-  }
-
-  function ytFormats() {
-    const sd = ytPlayerResponse();
-    if (!sd) return [];
-    const out = [];
-    const push = (f, kind) => {
-      if (!f || !f.url) return;
-      const w = num(f.width);
-      const h = num(f.height);
-      out.push({
-        label: ytLabel(f, kind),
-        url: f.url,
-        kind: kind,
-        size: num(f.contentLength),
-        mime: f.mimeType || "",
-        width: w,
-        height: h,
-        itag: num(f.itag),
-        audioQuality: f.audioQuality || "",
-        bitrate: num(f.bitrate),
-      });
-    };
-    (sd.formats || []).forEach((f) => push(f, "video+muxed"));
-    (sd.adaptiveFormats || []).forEach((f) => {
-      if (f.mimeType && f.mimeType.startsWith("video/")) push(f, "video");
-      else if (f.mimeType && f.mimeType.startsWith("audio/")) push(f, "audio");
-    });
-    return out;
+    if (p && typeof p.getPlayerResponse === "function") {
+      try {
+        const r = p.getPlayerResponse();
+        if (r && r.streamingData) return r.streamingData;
+      } catch (_) {
+        /* 播放器还没准备好 */
+      }
+    }
+    return null;
   }
 
   function ytLabel(f, kind) {
@@ -96,7 +69,9 @@
       const q = f.audioQuality || "";
       const br = num(f.audioSampleRate) / 1000;
       const bits = [];
-      if (q) bits.push(q === "AUDIO_QUALITY_LOW" ? "低音质" : q === "AUDIO_QUALITY_MEDIUM" ? "中音质" : "高音质");
+      if (q === "AUDIO_QUALITY_LOW") bits.push("低音质");
+      else if (q === "AUDIO_QUALITY_MEDIUM") bits.push("中音质");
+      else if (q === "AUDIO_QUALITY_HIGH") bits.push("高音质");
       if (br) bits.push(br + " kHz");
       return "音频 · " + (bits.join(" · ") || "默认");
     }
@@ -107,7 +82,6 @@
     if (kind === "video") {
       // 自适应流只有视频轨；后端会下载配套音频轨并用 ffmpeg 合并
       parts.push("视频+音频");
-      if (f.qualityLabel) parts.push(f.qualityLabel);
     }
     if (f.qualityLabel) {
       const ql = String(f.qualityLabel);
@@ -117,7 +91,34 @@
     return parts.join(" · ") || "默认";
   }
 
-  /* YouTube 的卡片：首页 / 搜索 / 频道 / 播放页侧栏。 */
+  function ytFormats() {
+    const sd = ytPlayerResponse();
+    if (!sd) return [];
+    const out = [];
+    const push = (f, kind) => {
+      if (!f || !f.url) return;
+      out.push({
+        label: ytLabel(f, kind),
+        url: f.url,
+        kind: kind,
+        size: num(f.contentLength),
+        mime: f.mimeType || "",
+        width: num(f.width),
+        height: num(f.height),
+        itag: num(f.itag),
+        audioQuality: f.audioQuality || "",
+        bitrate: num(f.bitrate),
+      });
+    };
+    (sd.formats || []).forEach((f) => push(f, "video+muxed"));
+    (sd.adaptiveFormats || []).forEach((f) => {
+      const m = f.mimeType || "";
+      if (m.startsWith("video/")) push(f, "video");
+      else if (m.startsWith("audio/")) push(f, "audio");
+    });
+    return out;
+  }
+
   const YT_CARDS = [
     "ytd-rich-item-renderer",
     "ytd-video-renderer",
@@ -129,29 +130,31 @@
   ].join(",");
 
   function ytCardInfo(card) {
-    const a = card.querySelector("a#video-title-link, a#thumbnail, a[href*='/watch'], a[href*='/shorts/']");
+    const a = card.querySelector(
+      "a#video-title-link, a#thumbnail, a[href*='/watch'], a[href*='/shorts/']"
+    );
     const href = a && a.getAttribute("href");
     if (!href) return null;
-    const pageUrl = abs(href);
+    const pageUrl = S.abs(href);
     if (!/\/watch|\/shorts\//.test(pageUrl)) return null;
     const titleEl = card.querySelector("#video-title, yt-formatted-string#video-title, h3");
-    const title = (titleEl && (titleEl.getAttribute("title") || titleEl.textContent) || "").trim();
+    const title = ((titleEl && (titleEl.getAttribute("title") || titleEl.textContent)) || "").trim();
     const img = card.querySelector("img");
     const cover = img ? img.getAttribute("src") || "" : "";
-    const durEl = card.querySelector("#text.ytd-thumbnail-overlay-time-status-renderer, .ytd-thumbnail-overlay-time-status-renderer, #overlays #text");
-    const duration = (durEl && durEl.textContent || "").trim();
+    const durEl = card.querySelector(
+      "#text.ytd-thumbnail-overlay-time-status-renderer, .ytd-thumbnail-overlay-time-status-renderer, #overlays #text"
+    );
+    const duration = ((durEl && durEl.textContent) || "").trim();
     return { pageUrl, title: title || "YouTube 视频", cover, duration };
   }
 
-  /* YouTube 的清晰度来自「当前播放的视频」，而卡片上可能有十几个不同的视频。
-     只有点了某张卡片之后才知道它有哪些清晰度 —— 所以策略是：
-       1. 点开/悬停时先给出「读取中」
-       2. 真正要下载时，让 background 用页面内的 ytInitialPlayerResponse 解析
-     但那样每个卡片都要发一次请求，太慢。
-     折中：优先用页面已经加载过的 player response（通常是列表页没有、
-     播放页有），拿不到就退回「让用户在播放页使用」，并明确提示。 */
-
   /* ---------------------------------------------------------------- B站 */
+
+  const BILI_QUALITY = {
+    6: "240P 极速", 16: "360P 清晰", 32: "480P 流畅", 64: "720P 高清",
+    74: "720P 高清", 80: "1080P 高清", 112: "1080P 高码率", 116: "1080P 60帧",
+    120: "4K 超清", 125: "HDR 真彩", 126: "杜比视界", 127: "8K 超高清",
+  };
 
   function biliPlayInfo() {
     const w = window;
@@ -181,47 +184,43 @@
     }
     for (const c of cands) {
       if (!c) continue;
-      // 只有真的带 dash/durl 结构的才算
       if (c.dash || c.durl || (c.video && c.audio)) return c;
     }
     return null;
   }
 
-  const BILI_QUALITY = {
-    6: "240P 极速",
-    16: "360P 清晰",
-    32: "480P 流畅",
-    64: "720P 高清",
-    74: "720P 高清",
-    80: "1080P 高清",
-    112: "1080P 高码率",
-    116: "1080P 60帧",
-    120: "4K 超清",
-    125: "HDR 真彩",
-    126: "杜比视界",
-    127: "8K 超高清",
-  };
+  function biliLabel(qid, suffix) {
+    const base = BILI_QUALITY[qid] || (qid ? qid + "P" : "默认");
+    return base + (suffix ? " · " + suffix : "");
+  }
+
+  function biliAudioLabel(a) {
+    const br = num(a && a.bandwidth) / 1000;
+    const parts = ["音频"];
+    if (br) parts.push(Math.round(br) + " kbps");
+    const codec = ((a && a.codecs) || "").split(".")[0];
+    if (codec) parts.push(codec);
+    return parts.join(" · ");
+  }
 
   function biliFormats() {
     const dash = biliDashInfo();
     if (!dash) return [];
     const out = [];
 
-    // DASH：video 数组是视频轨，audio 数组是音频轨
     if (Array.isArray(dash.video)) {
       for (const v of dash.video) {
         const url = v && v.baseUrl;
         if (!url) continue;
-        const id = num(v.id);
         out.push({
-          label: biliLabel(id, "视频+音频"),
+          label: biliLabel(num(v.id), "视频+音频"),
           url,
           kind: "video",
           size: 0,
           mime: v.mimeType || "video/mp4",
           width: num(v.width),
           height: num(v.height),
-          quality: id,
+          quality: num(v.id),
           codec: (v.codecs || "").split(".")[0] || "",
         });
       }
@@ -242,7 +241,7 @@
       }
     }
 
-    // 老式 durl：整个视频合在一个文件里
+    // 老式 durl：整个视频合在一个文件里（自带声音）
     if (Array.isArray(dash.durl)) {
       for (const d of dash.durl) {
         if (!d || !d.url) continue;
@@ -262,20 +261,6 @@
     return out;
   }
 
-  function biliLabel(qid, suffix) {
-    const base = BILI_QUALITY[qid] || (qid ? qid + "P" : "默认");
-    return base + (suffix ? " · " + suffix : "");
-  }
-
-  function biliAudioLabel(a) {
-    const br = num(a && a.bandwidth) / 1000;
-    const parts = ["音频"];
-    if (br) parts.push(Math.round(br) + " kbps");
-    const codec = ((a && a.codecs) || "").split(".")[0];
-    if (codec) parts.push(codec);
-    return parts.join(" · ");
-  }
-
   const BILI_CARDS = [
     "div.bili-video-card",
     "div.video-page-card-small",
@@ -292,68 +277,114 @@
     const a = card.querySelector("a[href*='/video/'], a[href*='bilibili.com/video/']");
     const href = a && a.getAttribute("href");
     if (!href) return null;
-    const pageUrl = abs(href);
+    const pageUrl = S.abs(href);
     if (!/\/video\/(BV|av)/i.test(pageUrl)) return null;
     const titleEl = card.querySelector(
       ".bili-video-card__info--tit, h3[title], .bili-video-card__info--tit h3, [title]"
     );
-    const title = (titleEl && (titleEl.getAttribute("title") || titleEl.textContent) || "").trim();
+    const title = ((titleEl && (titleEl.getAttribute("title") || titleEl.textContent)) || "").trim();
     const img = card.querySelector("img");
     const cover = img ? img.getAttribute("src") || img.getAttribute("data-src") || "" : "";
-    const durEl = card.querySelector(".bili-video-card__stats__duration, .duration, .bili-video-card__stats--text");
-    const duration = (durEl && durEl.textContent || "").trim();
+    const durEl = card.querySelector(
+      ".bili-video-card__stats__duration, .duration, .bili-video-card__stats--text"
+    );
+    const duration = ((durEl && durEl.textContent) || "").trim();
     return { pageUrl, title: title || "B站视频", cover, duration };
   }
 
   /* ---------------------------------------------------------------- 站点表 */
 
-  const SITES = {
+  const YT_PLAYER = "ytd-watch-flexy, ytd-player, #movie_player, .html5-video-player";
+  const BILI_PLAYER =
+    "#bilibili-player, .bpx-player-container, .bpx-player-video-area, #bilibili-player-video-area";
+
+  S.SITES = {
     youtube: {
       host: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/,
       cards: YT_CARDS,
       cardInfo: ytCardInfo,
       formats: ytFormats,
-      // YouTube 的流媒体地址是逐视频的，列表页拿不到；
-      // 播放页能拿到完整的 streamingData。
-      canListFormats: () => !!ytPlayerResponse(),
+      player: YT_PLAYER,
+      playerInfo: () => {
+        const t = document.querySelector("h1.title yt-formatted-string, h1.title, #title h1");
+        return { title: ((t && t.textContent) || "").trim() || "YouTube 视频" };
+      },
     },
     bilibili: {
       host: /(^|\.)bilibili\.com$|(^|\.)bilivideo\.com$/,
       cards: BILI_CARDS,
       cardInfo: biliCardInfo,
       formats: biliFormats,
-      canListFormats: () => !!(biliPlayInfo() || biliDashInfo()),
+      player: BILI_PLAYER,
+      playerInfo: () => {
+        const t = document.querySelector("h1.video-title, h1[class*='title'], .video-title");
+        return {
+          title: ((t && (t.getAttribute("title") || t.textContent)) || "").trim() || "B站视频",
+        };
+      },
     },
   };
 
-  function siteOf() {
+  S.siteOf = () => {
     const h = location.hostname.toLowerCase();
-    for (const [name, s] of Object.entries(SITES)) {
+    for (const [name, s] of Object.entries(S.SITES)) {
       if (s.host.test(h)) return name;
     }
     return null;
-  }
+  };
 
-  /* 页面里可能已经有多个播放源（YouTube 播放页只有一个）。
-     取第一个可用的即可。 */
-  function currentFormats() {
-    const site = siteOf();
+  S.currentFormats = () => {
+    const site = S.siteOf();
     if (!site) return [];
     try {
-      return SITES[site].formats() || [];
+      return S.SITES[site].formats() || [];
     } catch (_) {
       return [];
     }
-  }
+  };
 
-  /* 从一个视频卡片上找「这个视频的可下载格式」。
-     站点提供「当前播放」数据时直接用；否则返回一个「需要点开播放页」的提示。 */
-  function formatsForCard(card) {
-    const site = siteOf();
+  S.playerElement = () => {
+    const site = S.siteOf();
     if (!site) return null;
-    const info = SITES[site].cardInfo(card);
+    const sel = S.SITES[site].player;
+    if (!sel) return null;
+    try {
+      return document.querySelector(sel);
+    } catch (_) {
+      return null;
+    }
+  };
+
+  /* 播放页的视频信息（标题 + 清晰度）。每次都重新读页面数据 ——
+     __playinfo__ / ytInitialPlayerResponse 是播放器加载完之后才写进页面的。 */
+  S.playerFormats = () => {
+    const site = S.siteOf();
+    if (!site) return null;
+    const fmts = S.currentFormats();
+    let title = "";
+    try {
+      const info = S.SITES[site].playerInfo ? S.SITES[site].playerInfo() : null;
+      title = (info && info.title) || "";
+    } catch (_) {
+      title = "";
+    }
+    return {
+      site,
+      title: title || "视频",
+      pageUrl: location.href,
+      cover: "",
+      duration: "",
+      formats: fmts,
+      hasFormats: fmts.length > 0,
+    };
+  };
+
+  S.formatsForCard = (card) => {
+    const site = S.siteOf();
+    if (!site) return null;
+    const info = S.SITES[site].cardInfo(card);
     if (!info) return null;
-    const fmts = currentFormats();
+    const fmts = S.currentFormats();
     return {
       site,
       title: info.title,
@@ -363,13 +394,95 @@
       formats: fmts,
       hasFormats: fmts.length > 0,
     };
+  };
+  /* ---------------------------------------------------------------- 桥接
+
+     videobtn.js 跑在 isolated world（它需要 chrome.runtime），而本脚本跑在
+     MAIN world —— 两者共享 DOM 但不共享 JS 上下文。所以把需要的接口
+     挂到 DOM 元素上，videobtn.js 从那里读。
+
+     用 CustomEvent 传数据比写 DOM 属性更好：URL 可能有几千字符，
+     属性值放不下（Chrome 对 attribute 值有长度限制）。 */
+  const BRIDGE_ID = "zdm-site-bridge";
+  let bridge = document.getElementById(BRIDGE_ID);
+  if (!bridge) {
+    bridge = document.createElement("div");
+    bridge.id = BRIDGE_ID;
+    bridge.style.display = "none";
+    (document.body || document.documentElement).appendChild(bridge);
+  }
+  /* 按定位串找回元素（定位串由 isolated world 那边生成）：
+       "id:<id>"  —— 按 id 找
+       "idx:<n>" —— 按在站点卡片列表里的序号找 */
+  function resolveEl(spec) {
+    if (!spec) return null;
+    try {
+      if (spec.indexOf("id:") === 0) {
+        return document.getElementById(spec.slice(3));
+      }
+      if (spec.indexOf("idx:") === 0) {
+        const site = S.siteOf();
+        const sel = site && S.SITES[site] ? S.SITES[site].cards : null;
+        if (!sel) return null;
+        const list = document.querySelectorAll(sel);
+        return list[Number(spec.slice(4))] || null;
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
   }
 
-  window.__zdmSites = {
-    siteOf,
-    currentFormats,
-    formatsForCard,
-    SITES,
-    abs,
-  };
+  // 两个 world 之间的通信只能用 postMessage：
+  //   - JS 自定义属性（el.__x = v）是每个 world 各自一份，跨 world 读不到；
+  //   - attribute 是共享的，但只能放字符串，放不了函数。
+  // postMessage 的 event 对象是两个 world 共享的，所以能用它传函数调用。
+  window.addEventListener("message", (ev) => {
+    const d = ev.data;
+    if (!d || d.__zdm !== "query") return;
+    let out = null;
+    try {
+      if (d.what === "siteOf") out = S.siteOf();
+      else if (d.what === "config") {
+        const site = S.siteOf();
+        const cfg = site && S.SITES[site] ? S.SITES[site] : null;
+        out = cfg
+          ? { cards: cfg.cards, player: cfg.player, site: site }
+          : null;
+      }
+      else if (d.what === "currentFormats") out = S.currentFormats();
+      else if (d.what === "playerFormats") out = S.playerFormats();
+      else if (d.what === "playerElement") {
+        const el = S.playerElement();
+        // 元素本身留在 MAIN world，只回传它的标识
+        if (el) {
+          el.setAttribute("data-zdm-player", "1");
+          out = { id: el.id || "", tag: el.tagName };
+        }
+      } else if ((d.what === "formatsForCard" || d.what === "cardInfo") && d.sel) {
+        const el = resolveEl(d.sel);
+        if (d.what === "formatsForCard") {
+          out = el ? S.formatsForCard(el) : null;
+        } else {
+          const site = S.siteOf();
+          out = el && site && S.SITES[site] && S.SITES[site].cardInfo
+            ? S.SITES[site].cardInfo(el)
+            : null;
+        }
+      }
+    } catch (e) {
+      out = { __error: String(e && e.message) };
+    }
+    // 回应给发起方。
+    // 用 window.postMessage 而不是 ev.source.postMessage ——
+    // ev.source 在 MAIN world 里是 isolated world 的 windowproxy，
+    // 回传时可能落不到对方的监听器上。直接往 window 发，
+    // 两个 world 都能收到（各自按 __zdm/id 过滤）。
+    window.postMessage({ __zdm: "reply", id: d.id, data: out }, "*");
+  });
+
+  // 标记桥接已就绪（attribute 跨 world 共享）
+  bridge.setAttribute("data-zdm-ready", "1");
+  // 通知 isolated world：接口就绪
+  document.dispatchEvent(new CustomEvent("zdm-sites-ready"));
 })();
