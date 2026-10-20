@@ -141,7 +141,7 @@ class Manager:
         start_now: bool = True,
     ) -> Download:
         if not url or not str(url).startswith(("http://", "https://")):
-            raise ValueError("only http/https URLs are supported")
+            raise ValueError("只支持 http/https 链接")
         cfg = self.config
         if filename:
             from .http import sanitize_filename
@@ -234,9 +234,17 @@ class Manager:
             d.cancel(remove_files=remove_files)
         else:
             if remove_files:
-                for p in (d.part_path, d.meta_path):
+                # ``part_path``/``meta_path`` only exist for unfinished tasks;
+                # a completed download owns ``target_path``. Deleting the task
+                # used to leave the finished file behind (the GUI's "删除" then
+                # looked like a no-op on disk).
+                paths = [d.part_path, d.meta_path]
+                if d.status == "completed":
+                    paths.append(d.target_path)
+                for p in paths:
                     try:
-                        os.remove(p)
+                        if p and os.path.isfile(p):
+                            os.remove(p)
                     except OSError:
                         pass
         with self._lock:

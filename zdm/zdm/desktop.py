@@ -212,7 +212,11 @@ def ensure_desktop(urls=None, port: int = 9000) -> bool:
                 subprocess.Popen([exe] + urls, **_detached())
                 return True
         else:
-            launcher = shutil.which("zdm-gui") or shutil.which("zdm-desktop")
+            # Prefer the source-install launcher / our own gui.py. Falling back
+            # to a "zdm-desktop" found on PATH used to pick an old system-wide
+            # (frozen) build when the service was started with a login PATH that
+            # lacks ~/.local/bin - the window then ran the previous version.
+            launcher = shutil.which("zdm-gui")
             if launcher:
                 subprocess.Popen([launcher] + urls, **_detached())
                 return True

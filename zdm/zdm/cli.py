@@ -161,7 +161,10 @@ def cmd_add(args) -> int:
     # the CLI talks to the same API but with auto_show_gui it would be a no-op
     # only when ZDM is already visible).
     if load_config().get("auto_show_gui", True):
-        desktop.ensure_desktop([args.url], port)
+        # No url here: the API call above already queued it. Passing it again
+        # makes the GUI (or the already-running instance it wakes) add a
+        # duplicate task.
+        desktop.ensure_desktop([], port)
     return 0
 
 

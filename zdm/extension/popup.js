@@ -1,4 +1,10 @@
 const $ = (s) => document.querySelector(s);
+// Filenames come from remote servers (Content-Disposition), so they must be
+// escaped before being put into innerHTML.
+const esc = (s) =>
+  String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
 const fmt = (n) => {
   n = Number(n) || 0;
   if (n < 1024) return n + " B";
@@ -47,9 +53,9 @@ async function load() {
   $("#tasks").innerHTML = active.length
     ? active.map((t) => `
       <div class="task">
-        <div class="name">${t.filename}</div>
-        <div class="meta">${fmt(t.downloaded)} / ${t.size ? fmt(t.size) : "?"} · ${t.status === "downloading" ? fmt(t.speed) + "/s" : t.status}</div>
-        <div class="bar"><i style="width:${Math.min(100, t.progress)}%"></i></div>
+        <div class="name">${esc(t.filename)}</div>
+        <div class="meta">${fmt(t.downloaded)} / ${t.size ? fmt(t.size) : "?"} · ${esc(t.status === "downloading" ? fmt(t.speed) + "/s" : t.status)}</div>
+        <div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(t.progress) || 0))}%"></i></div>
       </div>`).join("")
     : `<div class="empty">暂无进行中的任务</div>`;
 }

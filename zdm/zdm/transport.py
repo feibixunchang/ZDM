@@ -8,6 +8,7 @@ back to it for those hosts while keeping the same segmented download logic.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from typing import Dict, Iterator, Optional, Tuple
@@ -16,6 +17,39 @@ from . import http as httpmod
 from .http import HttpError, request
 
 CURL = shutil.which("curl")
+
+
+def _curl_env() -> dict:
+    """Environment for the curl child, with the frozen bundle's libs removed.
+
+    PyInstaller puts its ``_internal`` directory on LD_LIBRARY_PATH. That is
+    right for the bundled interpreter, but every child process inherits it:
+    running the system ``/usr/bin/curl`` then loads the bundle's OpenSSL
+    instead of the system one and dies with
+
+        libssl.so.3: version `OPENSSL_3.2.0' not found
+
+    Stripping our own runtime directory from LD_LIBRARY_PATH makes curl use the
+    system libraries it was built against.
+    """
+    env = os.environ.copy()
+    lp = env.get("LD_LIBRARY_PATH")
+    if not lp:
+        return env
+    drop = set()
+    try:
+        from . import runtime
+
+        if runtime.is_frozen():
+            drop.add(os.path.realpath(runtime.app_root()))
+    except Exception:
+        pass
+    keep = [p for p in lp.split(":") if p and os.path.realpath(p) not in drop]
+    if keep:
+        env["LD_LIBRARY_PATH"] = ":".join(keep)
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
 
 
 class Transport:
@@ -32,7 +66,11 @@ class Transport:
 
 
 def _parse_size(hdrs: Dict[str, str], status: int) -> Tuple[int, bool]:
-    supports = (hdrs.get("accept-ranges") or "").lower() == "bytes" or status == 206
+    # Only an actual 206 / Content-Range proves the server honours Range.
+    # Some servers advertise "Accept-Ranges: bytes" and then ignore the header
+    # and send the whole file with 200; treating those as segmented corrupts
+    # the download (every worker writes bytes from offset 0 into its slice).
+    supports = status == 206 or "content-range" in hdrs
     total = 0
     cr = hdrs.get("content-range")
     if cr and "/" in cr:
@@ -75,6 +113,11 @@ class NativeTransport(Transport):
         if r.status not in (200, 206):
             r.close()
             raise HttpError(r.status, url, r.reason)
+        if end is not None and r.status == 200:
+            # We asked for a byte range but got the whole body: writing it would
+            # corrupt the file. Abort instead of silently producing garbage.
+            r.close()
+            raise ConnectionError("server ignored Range (200 instead of 206)")
         return r.iter_content(65536)
 
 
@@ -104,7 +147,9 @@ class CurlTransport(Transport):
         for k, v in headers.items():
             cmd += ["-H", f"{k}: {v}"]
         cmd.append(url)
-        out = subprocess.run(cmd, capture_output=True, timeout=timeout + 15)
+        out = subprocess.run(
+            cmd, capture_output=True, timeout=timeout + 15, env=_curl_env()
+        )
         text = out.stdout.decode("utf-8", "replace")
         if marker not in text:
             raise ConnectionError(f"curl probe failed: {out.stderr.decode('utf-8', 'replace')[:200]}")
@@ -131,7 +176,10 @@ class CurlTransport(Transport):
         for k, v in headers.items():
             cmd += ["-H", f"{k}: {v}"]
         cmd.append(url)
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        p = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+            env=_curl_env(),
+        )
         try:
             assert p.stdout is not None
             while True:
@@ -166,23 +214,47 @@ def _parse_header_block(text: str) -> Dict[str, str]:
 def probe_with_fallback(
     url: str, headers: Dict[str, str], timeout: float, proxy: Optional[str]
 ) -> Tuple[Transport, dict]:
-    """Probe with the stdlib client, falling back to curl when the host rejects h1.1."""
+    """Probe with the stdlib client, falling back to curl only when needed.
+
+    ``curl`` is the HTTP/2 escape hatch for CDNs that reject HTTP/1.1, so it is
+    only tried for 403/406/429 or a connection-level failure. Ordinary HTTP
+    errors (404, 500, ...) are real answers and must be reported as such -
+    retrying them through curl used to hide the status behind a confusing
+    "curl probe failed" message (and, in the frozen bundle, behind an OpenSSL
+    loading error).
+    """
     native = NativeTransport()
-    try:
-        info = native.probe(url, headers, timeout, proxy)
-        if info["status"] < 400:
-            return native, info
-        if info["status"] in (403, 406, 429) and CURL:
-            raise HttpError(info["status"], url, "fallback")
-        raise HttpError(info["status"], url, "")
-    except (HttpError, ConnectionError, OSError):
-        if not CURL:
-            raise
+    fallback_status = (403, 406, 429)
+
+    def via_curl() -> Tuple[Transport, dict]:
         curl = CurlTransport()
         info = curl.probe(url, headers, timeout, proxy)
         if info["status"] >= 400:
             raise HttpError(info["status"], url, "")
         return curl, info
+
+    try:
+        info = native.probe(url, headers, timeout, proxy)
+    except HttpError as e:
+        if CURL and e.status in fallback_status:
+            try:
+                return via_curl()
+            except Exception:
+                pass
+        raise
+    except (ConnectionError, OSError):
+        if not CURL:
+            raise
+        return via_curl()
+
+    if info["status"] < 400:
+        return native, info
+    if CURL and info["status"] in fallback_status:
+        try:
+            return via_curl()
+        except Exception:
+            pass
+    raise HttpError(info["status"], url, "")
 
 
 def make(name: str) -> Transport:

@@ -2,9 +2,9 @@
 """Build distributable packages for ZDM on all three platforms.
 
 Outputs (into ./dist):
-  - zdm_1.11.0_amd64.deb       Linux  (self-contained: bundled CPython + PyQt5)
+  - zdm_1.11.1_amd64.deb       Linux  (self-contained: bundled CPython + PyQt5)
   - zdm-linux-amd64.tar.gz     Linux  (same bundle, user-level install, no root)
-  - ZDM-PyQt5-Setup-1.11.0.exe Windows (.exe self-extracting installer, no admin)
+  - ZDM-PyQt5-Setup-1.11.1.exe Windows (.exe self-extracting installer, no admin)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
 The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
 SFX = os.path.join(ROOT, "7zS.sfx")
-VERSION = "1.11.0"
+VERSION = "1.11.1"
 
 
 def which(cmd):
@@ -193,7 +193,7 @@ def main():
     os.makedirs(DIST, exist_ok=True)
     clean_pycache()
     # Remove previously built artifacts FIRST. Otherwise a stale zdm_1.0.0_all.deb
-    # sitting next to a freshly built zdm_1.11.0_all.deb makes any downstream
+    # sitting next to a freshly built zdm_1.11.1_all.deb makes any downstream
     # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
     import glob
     for pat in ("dist/zdm_*.deb", "dist/ZDM-PyQt5-Setup-*.exe",
