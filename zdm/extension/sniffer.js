@@ -82,7 +82,22 @@
   }
 
   /* 页面里已经躺着的 <video>/<audio>/<source>：webRequest 只能看到
-     「加载之后」的响应，首屏直链媒体靠这一步补上。 */
+     「加载之后」的响应，首屏直链媒体靠这一步补上。
+
+     大小从 Resource Timing 拿：浏览器自己加载过的资源，
+     performance.getEntriesByName(url)[0].encodedBodySize 就是真实字节数。
+     跨域资源没带 Timing-Allow-Origin 时这两个字段是 0，那就只能显示未知
+     （真正的下载大小由 ZDM 下载时才知道）。 */
+  function timingSize(url) {
+    try {
+      const e = performance.getEntriesByName(url)[0];
+      if (!e) return 0;
+      return e.encodedBodySize || e.transferSize || 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   function scanDom() {
     const out = [];
     const page = location.href;
@@ -104,7 +119,7 @@
       out.push({
         url: abs,
         kind: tag === "audio" || type.startsWith("audio/") ? "audio" : "video",
-        size: 0,
+        size: timingSize(abs),
         name: guessName(abs, tag === "audio" ? "audio" : "video"),
         from: "dom",
       });
@@ -127,7 +142,7 @@
   const pushed = new Set();
 
   function merge(network, dom, keepLocal) {
-    const seen = new Set();
+    const seen = new Map(); // url -> 已收录的那条
     const out = [];
     // background 的网络嗅探结果优先（带 Content-Type / 大小），
     // DOM 扫描的结果补充在后面（首屏直链媒体在 webRequest 之前就加载完了）。
@@ -135,8 +150,19 @@
     // 若还把本地旧条目拼回来，新页面会继承上一个页面的媒体。
     const src = keepLocal ? (network || []).concat(dom || []).concat(items) : (network || []).concat(dom || []);
     for (const it of src) {
-      if (!it || !it.url || seen.has(it.url) || pushed.has(it.url)) continue;
-      seen.add(it.url);
+      if (!it || !it.url || pushed.has(it.url)) continue;
+      const prev = seen.get(it.url);
+      if (prev) {
+        // 同一个 URL 又来了一条（网络嗅探 vs DOM 扫描）。保留信息更全的
+        // 那条：有大小 > 没大小。不然先来的 size:0 会把后来的真实大小
+        // 挡在门外，列表里就一直显示「大小未知」。
+        if (!prev.size && it.size) {
+          out[out.indexOf(prev)] = it;
+          seen.set(it.url, it);
+        }
+        continue;
+      }
+      seen.set(it.url, it);
       out.push(it);
       if (out.length >= MAX_ROWS) break;
     }

@@ -40,9 +40,15 @@
      __playinfo__ / ytInitialPlayerResponse —— 那些变量在 isolated world
      里读不到。而本脚本需要 chrome.runtime，必须留在 isolated world。
 
-     做法：把 sites.js 作为 <script src> 动态插进页面（manifest 里的
-     web_accessible_resources 允许页面加载它），这样它就在 MAIN world 执行。
-     注意 manifest 的 content_scripts 里**不能**写 "world": "MAIN" ——
+     注入由 background.js 用 chrome.scripting.registerContentScripts
+     （world:"MAIN", document_start）完成 —— 那是浏览器原生通道，不受页面
+     CSP 约束。以前这里是直接 document.createElement('script') 插
+     <script src="chrome-extension://.../sites.js">，B站能过但 **YouTube
+     必挂**：它的 CSP script-src 不含 chrome-extension:，注入被拦，
+     YouTube 上点「下载此视频」永远没有清晰度。
+     所以本文件不再主动注入，只在桥接迟迟不就绪时（老浏览器没有
+     world:"MAIN"）才退回 <script src> 兜底。
+     另注意 manifest 的 content_scripts 里**不能**写 "world": "MAIN" ——
      Chrome 155 遇到不认识的字段会把整个 content_scripts 数组丢掉，
      表现为所有 content script 都不执行（且不报错）。
 
@@ -90,7 +96,14 @@
   let S = null;       // 当前站点的配置
   let siteName = "";
 
-  // 把 sites.js 插进页面，让它在 MAIN world 执行
+  /* 兜底注入：把 sites.js 作为 <script src> 插进页面，让它在 MAIN world
+     执行（manifest 的 web_accessible_resources 允许页面加载它）。
+
+     只有主路径失效时才走这里：background.js 的 chrome.scripting 注册
+     需要 Chrome 102+ 的 world:"MAIN"。B站的 CSP 放行 chrome-extension:，
+     所以兜底路径在 B站可用；YouTube 的 CSP 不放行 —— 那正是我们改用
+     chrome.scripting 的原因。 */
+  let fallbackTried = false;
   function injectMainWorld() {
     try {
       const url = chrome.runtime.getURL("sites.js");
@@ -98,7 +111,7 @@
       const el = document.createElement("script");
       el.setAttribute("data-zdm-sites", "1");
       el.src = url;
-      el.onerror = () => __err("sites.js 注入失败");
+      el.onerror = () => __err("sites.js 兜底注入失败（该站点 CSP 可能不放行 chrome-extension:）");
       (document.head || document.documentElement).appendChild(el);
     } catch (e) {
       __err("注入异常: " + (e && e.message));
@@ -132,7 +145,15 @@
     });
   }
 
-  injectMainWorld();
+  /* 主路径：等 background.js 用 chrome.scripting 注册的 sites.js
+     （document_start 执行）把桥接建好。1.2 秒还没就绪才退回 <script src>
+     注入 —— 正常情况这个定时器会在 bridgeReady() 为真时直接 return，
+     一次兜底注入都不会发生，YouTube 上也就不会再看到 CSP 报错。 */
+  setTimeout(() => {
+    if (fallbackTried || bridgeReady()) return;
+    fallbackTried = true;
+    injectMainWorld();
+  }, 1200);
   waitForBridge();
 
   async function boot() {
