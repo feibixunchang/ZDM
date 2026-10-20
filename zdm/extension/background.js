@@ -177,13 +177,77 @@ async function notifyTab(tabId, reset) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * 站点适配器（sites.js）注入
+ *
+ * sites.js 必须在页面的 MAIN world 里跑：它要读页面自己的全局变量
+ * （B站 __playinfo__ / YouTube ytInitialPlayerResponse），而这些变量在
+ * content script 的 isolated world 里读不到。
+ *
+ * 老做法是在 videobtn.js 里 document.createElement('script') 动态插一段
+ * <script src="chrome-extension://.../sites.js">。**B站能过，YouTube 必挂**：
+ * YouTube 的 CSP script-src 不含 chrome-extension:，注入直接被浏览器拦掉，
+ * 控制台报 "Unsafe attempt to load URL chrome-extension://.../sites.js
+ * from frame with URL https://www.youtube/" —— 表现就是 YouTube 上点
+ * 「下载此视频」弹不出任何清晰度（而 B站一切正常，极具迷惑性）。
+ *
+ * chrome.scripting.registerContentScripts 的 world:"MAIN" 是浏览器原生
+ * 注入通道，不走页面的 <script> 元素，**页面的 CSP 管不到它**。
+ * document_start 执行：videobtn.js（document_idle）起来时桥接早就绪，
+ * 不用再等注入。
+ *
+ * world 字段要 Chrome 102+（manifest 的 minimum_chrome_version 已相应上调）；
+ * 老浏览器上这个调用会失败，videobtn.js 会退回 <script src> 注入兜底
+ * （B站的 CSP 放行 chrome-extension:，所以老浏览器上 B站仍然可用）。
+ *
+ * 动态注册的内容脚本由浏览器持久化，SW 被回收/重启都不会丢；但扩展被
+ * 重新加载（chrome://extensions 点刷新）时会清空，所以这里在**每次
+ * SW 启动**都注册一遍，幂等（同 ID 同定义 = 覆盖写）。
+ * ------------------------------------------------------------------ */
+const SITES_SCRIPT_ID = "zdm-sites-main";
+const SITES_MATCHES = [
+  "*://*.bilibili.com/*",
+  "*://*.bilivideo.com/*",
+  "*://*.youtube.com/*",
+  "*://*.youtu.be/*",
+];
+
+function registerSitesScript() {
+  if (!chrome.scripting || !chrome.scripting.registerContentScripts) return;
+  try {
+    const p = chrome.scripting.registerContentScripts([
+      {
+        id: SITES_SCRIPT_ID,
+        matches: SITES_MATCHES,
+        js: [{ file: "sites.js" }],
+        world: "MAIN",
+        runAt: "document_start",
+        allFrames: false,
+      },
+    ]);
+    // 同 ID 重复注册是覆盖写、不报错；这里只兜「返回了 promise 但被拒」
+    // （例如老浏览器不认 world 字段）。
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch (_) {
+    /* 同步抛错同样只是「这条路不通」，由 videobtn.js 兜底 */
+  }
+}
+registerSitesScript();
+chrome.runtime.onInstalled.addListener(registerSitesScript);
+
 chrome.webRequest.onResponseStarted.addListener(
   (details) => {
     const item = classifyResponse(details);
     if (!item) return;
     if (rememberMedia(details.tabId, item)) notifyTab(details.tabId);
   },
-  { urls: ["http://*/*", "https://*/*"], types: ["main_frame", "sub_frame", "xmlhttprequest", "media", "object"] }
+  { urls: ["http://*/*", "https://*/*"], types: ["main_frame", "sub_frame", "xmlhttprequest", "media", "object"] },
+  // 没有这一段，Chrome 根本不会把 Content-Type / Content-Length /
+  // Content-Range 放进 details —— 分类只能靠 URL 扩展名兜底，大小全是
+  // 「未知」，64KB 噪音过滤也一起失效（YouTube 的点击音效全混进列表）。
+  // 实测 B站 CDN 的 206 响应是带着 Content-Range: bytes 0-1023/17828788 的，
+  // 只是扩展没收。
+  ["responseHeaders"]
 );
 
 // 页面跳转后旧列表作废，否则新页面会继承上一个页面的嗅探结果
