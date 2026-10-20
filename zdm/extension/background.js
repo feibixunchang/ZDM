@@ -184,7 +184,16 @@ function rememberMedia(tabId, item) {
     list = [];
     snifferByTab.set(tabId, list);
   }
-  if (list.some((x) => x.url === item.url)) return false;
+  const dup = list.find((x) => x.url === item.url);
+  if (dup) {
+    // 旧版本的条目可能带着 size=0（比如当时的扩展没拿响应头）。同一 URL
+    // 这次拿到了大小就补上，否则「大小未知」会一直挂在列表里刷新不掉。
+    if (!dup.size && item.size) {
+      dup.size = item.size;
+      persist();
+    }
+    return false;
+  }
   list.push(item);
   if (list.length > MAX_PER_TAB) list.shift();
   persist();

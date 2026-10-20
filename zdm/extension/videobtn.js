@@ -36,9 +36,21 @@
       /* 忽略 */
     }
   };
-  window.addEventListener("error", (e) => __err(e.message + " @" + e.lineno));
+  window.addEventListener("error", (e) => {
+    // 浏览器自身的良性告警不是我们的故障，别转发（否则会出现在扩展的
+    // 「错误」页里吓人）：
+    //   - ResizeObserver loop ...：页面布局告警，YouTube 每次布局变化都会来一条
+    //   - "Script error."：跨域脚本的匿名报错，没有任何可排查信息
+    const m = String((e && e.message) || "");
+    if (/ResizeObserver loop/i.test(m) || m === "Script error.") return;
+    __err(m + " @" + (e && e.lineno));
+  });
   // 记录运行上下文：isolated world 才有 chrome.runtime
-  window.addEventListener("unhandledrejection", (e) => __err("rej: " + e.reason));
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = String((e && e.reason) || "");
+    if (/ResizeObserver loop/i.test(r)) return;
+    __err("rej: " + r);
+  });
 
   /* 标记常量。必须定义在任何函数调用之前 —— const 有暂时性死区，
      boot() 里用到它们，若定义在后面会抛 ReferenceError。 */
@@ -86,13 +98,14 @@
     return new Promise((resolve) => {
       const id = ++queryId;
       let done = false;
+      // YouTube 走 innertube 接口要等网络往返，3s 太紧，放宽到 8s
       const timer = setTimeout(() => {
         if (!done) {
           done = true;
           inflight.delete(id);
           resolve(null);
         }
-      }, 3000);
+      }, 8000);
       inflight.set(id, (data) => {
         if (done) return;
         done = true;
