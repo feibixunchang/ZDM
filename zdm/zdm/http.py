@@ -182,6 +182,21 @@ def request(
     raise HttpError(310, url, "too many redirects")
 
 
+def _fix_mojibake(name: str) -> str:
+    """Undo UTF-8 bytes that ``email`` decoded as Latin-1.
+
+    ``email.message.get_param('filename')`` already percent-decodes an RFC 2231
+    ``filename*=UTF-8''...`` value, but it decodes the bytes with Latin-1. For
+    a Chinese name that yields "æ\x9c\x8då\x8a¡..." instead of "服务". Re-encode
+    to bytes and decode as UTF-8 when that round-trips cleanly; otherwise keep
+    the original text (a genuine Latin-1 filename must not be mangled).
+    """
+    try:
+        return name.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name
+
+
 def filename_from_headers(headers: Dict[str, str], url: str) -> str:
     """Resolve a usable filename from Content-Disposition or URL."""
     cd = headers.get("content-disposition") or headers.get("Content-Disposition")
@@ -191,13 +206,17 @@ def filename_from_headers(headers: Dict[str, str], url: str) -> str:
         name = msg.get_param("filename", header="content-disposition")
         if not name:
             name = msg.get_param("filename*", header="content-disposition")
+        charset = ""
         if name:
             if isinstance(name, tuple):  # RFC2231 (charset, lang, value)
+                charset = (name[0] or "").lower()
                 name = name[2]
             try:
                 name = urllib.parse.unquote(name, errors="replace")
             except Exception:
                 pass
+            if charset.startswith("utf-8") or not charset:
+                name = _fix_mojibake(name)
             name = name.strip().strip('"').split("/")[-1].split("\\")[-1]
             if name:
                 return sanitize_filename(name)

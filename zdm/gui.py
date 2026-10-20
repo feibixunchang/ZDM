@@ -292,8 +292,15 @@ class Api:
     def state(self):
         return self._req("GET", "state")
 
-    def add(self, **kw):
-        return self._req("POST", "tasks", kw)
+    def add(self, payload=None, **kw):
+        """Create a task.
+
+        Accept either a ready-made payload dict (the call sites in this module
+        pass ``{"url": ...}`` positionally) or keyword arguments.
+        """
+        body = dict(payload or {})
+        body.update(kw)
+        return self._req("POST", "tasks", body)
 
     def action(self, task_id: str, action: str):
         return self._req("POST", f"tasks/{task_id}/{action}", {}, timeout=30.0)
@@ -1229,11 +1236,27 @@ class MainWindow(QMainWindow):
 
     def _visible(self):
         f = self.filter
+        # Always hand back a fresh list: _render() sorts the result and must not
+        # reorder self.tasks (that used to make the table order and the row ->
+        # task lookup disagree).
         if f == "all":
-            return self.tasks
+            return list(self.tasks)
         if f == "downloading":
             return [t for t in self.tasks if t["status"] in ("downloading", "queued", "merging")]
         return [t for t in self.tasks if t["status"] == f]
+
+    def _task_at_row(self, row: int):
+        """Map a visual table row to the task it currently shows.
+
+        Looking the task up by filename (the old behaviour) picked the wrong
+        row whenever the active filter reordered the list or two tasks shared a
+        name.
+        """
+        try:
+            tid = self._row_ids[row]
+        except (AttributeError, IndexError, TypeError):
+            return None
+        return next((t for t in self.tasks if t["id"] == tid), None)
 
     def refresh_theme(self):
         """Re-read the palette after a light/dark switch and repaint everything."""
@@ -1320,6 +1343,7 @@ class MainWindow(QMainWindow):
             self.table.setCellWidget(row, 5, w)
             self.table.setRowHeight(row, 46)
         self._rows = {t["id"]: r for r, t in enumerate(items)}
+        self._row_ids = [t["id"] for t in items]
 
     def _btn(self, layout, text, fn):
         b = QPushButton(text)
@@ -1558,7 +1582,32 @@ class MainWindow(QMainWindow):
         self._run(self.api.action, task_id, action)
 
     def _remove(self, task_id):
-        self._run(self.api.remove, task_id)
+        """Delete a task, asking first whether its file should go too.
+
+        The service deletes the downloaded file by default, and this button
+        used to fire immediately - one stray click permanently removed a
+        finished download. Keep the file unless the user explicitly opts in.
+        """
+        t = next((x for x in self.tasks if x["id"] == task_id), None)
+        name = (t or {}).get("filename") or ""
+        box = QMessageBox(self)
+        box.setWindowTitle("删除任务")
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"确定要删除任务“{name}”吗？")
+        box.setInformativeText("默认只从列表中移除，已下载的文件会保留。")
+        cb = QCheckBox("同时删除已下载的文件（不可恢复）")
+        box.setCheckBox(cb)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        yes = box.button(QMessageBox.Yes)
+        no = box.button(QMessageBox.No)
+        if yes is not None:
+            yes.setText("删除")
+        if no is not None:
+            no.setText("取消")
+        if box.exec_() != QMessageBox.Yes:
+            return
+        self._run(self.api.remove, task_id, not cb.isChecked())
 
     def _bulk(self, action):
         self._run(self.api.bulk, action)
@@ -1566,6 +1615,10 @@ class MainWindow(QMainWindow):
     def _quick_add(self):
         url = self.url_edit.text().strip()
         if not url:
+            return
+        if not url.lower().startswith(("http://", "https://")):
+            self._status("只支持 http/https 链接，例如 https://example.com/file.zip")
+            self.url_edit.selectAll()
             return
         self.url_edit.clear()
         self._run(self.api.add, {"url": url})
@@ -1775,10 +1828,7 @@ class MainWindow(QMainWindow):
 
     def _open_selected_file(self, row):
         """Double-click a row: open the finished file, or its folder otherwise."""
-        item = self.table.item(row, 0)
-        if not item:
-            return
-        t = next((x for x in self._visible() if x["filename"] == item.text()), None)
+        t = self._task_at_row(row)
         if not t:
             return
         if t["status"] == "completed":
@@ -1790,8 +1840,7 @@ class MainWindow(QMainWindow):
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
-        item = self.table.item(row, 0)
-        t = next((x for x in self._visible() if x["filename"] == item.text()), None)
+        t = self._task_at_row(row)
         if not t:
             return
         menu = make_menu(self)
@@ -1898,6 +1947,34 @@ class MainWindow(QMainWindow):
             self._status(f"开机自启设置失败：{e}")
 
 
+def _install_translations(app) -> None:
+    """Translate Qt's own strings (Save/Cancel/Yes/No, file dialog, ...).
+
+    Without a translator the Chinese UI still showed English "Save"/"Cancel"
+    buttons in every QDialogButtonBox and QMessageBox, because those texts come
+    from Qt itself. The Qt translation is shipped with both the system PyQt5
+    and the frozen bundle.
+    """
+    try:
+        from PyQt5.QtCore import QLibraryInfo, QLocale, QTranslator
+
+        path = QLibraryInfo.location(QLibraryInfo.TranslationsPath)
+        names = ["qtbase_zh_CN", "qt_zh_CN"]
+        try:
+            locale = QLocale.system().name()  # e.g. zh_CN
+            if locale:
+                names.insert(0, f"qtbase_{locale}")
+        except Exception:
+            pass
+        for name in names:
+            tr = QTranslator(app)
+            if tr.load(name, path):
+                app.installTranslator(tr)
+                return
+    except Exception as e:  # noqa: BLE001 - translations are cosmetic
+        _dlog(f"[i18n] failed: {type(e).__name__}: {e}")
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     smoke = "--smoke" in argv
@@ -1924,6 +2001,7 @@ def main(argv=None) -> int:
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
+    _install_translations(app)
     _dlog(f"[init] ZDM v{VERSION} starting (log={_dock_log_file()}, exe={sys.executable})")
 
     # Light/dark theme: follows the OS appearance by default, and the user can

@@ -74,6 +74,35 @@ linux_uninstall() {
   echo "已卸载（配置在 ~/.config/zdm，已下载文件保留）"
 }
 
+install_native_host() {
+  # Chrome/Chromium native messaging lets the extension start ZDM without
+  # showing an "open zdm://" dialog. The host name and the extension id must
+  # match extension/background.js + the manifest "key".
+  local APP_DIR="$1" EXT_ID="$2"
+  local HOST="$APP_DIR/zdm_native_host.py"
+  chmod +x "$HOST" 2>/dev/null || true
+  local cfg
+  for cfg in \
+    "$HOME/.config/google-chrome" \
+    "$HOME/.config/chromium" \
+    "$HOME/.config/microsoft-edge" \
+    "$HOME/.config/BraveSoftware/Brave-Browser" \
+    "$HOME/.config/vivaldi"; do
+    [ -d "$cfg" ] || continue
+    mkdir -p "$cfg/NativeMessagingHosts"
+    cat > "$cfg/NativeMessagingHosts/com.zdm.launcher.json" <<EOF
+{
+  "name": "com.zdm.launcher",
+  "description": "ZDM download manager launcher",
+  "path": "$HOST",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://$EXT_ID/"]
+}
+EOF
+  done
+  echo "==> 已注册浏览器原生消息主机 com.zdm.launcher（扩展 ID $EXT_ID）"
+}
+
 install_linux() {
   local PREFIX="${PREFIX:-$HOME/.local}"
   local APP_DIR="$PREFIX/share/zdm"
@@ -83,7 +112,8 @@ install_linux() {
   mkdir -p "$APP_DIR" "$BIN_DIR" "$PREFIX/share/applications" \
            "$PREFIX/share/icons/hicolor/128x128/apps"
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
-  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$ROOT/theme.py" "$APP_DIR/"
+  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" \
+        "$ROOT/theme.py" "$ROOT/zdm_native_host.py" "$APP_DIR/"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   # gui.py imports theme.py from the app root (it is NOT inside the zdm package),
@@ -110,7 +140,7 @@ EOF
 Type=Application
 Name=ZDM 下载管理器
 Comment=多线程下载管理器（浏览器扩展可接管下载）
-Exec=$BIN_DIR/zdm gui
+Exec=$BIN_DIR/zdm-gui
 Icon=zdm
 Terminal=false
 Categories=Network;FileTransfer;
@@ -158,6 +188,15 @@ EOF
   update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
   gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
   install_pyqt "$PY"
+  local EXT_ID
+  EXT_ID="$("$PY" - "$ROOT/extension/manifest.json" <<'PYEOF'
+import base64, hashlib, json, sys
+m = json.load(open(sys.argv[1], encoding="utf-8"))
+h = hashlib.sha256(base64.b64decode(m["key"])).hexdigest()[:32]
+print("".join(chr(ord("a") + int(c, 16)) for c in h))
+PYEOF
+)"
+  install_native_host "$APP_DIR" "$EXT_ID"
   "$BIN_DIR/zdm" start --daemon >/dev/null 2>&1 || true
   EXT_DIR="$APP_DIR/extension"
 }
@@ -180,7 +219,8 @@ install_mac() {
   echo "==> 安装到 $APP_DIR"
   mkdir -p "$APP_DIR" "$LA" "$APPS" "$HOME/.local/bin"
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
-  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" "$ROOT/theme.py" "$APP_DIR/"
+  cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" \
+        "$ROOT/theme.py" "$ROOT/zdm_native_host.py" "$APP_DIR/"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   # gui.py imports theme.py from the app root (it is NOT inside the zdm package),
@@ -324,7 +364,7 @@ EOF
   <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>
   <key>CFBundleExecutable</key><string>ZDM</string>
   <key>CFBundleIconFile</key><string>zdm</string>
-  <key>CFBundleVersion</key><string>1.11.0</string>
+  <key>CFBundleVersion</key><string>1.11.1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

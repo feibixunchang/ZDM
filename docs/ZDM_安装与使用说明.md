@@ -61,8 +61,8 @@ v1.11.0 起改为和 macOS `.dmg` 同一思路：**自带运行时**。
 安装与验证：
 
 ```bash
-sudo apt install ./zdm_1.11.0_amd64.deb
-zdm --version          # ZDM 1.11.0
+sudo apt install ./zdm_1.11.1_amd64.deb
+zdm --version          # ZDM 1.11.1
 zdm --selfcheck        # 报告内嵌 Python / PyQt5 / 资源路径
 zdm-desktop            # 打开桌面窗口（菜单里也有「ZDM 下载管理器」图标）
 ```
@@ -277,3 +277,19 @@ cd <仓库>/zdm && ./install.sh --uninstall
 ```
 
 （会移除程序、App、LaunchAgent 与命令行链接；已下载文件和 `~/Downloads` 配置保留。）
+
+## v1.11.1 修复清单（2026-10-20）
+
+本次为 1.11.0 的补丁版本，集中修复实机测试发现的问题：
+
+1. **桌面端无法添加下载**：`Api.add()` 只接受关键字参数，界面却传字典，回车 / ＋下载 / 拖拽 / 命令行传 URL 全部报错。
+2. **浏览器接管后重复下载**：服务端与 CLI 把已入队的 URL 再次交给 GUI，GUI 又添加了一次。
+3. **打包版 curl 回退失败**：PyInstaller 的 `LD_LIBRARY_PATH` 泄漏给系统 curl，触发 OpenSSL 版本冲突；现已在子进程中剥离。
+4. **404/500 被误当 403 重试 curl**：现在只对 403/406/429 或连接失败回退，错误信息不再被掩盖。
+5. **中文文件名乱码**：修复 RFC 5987 `filename*=UTF-8''...` 被按 Latin-1 解码的问题。
+6. **删除任务不删文件**：删除已完成任务时现在会真正移除文件；GUI 增加确认框并可选择保留文件。
+7. **假 Range 服务器损坏文件**：只按 206/Content-Range 判定分段，服务器忽略 Range 时自动降级单连接。
+8. **过滤/重名时操作错行**：右键与双击改为按行保存的任务 ID 查找。
+9. **Qt 标准按钮英文**：加载 Qt 中文翻译，`保存 / 取消 / 是 / 否` 正常显示。
+10. **浏览器接管弹出旧版界面**：不再回退到 PATH 中的旧 `zdm-desktop`，优先使用当前安装的 GUI。
+11. **扩展**：popup 对远端文件名做 HTML 转义；`install.sh` 注册 Linux Chrome/Chromium 原生消息宿主，未启动时可自动唤醒。

@@ -40,7 +40,12 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type,X-ZDM-Token")
+        # The browser extension identifies itself with X-ZDM-Extension. It has
+        # to be listed here or a CORS preflight fails for web pages that call
+        # the API directly.
+        self.send_header(
+            "Access-Control-Allow-Headers", "Content-Type,X-ZDM-Token,X-ZDM-Extension"
+        )
         self.send_header("Access-Control-Max-Age", "86400")
 
     def _auth_ok(self) -> bool:
@@ -143,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["tasks"]:
             url = (body.get("url") or "").strip()
             if not url:
-                return self._error(400, "url required")
+                return self._error(400, "缺少下载链接")
             headers = body.get("headers") or {}
             for src, dst in (
                 ("referer", "Referer"),
@@ -169,10 +174,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(e))
             # If the desktop client is not open (typical when the download comes
             # from the browser extension), bring it up so the user sees the task.
+            # Pass NO urls: the task is already queued above, and handing the
+            # url to the GUI makes it add a second copy.
             if self.manager.config.get("auto_show_gui", True):
                 threading.Thread(
                     target=desktop.ensure_desktop,
-                    args=([url], int(self.manager.config.get("port") or 9000)),
+                    args=([], int(self.manager.config.get("port") or 9000)),
                     daemon=True,
                 ).start()
             return self._json({"ok": True, "id": d.id, "task": d.to_dict()})
