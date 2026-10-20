@@ -24,15 +24,70 @@ const WAKE_TIMEOUT_MS = 20000;
  * HLS(.m3u8) / DASH(.mpd) 是分片协议，需要的是「拉取+拼接+混流」引擎，
  * 属于下一版的范围，所以这里刻意不把它们算进来——列出一堆点不动
  * 的条目比不列更糟。
+ *
+ * .m4s 必须算进来：B站的 DASH 视频轨/音频轨就是 .m4s 直链，Content-Type
+ * 是 application/octet-stream —— 不认它，B站一个媒体都嗅不到。
  * ------------------------------------------------------------------ */
 const MEDIA_EXT =
-  /\.(mp4|m4v|webm|mkv|mov|m4a|mp3|aac|flac|wav|ogg|oga|opus|wma|avi|wmv|flv|f4v|3gp|ts|m2ts)(?:$|[?#])/i;
+  /\.(mp4|m4v|webm|mkv|mov|m4a|mp3|aac|flac|wav|ogg|oga|opus|wma|avi|wmv|flv|f4v|3gp|ts|m2ts|m4s)(?:$|[?#])/i;
 const MEDIA_AUDIO_EXT = /\.(mp3|m4a|aac|flac|wav|ogg|oga|opus|wma)(?:$|[?#])/i;
+/* B站 DASH 轨的 URL 编号规则（实测）：
+     视频轨  ".../62131_da3-1-30032.m4s"   —— 30000 + 清晰度id（30006…30127）
+     音频轨  ".../62131_da3-1-30216.m4s"   —— 302xx 系列（30216/30232/30250/30251/30257/30259/30280）
+   所以「≥30000 就是音频」是错的：那会把所有视频轨误判成音频。
+   Content-Type 两者都是 application/octet-stream，只能从编号认。 */
+const BILI_AUDIO_ID = /-(\d{5})\.m4s(?:$|[?#])/;
+function isBiliAudioId(id) {
+  return id >= 30200 && id < 30300;
+}
 const MIN_MEDIA_BYTES = 64 * 1024; // 小于这个的多半是图标、埋点、预告片
 const MAX_PER_TAB = 60;
+const MAX_TABS = 30; // storage.session 只有 10MB，别把页签全存爆
 
 /** tabId -> [{url, kind, size, name, from}]（内存态，SW 被回收就重来） */
 const snifferByTab = new Map();
+
+/* MV3 的 service worker 空闲 30 秒就被回收，内存态全丢。存进
+   chrome.storage.session（SW 重启仍在，关浏览器才清）之后：
+   - 用户先打开页面、隔一会儿再播放，媒体照样列得出来；
+   - SW 重启后 webRequest 监听器会随顶层代码重新注册，内容脚本的定时
+     轮询负责把它唤醒（否则休眠期间漏掉整个播放过程）。 */
+const STORE_KEY = "snifferByTab";
+let restored = null;
+
+function ensureRestored() {
+  if (restored) return restored;
+  restored = chrome.storage.session
+    .get(STORE_KEY)
+    .then((d) => {
+      const m = d && d[STORE_KEY];
+      if (m && typeof m === "object") {
+        for (const [k, v] of Object.entries(m)) {
+          const id = Number(k);
+          if (Number.isFinite(id) && Array.isArray(v)) snifferByTab.set(id, v);
+        }
+      }
+    })
+    .catch(() => {
+      /* 存储不可用就退回纯内存，功能降级但不炸 */
+    });
+  return restored;
+}
+ensureRestored();
+
+function persist() {
+  const obj = {};
+  let n = 0;
+  for (const [k, v] of snifferByTab) {
+    if (n++ >= MAX_TABS) break;
+    obj[k] = v;
+  }
+  try {
+    chrome.storage.session.set({ [STORE_KEY]: obj }).catch(() => {});
+  } catch (_) {
+    /* 忽略 */
+  }
+}
 
 function nameFromUrl(url, kind) {
   let name = "";
@@ -45,25 +100,38 @@ function nameFromUrl(url, kind) {
   if (!name || !/\.[a-z0-9]{2,5}$/i.test(name)) {
     name = (name || "media") + (kind === "audio" ? ".mp3" : ".mp4");
   }
+  /* B站的 DASH 轨是 .m4s（分段 MP4）。存成 .m4s 用户认不出是什么，
+     播放器也不认 —— 按音/视频轨分别落成 .mp4 / .m4a。 */
+  if (/\.m4s$/i.test(name)) {
+    name = name.replace(/\.m4s$/i, kind === "audio" ? ".m4a" : ".mp4");
+  }
   return name;
 }
 
 /** 返回 {url, kind, size, name} 或 null（不是媒体）。 */
 function classifyResponse(details) {
   if (details.tabId == null || details.tabId < 0) return null;
-  if (details.statusCode !== 200) return null; // 每个重定向跳都会触发一次，只认最终 200
+  /* 只认最终落地的那一次响应。200 是整段，206 是 Range 分段 ——
+     视频站（B站/YouTube）播放时全是分段请求，只认 200 会把它们全滤掉。 */
+  if (details.statusCode !== 200 && details.statusCode !== 206) return null;
   const url = details.url || "";
   let ct = "";
-  let len = 0;
+  let total = 0;   // 整个资源的大小（Content-Range: bytes x-y/TOTAL）
+  let partLen = 0; // 这一次响应的大小（Content-Length）
   for (const h of details.responseHeaders || []) {
     const n = (h.name || "").toLowerCase();
     if (n === "content-type") ct = (h.value || "").toLowerCase().split(";")[0].trim();
-    else if (n === "content-length") len = parseInt(h.value || "0", 10) || 0;
-    else if (n === "content-range" && !len) {
+    else if (n === "content-range") {
+      // 只在没有完整长度时才用 Range 的总数
       const m = /\/\s*(\d+)\s*$/.exec(h.value || "");
-      if (m) len = parseInt(m[1], 10) || 0;
+      if (m && !total) total = parseInt(m[1], 10) || 0;
+    } else if (n === "content-length") {
+      partLen = parseInt(h.value || "0", 10) || 0;
     }
   }
+  // Range 响应的 Content-Length 只是这一小段的长度（实测 B站是 1024），
+  // 拿它当文件大小会把它误判成「小于 64KB 的埋点」而丢掉。
+  const len = total || partLen;
   let kind = null;
   if (ct.startsWith("video/")) kind = "video";
   else if (ct.startsWith("audio/")) kind = "audio";
@@ -71,7 +139,14 @@ function classifyResponse(details) {
     (ct === "application/octet-stream" || ct === "binary/octet-stream" || ct === "") &&
     MEDIA_EXT.test(url)
   ) {
-    kind = MEDIA_AUDIO_EXT.test(url) ? "audio" : "video";
+    if (MEDIA_AUDIO_EXT.test(url)) {
+      kind = "audio";
+    } else {
+      // 不用 RegExp.$1：它属于「最后一次 test」，前面几次 test 会把它覆盖掉，
+      // 读出来的是别人的捕获组。用 match 拿到本次的结果。
+      const m = BILI_AUDIO_ID.exec(url);
+      kind = m && isBiliAudioId(Number(m[1])) ? "audio" : "video";
+    }
   }
   if (!kind) return null;
   if (len && len < MIN_MEDIA_BYTES) return null;
@@ -87,6 +162,7 @@ function rememberMedia(tabId, item) {
   if (list.some((x) => x.url === item.url)) return false;
   list.push(item);
   if (list.length > MAX_PER_TAB) list.shift();
+  persist();
   return true;
 }
 
@@ -114,10 +190,14 @@ chrome.webRequest.onResponseStarted.addListener(
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) {
     snifferByTab.delete(tabId);
+    persist();
     notifyTab(tabId, true);
   }
 });
-chrome.tabs.onRemoved.addListener((tabId) => snifferByTab.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  snifferByTab.delete(tabId);
+  persist();
+});
 
 function getCfg() {
   return new Promise((res) => chrome.storage.sync.get(DEFAULTS, res));
@@ -459,11 +539,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
-  // 媒体嗅探：content script 来要当前标签页已发现的媒体
+  // 媒体嗅探：content script 来要当前标签页已发现的媒体。
+  // 先等 storage.session 恢复完再答 —— SW 刚被唤醒时恢复可能还没完成，
+  // 直接读 Map 会返回空，用户就看到「嗅探到 0 个」。
   if (msg.type === "sniffer-list") {
     const tabId = sender.tab && sender.tab.id;
-    sendResponse({ ok: true, items: (tabId != null && snifferByTab.get(tabId)) || [] });
-    return false;
+    ensureRestored().then(() => {
+      sendResponse({
+        ok: true,
+        items: (tabId != null && snifferByTab.get(tabId)) || [],
+      });
+    });
+    return true;
   }
   // 一键推送：走的是和「接管浏览器下载」完全相同的 handOff()，
   // 因此冷启动唤醒、原生消息、协议兜底的行为三者一致。

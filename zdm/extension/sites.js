@@ -298,6 +298,25 @@
   const BILI_PLAYER =
     "#bilibili-player, .bpx-player-container, .bpx-player-video-area, #bilibili-player-video-area";
 
+  /* 「这张卡片是不是一个视频」的判据，以纯数据下发。
+
+     为什么不能直接把 cardInfo 函数传给 isolated world：函数过不了
+     postMessage（结构化克隆只保留数据），videobtn.js 那边拿到的永远是
+     undefined，于是「给卡片装按钮」的逻辑每次都被 try/catch 吞掉 ——
+     表现就是列表页扫到 20 张卡片、按钮数为 0。 */
+  const CARD_SPEC = {
+    youtube: {
+      link: "a#video-title-link, a#thumbnail, a[href*='/watch'], a[href*='/shorts/']",
+      hrefRe: "/watch|/shorts/",
+      title: "#video-title, yt-formatted-string#video-title, h3",
+    },
+    bilibili: {
+      link: "a[href*='/video/'], a[href*='bilibili.com/video/']",
+      hrefRe: "/video/(BV|av)",
+      title: ".bili-video-card__info--tit, h3[title], .bili-video-card__info--tit h3, [title]",
+    },
+  };
+
   S.SITES = {
     youtube: {
       host: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/,
@@ -447,7 +466,13 @@
         const site = S.siteOf();
         const cfg = site && S.SITES[site] ? S.SITES[site] : null;
         out = cfg
-          ? { cards: cfg.cards, player: cfg.player, site: site }
+          ? {
+              cards: cfg.cards,
+              player: cfg.player,
+              site: site,
+              // 纯数据的卡片判据，见 CARD_SPEC 的说明
+              cardSpec: CARD_SPEC[site] || null,
+            }
           : null;
       }
       else if (d.what === "currentFormats") out = S.currentFormats();

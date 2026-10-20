@@ -122,13 +122,20 @@
     return scanDom();
   }
 
-  function merge(network, dom) {
+  /* 已推送过的 URL：推送后条目会从列表里消失，但 background 那边的记录还在，
+     下一次刷新又会把它带回来。这里在本地记一笔，让推过的别再冒出来。 */
+  const pushed = new Set();
+
+  function merge(network, dom, keepLocal) {
     const seen = new Set();
     const out = [];
     // background 的网络嗅探结果优先（带 Content-Type / 大小），
     // DOM 扫描的结果补充在后面（首屏直链媒体在 webRequest 之前就加载完了）。
-    for (const it of (network || []).concat(dom || []).concat(items)) {
-      if (!it || !it.url || seen.has(it.url)) continue;
+    // keepLocal=false 时以 background 的列表为权威：换页之后它已经清了，
+    // 若还把本地旧条目拼回来，新页面会继承上一个页面的媒体。
+    const src = keepLocal ? (network || []).concat(dom || []).concat(items) : (network || []).concat(dom || []);
+    for (const it of src) {
+      if (!it || !it.url || seen.has(it.url) || pushed.has(it.url)) continue;
       seen.add(it.url);
       out.push(it);
       if (out.length >= MAX_ROWS) break;
@@ -294,6 +301,7 @@
       .then((ok) => {
         b.textContent = ok ? "已推送" : "失败";
         if (ok) {
+          pushed.add(it.url); // 别再让下一次刷新把它带回来
           const i = items.indexOf(it);
           if (i >= 0) items.splice(i, 1);
           setTimeout(renderList, 700);
@@ -327,7 +335,8 @@
   async function refresh(forceDom) {
     const dom = scanDomThrottled(forceDom);
     const r = await send({ type: "sniffer-list" });
-    merge((r && r.items) || [], dom);
+    // keepLocal=false：background 的列表是权威，别把本地旧条目拼回来
+    merge((r && r.items) || [], dom, false);
     renderFab();
     if (panelOpen) renderList();
   }
@@ -365,18 +374,33 @@
         // 扫 DOM 得到的。所以这里只能「合并」，不能整体覆盖——直接
         // items = msg.items 会把 DOM 扫描到的首屏媒体全部冲掉。
         if (msg.reset) items = [];
-        merge(msg.items || [], scanDomThrottled(false));
+        // 非 reset 的推送是「有新发现」的增量通知，msg.items 是完整列表，
+        // 但 DOM 扫到的那部分只在本地 —— 所以保留本地条目一起合并。
+        merge(msg.items || [], scanDomThrottled(false), true);
         renderFab();
         if (panelOpen) renderList();
       }
       if (msg && msg.type === "sniffer-ping") {
         send({ type: "sniffer-list" }).then((r) => {
-          merge((r && r.items) || [], scanDomThrottled(true));
+          merge((r && r.items) || [], scanDomThrottled(true), false);
           renderFab();
           if (panelOpen) renderList();
         });
       }
     });
+
+    /* 定时轮询，两个作用：
+       1. MV3 的 service worker 空闲 30 秒就被回收，回收期间 webRequest
+          监听器不存在 —— 用户先开页面、过一会儿再播放，整个播放过程的
+          媒体请求会全部漏掉。这条消息本身就是唤醒：SW 收到消息会重新执行
+          background.js、重新注册监听器，之后打开的视频才有人嗅。
+       2. 播放过程中持续刷新角标数字，不用等用户点开面板。 */
+    const POLL_MS = 3000;
+    setInterval(() => {
+      // 页面不可见时降频：后台标签页没必要每 3 秒吵一次
+      if (document.hidden) return;
+      refresh(false).catch(() => {});
+    }, POLL_MS);
   }
 
   start();
