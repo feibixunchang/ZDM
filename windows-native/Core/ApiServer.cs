@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
@@ -214,7 +214,9 @@ public sealed class ApiServer : IDisposable
                     // Provenance the browser extension sends with every hand-off.
                     // Download normalises anything unexpected to "manual".
                     source: Str("source"),
-                    kind: Str("kind"));
+                    kind: Str("kind"),
+                    // DASH video tracks need the matching audio to be muxed in.
+                    audioUrl: Str("audio_url"));
 
                 return Results.Json(new JsonObject
                 {

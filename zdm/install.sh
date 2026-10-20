@@ -304,6 +304,16 @@ EOF
   # Mach-O launcher that embeds the CPython interpreter *in the same process* (via
   # the Python C API) and runs the Qt client from there. The process is then
   # ZDM.app, so the Dock icon, the reopen callback, etc. all work natively.
+  #
+  # A DMG install already put a complete bundle in /Applications. Building a
+  # second one in ~/Applications would show up as a duplicate icon in the
+  # Launchpad and confuse the user about which one is the real app, so skip it
+  # and keep using the installed bundle.
+  if [ -x "/Applications/ZDM.app/Contents/MacOS/ZDM" ]; then
+    echo "==> 检测到 /Applications/ZDM.app 已安装，保留它（不再重复创建 ~/Applications/ZDM.app）"
+    rm -rf "$APP"
+    APP="/Applications/ZDM.app"
+  fi
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
   [ -f "$ICNS" ] && cp "$ICNS" "$APP/Contents/Resources/zdm.icns"
 
@@ -364,7 +374,7 @@ EOF
   <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>
   <key>CFBundleExecutable</key><string>ZDM</string>
   <key>CFBundleIconFile</key><string>zdm</string>
-  <key>CFBundleVersion</key><string>1.12.0</string>
+  <key>CFBundleVersion</key><string>1.13.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

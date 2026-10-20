@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import transport as transport_mod
@@ -256,6 +257,7 @@ class Download:
         speed_limit: int = 0,
         source: str = "manual",
         kind: str = "",
+        audio_url: str = "",
     ):
         self.id = id
         self.url = url
@@ -271,6 +273,11 @@ class Download:
         # Provenance: who asked for this task, and what kind of payload it is.
         self.source = normalize_source(source)
         self.kind = normalize_kind(kind)
+        # DASH streams (Bilibili / YouTube adaptive) ship video and audio as
+        # separate files. When the caller supplies the matching audio track we
+        # download it too and mux the two with ffmpeg — otherwise the video
+        # would be silent.
+        self.audio_url = audio_url or ""
 
         self.size = 0
         self.status = "queued"
@@ -350,6 +357,7 @@ class Download:
             "speed_limit": self.speed_limit,
             "source": self.source,
             "kind": self.kind,
+            "audio_url": self.audio_url,
             "chunks": self.segmenter.snapshot() if self.segmenter else [],
         }
 
@@ -365,6 +373,7 @@ class Download:
         self.headers = data.get("headers") or {}
         self.proxy = data.get("proxy")
         self.speed_limit = int(data.get("speed_limit", 0) or 0)
+        self.audio_url = str(data.get("audio_url") or "")
         self.limiter.set_rate(self.speed_limit)
         # Tasks persisted before 1.12.0 have no source/kind; keep "manual".
         self.source = normalize_source(data.get("source"), self.source)
@@ -661,9 +670,59 @@ class Download:
             os.remove(self.meta_path)
         except OSError:
             pass
+        # A DASH video track has no sound until the audio track is muxed in.
+        if self.audio_url and not self._mux_audio():
+            # The video itself is fine; only the audio is missing. Report it
+            # instead of throwing the whole file away.
+            self.error = "音频轨合并失败（缺少 ffmpeg 或音频下载失败），视频已保存但无声音"
         self.status = "completed"
         self.completed_at = time.time()
         self._emit("completed")
+
+    def _mux_audio(self) -> bool:
+        """Download the audio track and mux it into the video with ffmpeg.
+
+        Returns True on success. On failure the video file is left untouched
+        (silent but playable) and the caller reports it.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return False
+        video = self.target_path
+        if not os.path.exists(video):
+            return False
+        tmpdir = tempfile.mkdtemp(prefix="zdmmux")
+        audio_path = os.path.join(tmpdir, "audio.bin")
+        try:
+            # The audio track is a small file; a plain GET is enough.
+            req = urllib.request.Request(self.audio_url, headers=self.headers or {})
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=self.timeout) as resp, open(audio_path, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+            out_path = video + ".merged.mp4"
+            cmd = [
+                ffmpeg, "-y", "-loglevel", "error",
+                "-i", video,
+                "-i", audio_path,
+                "-c", "copy", "-map", "0:v:0", "-map", "1:a:0",
+                out_path,
+            ]
+            proc = subprocess.run(
+                cmd, capture_output=True, timeout=600,
+                env={**os.environ, "PATH": os.environ.get("PATH", "")},
+            )
+            if proc.returncode != 0 or not os.path.exists(out_path):
+                return False
+            os.replace(out_path, video)
+            return True
+        except Exception:
+            return False
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _close_tls(self) -> None:
         """Close the per-thread handle used on platforms without os.pwrite."""

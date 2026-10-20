@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace Zdm.App.Core;
 
@@ -154,4 +154,5 @@ public sealed class TaskSnapshot
     // omit both fields working unchanged.
     [JsonPropertyName("source")] public string Source { get; set; } = TaskSources.Manual;
     [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+    [JsonPropertyName("audio_url")] public string AudioUrl { get; set; } = "";
 }

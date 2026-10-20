@@ -29,7 +29,7 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"       # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                             # repo root
 BUILD_DIR="${1:-$(pwd)/linux-build}"
-VERSION="${2:-1.12.0}"
+VERSION="${2:-1.13.0}"
 
 DIST="$BUILD_DIR/dist"
 PYBUILD="$BUILD_DIR/pybuild"

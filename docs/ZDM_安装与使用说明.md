@@ -61,8 +61,8 @@ v1.11.0 起改为和 macOS `.dmg` 同一思路：**自带运行时**。
 安装与验证：
 
 ```bash
-sudo apt install ./zdm_1.12.0_amd64.deb
-zdm --version          # ZDM 1.12.0
+sudo apt install ./zdm_1.13.0_amd64.deb
+zdm --version          # ZDM 1.13.0
 zdm --selfcheck        # 报告内嵌 Python / PyQt5 / 资源路径
 zdm-desktop            # 打开桌面窗口（菜单里也有「ZDM 下载管理器」图标）
 ```
@@ -259,7 +259,7 @@ launchctl kickstart -k "gui/$(id -u)/com.zdm.service"
 2. 「加载已解压的扩展程序」→ 选择 `~/Library/Application Support/ZDM/extension`
 3. 点扩展图标 → ⚙ → 「测试连接」→ 勾选「自动接管浏览器下载」
 
-## 视频 / 音频嗅探（一键推送下载，v1.12.0 新增）
+## 视频 / 音频嗅探（一键推送下载，v1.13.0 新增）
 
 装好上面那个扩展之后，**浏览器的每个网页右下角会出现一个 ZDM 圆形浮动按钮**。
 
@@ -322,7 +322,7 @@ cd <仓库>/zdm && ./install.sh --uninstall
 10. **浏览器接管弹出旧版界面**：不再回退到 PATH 中的旧 `zdm-desktop`，优先使用当前安装的 GUI。
 11. **扩展**：popup 对远端文件名做 HTML 转义；`install.sh` 注册 Linux Chrome/Chromium 原生消息宿主，未启动时可自动唤醒。
 
-## v1.12.0 修复清单与新增（2026-10-20）
+## v1.13.0 修复清单与新增（2026-10-20）
 
 ### 新增：媒体嗅探
 

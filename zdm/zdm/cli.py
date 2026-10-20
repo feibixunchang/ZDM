@@ -430,7 +430,7 @@ def _handle_protocol_url(target: str) -> int:
         port = int(load_config().get("port") or 9000)
         body = {"url": url}
         headers = {}
-        for key in ("filename", "referer", "source", "kind", "cookie"):
+        for key in ("filename", "referer", "source", "kind", "cookie", "audio_url"):
             v = (q.get(key) or [""])[0].strip()
             if not v:
                 continue

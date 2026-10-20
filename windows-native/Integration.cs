@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Microsoft.Win32;
 
 namespace Zdm.App;
@@ -169,6 +169,12 @@ public sealed class ExternalRequest
     public string? Kind { get; init; }
 
     /// <summary>
+    /// The page's own session cookie. Video sites that require a logged-in
+    /// session (YouTube, Bilibili) answer 403 without it.
+    /// </summary>
+    public string? Cookie { get; init; }
+
+    /// <summary>
     /// Headers to replay with the request. Browsers refuse hotlink-protected
     /// files without a matching Referer, so it is carried across when present.
     /// </summary>
@@ -176,6 +182,7 @@ public sealed class ExternalRequest
     {
         var h = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(Referer)) h["Referer"] = Referer;
+        if (!string.IsNullOrWhiteSpace(Cookie)) h["Cookie"] = Cookie;
         return h;
     }
 
@@ -235,6 +242,8 @@ public sealed class ExternalRequest
                 Filename = o["filename"]?.ToString(),
                 Directory = o["dir"]?.ToString(),
                 Referer = o["referer"]?.ToString(),
+                // The page session, needed by video sites that require a login.
+                Cookie = o["cookie"]?.ToString(),
                 Connections = connections,
                 // Provenance, so a sniffer push that had to wake the client
                 // still shows up as "嗅探" rather than "手动".
@@ -314,6 +323,9 @@ public sealed class ExternalRequest
             sb.Append("&source=").Append(Uri.EscapeDataString(Source));
         if (!string.IsNullOrWhiteSpace(Kind))
             sb.Append("&kind=").Append(Uri.EscapeDataString(Kind));
+        // Dropped here and the forwarded instance answers 403 on video sites.
+        if (!string.IsNullOrWhiteSpace(Cookie))
+            sb.Append("&cookie=").Append(Uri.EscapeDataString(Cookie));
         return sb.ToString();
     }
 }

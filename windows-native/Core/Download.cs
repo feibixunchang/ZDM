@@ -1,3 +1,4 @@
+﻿using System.Diagnostics;
 using System.Text.Json;
 
 namespace Zdm.App.Core;
@@ -41,6 +42,11 @@ public sealed class Download
     public string Source { get; set; } = TaskSources.Manual;
     /// <summary>"video"/"audio", or empty for an ordinary file download.</summary>
     public string Kind { get; set; } = "";
+    /// <summary>
+    /// The matching audio track for a DASH video stream. When set, the
+    /// audio is downloaded after the video and muxed in with ffmpeg.
+    /// </summary>
+    public string AudioUrl { get; set; } = "";
 
     public long Size { get; set; }
     public TaskStatus Status { get; set; } = TaskStatus.Queued;
@@ -72,7 +78,8 @@ public sealed class Download
         double timeoutSeconds = 30,
         long speedLimit = 0,
         string? source = null,
-        string? kind = null)
+        string? kind = null,
+        string? audioUrl = null)
     {
         Id = id;
         Url = url;
@@ -88,6 +95,7 @@ public sealed class Download
         Limiter = new RateLimiter(speedLimit);
         Source = TaskSources.Normalize(source);
         Kind = TaskKinds.Normalize(kind);
+        AudioUrl = audioUrl ?? "";
     }
 
     public string PartPath => Path.Combine(Directory, Filename + ".part");
@@ -177,6 +185,7 @@ public sealed class Download
         speed_limit = SpeedLimit,
         source = Source,
         kind = Kind,
+        audio_url = AudioUrl,
         chunks = Segments?.Snapshot() ?? Array.Empty<long[]>(),
     };
 
@@ -210,6 +219,8 @@ public sealed class Download
             Source = TaskSources.Normalize(so.GetString());
         if (data.TryGetProperty("kind", out var kd) && kd.ValueKind == JsonValueKind.String)
             Kind = TaskKinds.Normalize(kd.GetString());
+        if (data.TryGetProperty("audio_url", out var au) && au.ValueKind == JsonValueKind.String)
+            AudioUrl = au.GetString() ?? "";
 
         if (data.TryGetProperty("headers", out var hd) && hd.ValueKind == JsonValueKind.Object)
         {
@@ -590,9 +601,84 @@ public sealed class Download
             // best effort
         }
 
+        // A DASH video track is silent until the audio track is muxed in.
+        if (!string.IsNullOrWhiteSpace(AudioUrl) && !MuxAudio())
+            Error = "音频轨合并失败（缺少 ffmpeg 或音频下载失败），视频已保存但无声音";
+
         Status = TaskStatus.Completed;
         CompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         Emit("completed");
+    }
+
+    /// <summary>
+    /// Download the matching audio track and mux it into the video with ffmpeg.
+    /// On failure the video file is left untouched (silent but playable).
+    /// </summary>
+    private bool MuxAudio()
+    {
+        var ffmpeg = FindFfmpeg();
+        if (ffmpeg is null) return false;
+        if (!File.Exists(TargetPath)) return false;
+
+        var tmpDir = Path.Combine(Path.GetTempPath(), "zdmmux-" + Guid.NewGuid().ToString("N")[..8]);
+        var audioPath = Path.Combine(tmpDir, "audio.bin");
+        var outPath = TargetPath + ".merged.mp4";
+        try
+        {
+            Directory.CreateDirectory(tmpDir);
+            using (var client = new HttpClient())
+            {
+                if (Headers.Count > 0)
+                    foreach (var kv in Headers)
+                        client.DefaultRequestHeaders.TryAddWithoutValidation(kv.Key, kv.Value);
+                client.Timeout = Timeout;
+                using var resp = client.GetAsync(AudioUrl).GetAwaiter().GetResult();
+                if (!resp.IsSuccessStatusCode) return false;
+                using var fs = File.Create(audioPath);
+                resp.Content.CopyToAsync(fs).GetAwaiter().GetResult();
+            }
+
+            var psi = new ProcessStartInfo(ffmpeg)
+            {
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in new[] { "-y", "-loglevel", "error", "-i", TargetPath, "-i", audioPath,
+                                      "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", outPath })
+                psi.ArgumentList.Add(a);
+            using (var proc = Process.Start(psi))
+            {
+                if (proc is null) return false;
+                proc.WaitForExit(600_000);
+                if (proc.ExitCode != 0 || !File.Exists(outPath)) return false;
+            }
+            File.Move(outPath, TargetPath, overwrite: true);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            try { if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true); } catch { }
+        }
+    }
+
+    /// <summary>Locate ffmpeg on PATH or next to the app.</summary>
+    private static string? FindFfmpeg()
+    {
+        var exe = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+        var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in pathVar.Split(Path.PathSeparator))
+        {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
+            var candidate = Path.Combine(dir, exe);
+            if (File.Exists(candidate)) return candidate;
+        }
+        var local = Path.Combine(AppContext.BaseDirectory, exe);
+        return File.Exists(local) ? local : null;
     }
 
     // ---------------- control ----------------
