@@ -51,6 +51,15 @@
   .bar{height:6px;border-radius:999px;background:#e8ecf1;overflow:hidden;margin-top:6px}
   .bar>i{display:block;height:100%;background:var(--accent);border-radius:999px;transition:width .3s}
   .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+  /* 来源徽标：跟着状态 pill 的视觉语言走，但用中性色，避免和状态色混淆 */
+  .src{display:inline-block;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;
+    margin-left:6px;vertical-align:1px;background:#f1f5f9;color:#475569;letter-spacing:.2px}
+  .src-browser{background:#e0f2fe;color:#0369a1}
+  .src-sniffer{background:#ede9fe;color:#6d28d9}
+  .src-webui{background:#f1f5f9;color:#475569}
+  .src-protocol{background:#fef3c7;color:#b45309}
+  .knd{display:inline-block;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:700;
+    margin-left:6px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0}
   .s-downloading{background:#e0f2fe;color:#0369a1}
   .s-completed{background:#dcfce7;color:#15803d}
   .s-paused{background:#fef3c7;color:#b45309}
@@ -104,6 +113,7 @@
         <span class="tab" data-f="downloading">进行中</span>
         <span class="tab" data-f="paused">已暂停</span>
         <span class="tab" data-f="completed">已完成</span>
+        <span class="tab" data-f="sniffer">嗅探</span>
       </div>
       <button id="btnPauseAll">全部暂停</button>
       <button id="btnResumeAll">全部继续</button>
@@ -168,8 +178,22 @@ const fmtTime = s => {
   const h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = s%60;
   return h ? `${h}h${m}m` : m ? `${m}m${sec}s` : `${sec}s`;
 };
-const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// 任务字段来自本地 REST 服务，正常情况下类型都对；但旧版客户端或写坏的
+// 状态文件可能塞了字符串，这里统一兜底，免得界面显示 NaN 或乱码。
+const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 const statusText = {queued:'排队中',downloading:'下载中',paused:'已暂停',completed:'已完成',error:'失败',canceled:'已取消',merging:'合并中'};
+// 来源徽标文案。"manual" 不显示——那是绝大多数任务的默认值，全打上就是噪音。
+const sourceText = {browser:'浏览器',sniffer:'嗅探',webui:'网页版',protocol:'协议'};
+const kindText = {video:'视频',audio:'音频'};
+const badge = (t) => {
+  let h = '';
+  const s = sourceText[t.source];
+  if (s) h += `<span class="src src-${esc(t.source)}">${s}</span>`;
+  const k = kindText[t.kind];
+  if (k) h += `<span class="knd">${k}</span>`;
+  return h;
+};
 
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2200); }
@@ -184,27 +208,28 @@ async function api(method, path, body){
 function render(){
   const list = tasks.filter(t => filter==='all' ? true
     : filter==='downloading' ? ['downloading','queued','merging'].includes(t.status)
+    : filter==='sniffer' ? t.source==='sniffer'
     : t.status===filter);
   $('#empty').hidden = list.length > 0;
   let speedSum = 0, html = '';
   for (const t of list){
-    if (t.status==='downloading') speedSum += t.speed || 0;
-    const pct = t.size ? Math.min(100, t.progress) : (t.status==='completed' ? 100 : 0);
+    if (t.status==='downloading') speedSum += num(t.speed);
+    const pct = t.size ? Math.min(100, num(t.progress)) : (t.status==='completed' ? 100 : 0);
     const canPause = ['downloading','queued'].includes(t.status);
     const canResume = ['paused','error','canceled'].includes(t.status);
     const done = t.status==='completed';
     html += `<tr>
       <td>
-        <div class="fname">${esc(t.filename)}</div>
-        <div class="sub">${esc(t.url)}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}</div>
+        <div class="fname">${esc(t.filename || '未命名')}${badge(t)}</div>
+        <div class="sub">${esc(t.url || '')}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}</div>
       </td>
-      <td>${fmtSize(t.downloaded)} / ${t.size ? fmtSize(t.size) : '未知'}</td>
+      <td>${fmtSize(num(t.downloaded))} / ${t.size ? fmtSize(num(t.size)) : '未知'}</td>
       <td>
         <div class="bar"><i style="width:${pct}%;background:${done?'var(--ok)':'var(--accent)'}"></i></div>
         <div class="sub">${pct.toFixed(1)}% · <span class="pill s-${t.status}">${statusText[t.status]||t.status}</span>
         ${t.status==='downloading' ? '· 剩余 '+fmtTime(t.eta) : ''}</div>
       </td>
-      <td>${t.status==='downloading' ? fmtSize(t.speed)+'/s' : '—'}</td>
+      <td>${t.status==='downloading' ? fmtSize(num(t.speed))+'/s' : '—'}</td>
       <td><div class="actions">
         ${canPause ? `<button class="icon" data-a="pause" data-id="${t.id}" title="暂停">⏸</button>` : ''}
         ${canResume ? `<button class="icon" data-a="resume" data-id="${t.id}" title="继续">▶</button>` : ''}
@@ -245,7 +270,7 @@ async function refresh(){
 async function addDownload(){
   const url = $('#url').value.trim();
   if (!url) return toast('请先填入链接');
-  const body = { url };
+  const body = { url, source: 'webui' };
   if ($('#fname').value.trim()) body.filename = $('#fname').value.trim();
   if ($('#fconn').value) body.connections = Number($('#fconn').value);
   const r = await api('POST','tasks',body);
@@ -303,10 +328,17 @@ $('#btnSaveCfg').onclick = async () => {
 $('#btnOpenDir').onclick = () => api('POST','open',{path:$('#cfgDir').value.trim()});
 
 let es;
+function svcText(){
+  return '本地服务已连接 · v' + (SVC_VERSION || '?') + ' · 端口 ' + (config.port || 9000);
+}
 function connectEvents(){
   es = new EventSource('/api/events');
   es.addEventListener('snapshot', e => {
-    const d = JSON.parse(e.data); tasks = d.tasks || []; config = d.config || {}; render();
+    const d = JSON.parse(e.data); tasks = d.tasks || []; config = d.config || {};
+    // A snapshot proves the stream is alive again: clear the "reconnecting"
+    // banner that es.onerror left behind (it used to stay there forever).
+    $('#svc').textContent = svcText();
+    render();
   });
   es.addEventListener('task', e => {
     const d = JSON.parse(e.data);
@@ -316,6 +348,7 @@ function connectEvents(){
     }
     render();
   });
+  es.onopen = () => { $('#svc').textContent = svcText(); };
   es.onerror = () => { $('#svc').textContent = '连接中断，重试中…'; };
 }
 refresh();

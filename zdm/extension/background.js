@@ -12,6 +12,113 @@ const DEFAULTS = {
    start of the WPF client on a slow disk can take several seconds. */
 const WAKE_TIMEOUT_MS = 20000;
 
+/* ------------------------------------------------------------------ *
+ * 媒体嗅探（v1.12.0）
+ *
+ * 判据放在 service worker 而不是 content script：只有 webRequest 拿得到
+ * 响应的 Content-Type / Content-Length，而这两个头才是「这是不是一个
+ * 可下载的媒体文件」的唯一可靠证据（页面里的 <video> 元素既可能是
+ * blob: 也可能只是个播放器外壳）。
+ *
+ * 范围说明：这一版只认「直链媒体」（服务器直接吐字节流的 mp4/mp3/…）。
+ * HLS(.m3u8) / DASH(.mpd) 是分片协议，需要的是「拉取+拼接+混流」引擎，
+ * 属于下一版的范围，所以这里刻意不把它们算进来——列出一堆点不动
+ * 的条目比不列更糟。
+ * ------------------------------------------------------------------ */
+const MEDIA_EXT =
+  /\.(mp4|m4v|webm|mkv|mov|m4a|mp3|aac|flac|wav|ogg|oga|opus|wma|avi|wmv|flv|f4v|3gp|ts|m2ts)(?:$|[?#])/i;
+const MEDIA_AUDIO_EXT = /\.(mp3|m4a|aac|flac|wav|ogg|oga|opus|wma)(?:$|[?#])/i;
+const MIN_MEDIA_BYTES = 64 * 1024; // 小于这个的多半是图标、埋点、预告片
+const MAX_PER_TAB = 60;
+
+/** tabId -> [{url, kind, size, name, from}]（内存态，SW 被回收就重来） */
+const snifferByTab = new Map();
+
+function nameFromUrl(url, kind) {
+  let name = "";
+  try {
+    name = decodeURIComponent(new URL(url).pathname.split("/").filter(Boolean).pop() || "");
+  } catch (_) {
+    /* ignore */
+  }
+  name = name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
+  if (!name || !/\.[a-z0-9]{2,5}$/i.test(name)) {
+    name = (name || "media") + (kind === "audio" ? ".mp3" : ".mp4");
+  }
+  return name;
+}
+
+/** 返回 {url, kind, size, name} 或 null（不是媒体）。 */
+function classifyResponse(details) {
+  if (details.tabId == null || details.tabId < 0) return null;
+  if (details.statusCode !== 200) return null; // 每个重定向跳都会触发一次，只认最终 200
+  const url = details.url || "";
+  let ct = "";
+  let len = 0;
+  for (const h of details.responseHeaders || []) {
+    const n = (h.name || "").toLowerCase();
+    if (n === "content-type") ct = (h.value || "").toLowerCase().split(";")[0].trim();
+    else if (n === "content-length") len = parseInt(h.value || "0", 10) || 0;
+    else if (n === "content-range" && !len) {
+      const m = /\/\s*(\d+)\s*$/.exec(h.value || "");
+      if (m) len = parseInt(m[1], 10) || 0;
+    }
+  }
+  let kind = null;
+  if (ct.startsWith("video/")) kind = "video";
+  else if (ct.startsWith("audio/")) kind = "audio";
+  else if (
+    (ct === "application/octet-stream" || ct === "binary/octet-stream" || ct === "") &&
+    MEDIA_EXT.test(url)
+  ) {
+    kind = MEDIA_AUDIO_EXT.test(url) ? "audio" : "video";
+  }
+  if (!kind) return null;
+  if (len && len < MIN_MEDIA_BYTES) return null;
+  return { url, kind, size: len, name: nameFromUrl(url, kind), from: "net" };
+}
+
+function rememberMedia(tabId, item) {
+  let list = snifferByTab.get(tabId);
+  if (!list) {
+    list = [];
+    snifferByTab.set(tabId, list);
+  }
+  if (list.some((x) => x.url === item.url)) return false;
+  list.push(item);
+  if (list.length > MAX_PER_TAB) list.shift();
+  return true;
+}
+
+async function notifyTab(tabId, reset) {
+  const items = snifferByTab.get(tabId) || [];
+  try {
+    // reset=true 表示「换了页面，旧结果作废」，content script 收到后要
+    // 清空而不是合并，否则新页面会继承上一个页面的媒体。
+    await chrome.tabs.sendMessage(tabId, { type: "sniffer-update", items, reset: !!reset });
+  } catch (_) {
+    /* 页面没有注入 content script（chrome://、应用店、已关闭的标签） */
+  }
+}
+
+chrome.webRequest.onResponseStarted.addListener(
+  (details) => {
+    const item = classifyResponse(details);
+    if (!item) return;
+    if (rememberMedia(details.tabId, item)) notifyTab(details.tabId);
+  },
+  { urls: ["http://*/*", "https://*/*"], types: ["main_frame", "sub_frame", "xmlhttprequest", "media", "object"] }
+);
+
+// 页面跳转后旧列表作废，否则新页面会继承上一个页面的嗅探结果
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) {
+    snifferByTab.delete(tabId);
+    notifyTab(tabId, true);
+  }
+});
+chrome.tabs.onRemoved.addListener((tabId) => snifferByTab.delete(tabId));
+
 function getCfg() {
   return new Promise((res) => chrome.storage.sync.get(DEFAULTS, res));
 }
@@ -101,15 +208,21 @@ function launchViaNative(req) {
         url: req.url,
         filename: req.filename || undefined,
         referer: req.referer || undefined,
+        cookie: req.cookie || undefined,
         connections: req.connections || undefined,
         dir: req.dir || undefined,
+        source: req.source || undefined,
+        kind: req.kind || undefined,
       });
     } catch (e) {
       finish(false);
     }
 
-    // A host that never answers must not stall the handover forever.
-    setTimeout(() => finish(false), 5000);
+    // A host that never answers must not stall the handover forever. The host
+    // itself may legitimately take ~20s to bring a cold client up, so give it
+    // more than the old 5s (which expired on every cold start and always fell
+    // through to the zdm:// escape hatch).
+    setTimeout(() => finish(false), 15000);
   });
 }
 
@@ -120,6 +233,10 @@ function buildProtocolUrl(req) {
   if (req.referer) q.set("referer", req.referer);
   if (req.connections) q.set("connections", String(req.connections));
   if (req.dir) q.set("dir", req.dir);
+  // 来源标记要能活着走到队列里：协议兜底是冷启动路径，客户端此时
+  // 只认启动参数，丢掉 source 会让「浏览器接管」显示成「手动添加」。
+  if (req.source) q.set("source", req.source);
+  if (req.kind) q.set("kind", req.kind);
   return "zdm://add?" + q.toString();
 }
 
@@ -162,12 +279,20 @@ async function waitForServer(cfg, timeoutMs) {
 }
 
 /* 确认任务真的进了 ZDM 的队列。协议启动有可能失败（比如注册表被清理、
- * 首次运行被拦截），这时不能盲目取消浏览器自己的下载。 */
-async function taskExists(url) {
+ * 首次运行被拦截），这时不能盲目取消浏览器自己的下载。
+ *
+ * ``since`` 只认这次交接之后新出现的任务：ZDM 会把最多 200 条历史完成任务
+ * 恢复进列表，只比 URL 会把"上周下过的同一个地址"误判成本次已入列 ——
+ * 浏览器下载被取消，新任务却从未创建，用户静默丢东西。 */
+async function taskExists(url, since) {
   try {
     const s = await api("state", null, "GET");
     const items = (s && s.tasks) || [];
-    return items.some((t) => t.url === url);
+    return items.some(
+      (t) =>
+        t.url === url &&
+        (since == null || (t.created_at || 0) >= since)
+    );
   } catch (_) {
     return false;
   }
@@ -179,6 +304,11 @@ async function taskExists(url) {
  */
 async function handOff(req) {
   const cfg = await getCfg();
+  const since = Date.now() / 1000;
+
+  const headers = {};
+  if (req.referer) headers.Referer = req.referer;
+  if (req.cookie) headers.Cookie = req.cookie;
 
   const post = () =>
     api("tasks", {
@@ -186,7 +316,9 @@ async function handOff(req) {
       filename: req.filename,
       connections: req.connections || cfg.connections,
       dir: req.dir || cfg.directory || undefined,
-      headers: req.referer ? { Referer: req.referer } : {},
+      headers,
+      source: req.source || "browser",
+      kind: req.kind || undefined,
     });
 
   // 1. 客户端已在运行：直接 POST。
@@ -208,9 +340,11 @@ async function handOff(req) {
     return false;
   }
 
-  // 4. 正常情况下客户端已经从启动参数里取走了这条下载；
-  //    如果队列里没有，就再补一次 API 调用，避免两边都空手。
-  if (await taskExists(req.url)) return true;
+  // 4. 正常情况下客户端已经从启动参数里取走了这条下载；只有确认队列里
+  //    没有 *本次* 的新任务时才补一次 POST。早先版本在这里无条件补 POST，
+  //    而 Windows 原生宿主是"先回 ok、任务随后才入列"，于是同一个地址
+  //    会被加两遍。
+  if (await taskExists(req.url, since)) return true;
 
   try {
     const res = await post();
@@ -232,6 +366,12 @@ chrome.downloads.onCreated.addListener(async (item) => {
     url,
     filename: item.filename ? item.filename.split(/[\\/]/).pop() : undefined,
     referer: item.referrer || undefined,
+    // The wake-up path must carry the user's options too, otherwise a cold
+    // start silently falls back to the client's defaults (8 connections,
+    // default directory) while a warm POST honoured them.
+    connections: cfg.connections,
+    dir: cfg.directory || undefined,
+    source: "browser",
   };
 
   // 先把浏览器这边的下载按住：唤醒 ZDM 要几秒，不按的话文件可能已经
@@ -288,12 +428,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const ok = await handOff({
     url,
     referer: tab && tab.url ? tab.url : undefined,
+    source: "browser",
   });
   notify(ok ? "已交给 ZDM" : "ZDM 添加失败", ok ? url : "请在设置里重新注册浏览器接管");
 });
 
 /* ---- popup helpers ---- */
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "state") {
     api("state", null, "GET").then(sendResponse).catch(() => sendResponse({ ok: false }));
     return true;
@@ -310,6 +451,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     getCfg().then((cfg) => {
       chrome.tabs.create({ url: baseUrl(cfg) + "/" });
     });
+    return true;
+  }
+  // 媒体嗅探：content script 来要当前标签页已发现的媒体
+  if (msg.type === "sniffer-list") {
+    const tabId = sender.tab && sender.tab.id;
+    sendResponse({ ok: true, items: (tabId != null && snifferByTab.get(tabId)) || [] });
+    return false;
+  }
+  // 一键推送：走的是和「接管浏览器下载」完全相同的 handOff()，
+  // 因此冷启动唤醒、原生消息、协议兜底的行为三者一致。
+  if (msg.type === "sniffer-push") {
+    const item = msg.item || {};
+    handOff({
+      url: item.url,
+      filename: item.filename,
+      referer: item.referer,
+      cookie: item.cookie,
+      source: item.source || "sniffer",
+      kind: item.kind || "video",
+    })
+      .then((ok) => {
+        sendResponse({ ok });
+        if (ok) notify("已推送给 ZDM", item.filename || item.url);
+      })
+      .catch(() => sendResponse({ ok: false }));
     return true;
   }
 });

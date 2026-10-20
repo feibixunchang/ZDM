@@ -127,19 +127,44 @@ def pick_asset(assets, platform: str = "") -> Optional[dict]:
         return None
 
     if plat == "darwin":
-        return first(lambda n: n.endswith(".dmg"))
+        # Prefer the plain universal dmg; skip arch-tagged variants.
+        return (
+            first(lambda n: n.endswith(".dmg") and "arm" not in n and "x86" not in n and "intel" not in n)
+            or first(lambda n: n.endswith(".dmg"))
+        )
     if plat in ("win32", "cygwin"):
-        return first(lambda n: n.endswith(".exe"))
-    # linux: prefer a deb, then a tarball
+        # The native client is the primary Windows build; the PyQt5 setup is a
+        # fallback for machines where the native one cannot run.
+        return (
+            first(lambda n: n.endswith(".exe") and "pyqt5" not in n and n.startswith("zdm-setup"))
+            or first(lambda n: n.endswith(".exe") and "pyqt5" not in n)
+            or first(lambda n: n.endswith(".exe"))
+        )
+    # linux: prefer a deb matching this architecture, then a tarball
+    import platform as _plat
+
+    machine = _plat.machine().lower()
+    arch = "arm64" if machine in ("aarch64", "arm64") else "amd64"
     return (
-        first(lambda n: n.endswith(".deb"))
+        first(lambda n: n.endswith(".deb") and arch in n)
+        or first(lambda n: n.endswith(".deb"))
         or first(lambda n: n.endswith(".tar.gz"))
         or first(lambda n: "linux" in n and n.endswith(".zip"))
     )
 
 
-def download(url: str, dest: str, timeout: float = 30.0, proxy: str = "") -> Optional[str]:
-    """Stream ``url`` into ``dest`` (atomically). Returns the path or None."""
+def download(
+    url: str,
+    dest: str,
+    timeout: float = 30.0,
+    proxy: str = "",
+    expected_size: int = 0,
+) -> Optional[str]:
+    """Stream ``url`` into ``dest`` (atomically). Returns the path or None.
+
+    ``expected_size`` (the size GitHub reported for the asset) is checked after
+    the transfer: a truncated installer used to be opened as if it were fine.
+    """
     tmp = dest + ".part"
     try:
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
@@ -149,6 +174,10 @@ def download(url: str, dest: str, timeout: float = 30.0, proxy: str = "") -> Opt
                 if not chunk:
                     break
                 f.write(chunk)
+        if expected_size and os.path.getsize(tmp) != expected_size:
+            raise IOError(
+                f"size mismatch: got {os.path.getsize(tmp)}, expected {expected_size}"
+            )
         os.replace(tmp, dest)
         return dest
     except Exception:

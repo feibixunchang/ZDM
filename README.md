@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.11.1**（PyQt5 三端 + Windows 原生客户端同版本）
+当前版本：**v1.12.0**（PyQt5 三端 + Windows 原生客户端同版本）
 
 ## 仓库结构
 
@@ -21,12 +21,12 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.11.1.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.12.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.11.1_amd64.deb` | `sudo apt install ./zdm_1.11.1_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.12.0_amd64.deb` | `sudo apt install ./zdm_1.12.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.11.1.exe` | 双击运行，用户级安装、无需管理员 |
-| Windows（原生） | `ZDM-Setup-1.11.1.exe` | C#/WPF 客户端，双击安装，见下方专节 |
+| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.12.0.exe` | 双击运行，用户级安装、无需管理员 |
+| Windows（原生） | `ZDM-Setup-1.12.0.exe` | C#/WPF 客户端，双击安装，见下方专节 |
 | 浏览器扩展 | `ZDM-Connector-1.2.1.zip` | 解压后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-PyQt5-Setup-*.exe` 在 `ubuntu-latest`
@@ -51,7 +51,7 @@
 python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.11.1
+bash zdm/build_linux_app.sh ./linux-build 1.12.0
 ```
 
 ## Windows 原生客户端（v1.11.0）
@@ -123,6 +123,13 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
   浅色或深色。所有颜色统一取自一套调色板（`zdm/theme.py`），深浅两套完全一致，
   切换时表格、进度条、状态色等自定义绘制部分同步刷新，不留异色碎片。
 - 浏览器扩展一键接管下载
+- **视频 / 音频嗅探（一键推送下载）**：装好扩展后，网页右下角会出现 ZDM 浮动按钮，
+  角标显示当前页面嗅探到的媒体数量。点开面板列出每一个视频 / 音频（图标区分、显示文件名与大小），
+  点「推送」即交给 ZDM 下载。嗅探有两条来源并会合并去重：`webRequest` 响应头
+  （能看到 Content-Type 与大小，覆盖播放 / 拖进度条 / 切清晰度时的请求）+ 页面 DOM 扫描
+  （覆盖首屏就摆在那儿的 `<video>` / `<audio>` 直链媒体）。
+  任务列表会标出来源（`[嗅探]` / `[浏览器]` / `[网页版]` / `[协议]`），顶部有「嗅探」筛选。
+  *（HLS `.m3u8` 与 DASH `.mpd` 流媒体本期不支持，需要流媒体合并引擎，留待后续版本。）*
 - **未启动也能接管**：ZDM 没开着时，浏览器里点下载会**自动把它拉起来**再接手任务（Windows 原生客户端
   通过 Native Messaging 实现，`zdm://` 协议兜底；其他平台靠协议唤起）
 - 开机自启（设置里可勾选，macOS / Windows / Linux 三端均支持）

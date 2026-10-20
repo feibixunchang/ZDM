@@ -358,54 +358,61 @@ public static class NativeMessagingRegistrar
         }
     }
 
+    /// <summary>Serializes manifest writes: the API middleware calls Register
+    /// from concurrent request threads when a new extension id shows up.</summary>
+    private static readonly object RegisterGate = new();
+
     /// <summary>
     /// Write the manifest and register it. Called on every start, because the
     /// exe path differs between a portable run and an installed copy.
     /// </summary>
     public static bool Register(string? additionalExtensionId = null)
     {
-        try
+        lock (RegisterGate)
         {
-            var ids = AllowedOrigins();
-            if (!string.IsNullOrWhiteSpace(additionalExtensionId)
-                && additionalExtensionId.Length == 32
-                && !ids.Contains(additionalExtensionId))
+            try
             {
-                ids.Add(additionalExtensionId);
-            }
-
-            var manifest = new
-            {
-                name = HostName,
-                description = "ZDM 下载管理器启动器",
-                path = AutoStart.ExePath,
-                type = "stdio",
-                allowed_origins = ids.Select(id => $"chrome-extension://{id}/").ToArray(),
-            };
-
-            Directory.CreateDirectory(Path.GetDirectoryName(ManifestPath)!);
-            // UTF-8 without BOM: Chrome refuses a manifest that starts with one.
-            File.WriteAllText(ManifestPath, JsonSerializer.Serialize(manifest,
-                new JsonSerializerOptions { WriteIndented = true }),
-                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-
-            foreach (var root in HostRoots)
-            {
-                try
+                var ids = AllowedOrigins();
+                if (!string.IsNullOrWhiteSpace(additionalExtensionId)
+                    && additionalExtensionId.Length == 32
+                    && !ids.Contains(additionalExtensionId))
                 {
-                    using var key = Registry.CurrentUser.CreateSubKey(root + HostName);
-                    key?.SetValue(null, ManifestPath);
+                    ids.Add(additionalExtensionId);
                 }
-                catch
+
+                var manifest = new
                 {
-                    // A browser that is not installed has no reason to accept it.
+                    name = HostName,
+                    description = "ZDM 下载管理器启动器",
+                    path = AutoStart.ExePath,
+                    type = "stdio",
+                    allowed_origins = ids.Select(id => $"chrome-extension://{id}/").ToArray(),
+                };
+
+                Directory.CreateDirectory(Path.GetDirectoryName(ManifestPath)!);
+                // UTF-8 without BOM: Chrome refuses a manifest that starts with one.
+                File.WriteAllText(ManifestPath, JsonSerializer.Serialize(manifest,
+                    new JsonSerializerOptions { WriteIndented = true }),
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+                foreach (var root in HostRoots)
+                {
+                    try
+                    {
+                        using var key = Registry.CurrentUser.CreateSubKey(root + HostName);
+                        key?.SetValue(null, ManifestPath);
+                    }
+                    catch
+                    {
+                        // A browser that is not installed has no reason to accept it.
+                    }
                 }
+                return true;
             }
-            return true;
-        }
-        catch
-        {
-            return false;
+            catch
+            {
+                return false;
+            }
         }
     }
 

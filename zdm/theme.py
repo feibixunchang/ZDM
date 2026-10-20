@@ -353,30 +353,51 @@ class ThemeManager:
         self.mode = mode
         self._save_mode()
         self.apply()
+        # Switching back to "follow the system" has to (re)install the watcher,
+        # otherwise the appearance stops tracking the OS until a restart.
+        if mode == "auto":
+            self.prime()
+            self.watch_system()
 
     # -- system watching -------------------------------------------------------
+    def _stop_watchers(self) -> None:
+        for w in self._watchers:
+            try:
+                if hasattr(w, "stop"):  # QTimer
+                    w.stop()
+                    w.deleteLater()
+                else:  # NSObject observer token from addObserver...usingBlock_
+                    from Foundation import NSNotificationCenter
+
+                    NSNotificationCenter.defaultCenter().removeObserver_(w)
+            except Exception:
+                pass
+        self._watchers = []
+
     def watch_system(self) -> None:
         """Re-apply the stylesheet when the OS appearance changes.
 
         Only meaningful while ``mode == "auto"``; the explicit modes are stable.
+        Safe to call repeatedly: previous watchers are torn down first.
         """
         if self.mode != "auto":
             return
+        self._stop_watchers()
         if sys.platform == "darwin":
             try:
-                from AppKit import (  # type: ignore
-                    NSWorkspace,
-                    NSWorkspaceDidChangeNotification,
+                from Foundation import (
+                    NSDistributedNotificationCenter,
+                    NSOperationQueue,
                 )
-                from Foundation import NSNotificationCenter, NSOperationQueue
 
-                # NOTE: the selector is ..._usingBlock_ (not ..._options_handler_).
-                # Getting the name wrong raises AttributeError, which used to be
-                # swallowed here and silently downgraded us to the polling path.
-                token = NSNotificationCenter.defaultCenter() \
+                # The constant is NOT exported by AppKit (importing
+                # NSWorkspaceDidChangeNotification raises and used to be
+                # swallowed, silently downgrading us to the 2s poll). It lives
+                # on the *distributed* center, not NSWorkspace's.
+                token = NSDistributedNotificationCenter.defaultCenter() \
                     .addObserverForName_object_queue_usingBlock_(
-                        NSWorkspaceDidChangeNotification,
-                        NSWorkspace.sharedWorkspace().notificationCenter(),
+                        "AppleInterfaceThemeChangedNotification",
+                        None,
                         NSOperationQueue.mainQueue(),
                         lambda _n: self._on_system_change(),
                     )
@@ -384,7 +405,8 @@ class ThemeManager:
                 return
             except Exception:
                 pass
-        # Portable fallback for Linux/Windows: a light poll is cheap and robust.
+        # Portable fallback for Linux/Windows (and if the observer failed):
+        # a light poll is cheap and robust.
         try:
             from PyQt5.QtCore import QTimer
             t = QTimer()

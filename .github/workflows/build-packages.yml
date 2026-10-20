@@ -3,18 +3,80 @@ name: build packages
 # Builds every platform package:
 #   ubuntu-22.04  -> self-contained Linux bundle + .deb + portable tar.gz, Windows .exe
 #   macos-latest  -> macOS ZDM.app + ZDM-<version>.dmg (native Mach-O launcher)
+#
+# linux-native is listed alongside main because that is where the cross-platform
+# work actually happens; without it a branch push produced no compile check for
+# the C# client or any of the packaging.
 on:
   push:
-    branches: [main]
+    branches: [main, linux-native]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, linux-native]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  extension:
+    # Cheap gate that runs before any packaging: the browser extension is pure
+    # JS, so a syntax error or a manifest that lost its "key" (which silently
+    # changes the extension id and invalidates every registered native
+    # messaging host) is caught in seconds instead of after a 20-minute build.
+    name: Browser extension sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax-check every script
+        run: |
+          set -e
+          for f in zdm/extension/*.js; do
+            echo "== $f"
+            node --check "$f"
+          done
+
+      - name: Validate the manifest
+        run: |
+          set -e
+          python3 - <<'PY'
+          import base64, hashlib, json, re, sys, pathlib
+          m = json.load(open("zdm/extension/manifest.json"))
+          assert m["manifest_version"] == 3, "must stay MV3"
+          # The id is derived from the embedded key; if the key is edited or
+          # dropped the id changes and every native-messaging manifest written
+          # by an older client stops matching.
+          key = m.get("key")
+          assert key, "manifest.key is gone - the extension id would change"
+          der = base64.b64decode(key)
+          digest = hashlib.sha256(der).digest()[:16]
+          alpha = "abcdefghijklmnop"
+          ident = "".join(alpha[(b >> 4) & 15] + alpha[b & 15] for b in digest)
+          expected = "mpodbnemeeghjpllgphpemhoogddfhjg"
+          print("derived extension id:", ident)
+          assert ident == expected, f"extension id drifted: {ident}"
+          # Every file the manifest names must exist.
+          root = pathlib.Path("zdm/extension")
+          for f in m.get("content_scripts", []):
+              for js in f["js"]:
+                  assert (root / js).is_file(), f"missing content script {js}"
+          assert (root / m["background"]["service_worker"]).is_file()
+          assert (root / m["action"]["default_popup"]).is_file()
+          assert (root / m["options_ui"]["page"]).is_file()
+          for p in m["icons"].values():
+              assert (root / p).is_file(), f"missing icon {p}"
+          # Sniffing needs webRequest plus ordinary http(s) host access.
+          assert "webRequest" in m["permissions"], "sniffer needs webRequest"
+          assert "http://*/*" in m["host_permissions"]
+          assert "https://*/*" in m["host_permissions"]
+          print("manifest OK:", m["name"], m["version"])
+          PY
+
   linux-windows:
     # ubuntu-22.04 (glibc 2.35) is the oldest runner still offered, so the
     # frozen bundle runs on Ubuntu 22.04+/Debian 12+/Mint 21+. Newer runners
@@ -63,6 +125,22 @@ jobs:
           SZ=$(stat -c%s "$DEB")
           echo "deb size: $SZ bytes"
           test "$SZ" -gt 10000000 || { echo "ERROR: $DEB is too small to contain a runtime"; exit 1; }
+          # Browser integration must ship in the package: without the native
+          # messaging host the extension's "wake ZDM up" path silently falls
+          # back to zdm://, which Chrome blocks without a user gesture.
+          dpkg-deb --contents "$DEB" | grep -q 'etc/opt/chrome/native-messaging-hosts/com.zdm.launcher.json'
+          dpkg-deb --contents "$DEB" | grep -q 'etc/chromium/native-messaging-hosts/com.zdm.launcher.json'
+          # ...and the host manifest must point at the bundled wrapper, not at
+          # a script that only exists in the source tree.
+          rm -rf /tmp/nmh && mkdir -p /tmp/nmh
+          dpkg-deb -x "$DEB" /tmp/nmh
+          grep -q '/opt/zdm/zdm-native-host' /tmp/nmh/etc/opt/chrome/native-messaging-hosts/com.zdm.launcher.json
+          test -x /tmp/nmh/opt/zdm/zdm-native-host
+          # The wrapper must exec the frozen exe with the host flag; a wrapper
+          # that drops the arguments answers nothing and the extension times out.
+          grep -q -- '--native-host' /tmp/nmh/opt/zdm/zdm-native-host
+          # zdm:// must be registered, or clicking a handover does nothing.
+          grep -q 'x-scheme-handler/zdm' /tmp/nmh/usr/share/applications/zdm.desktop
           echo "control version: $(dpkg-deb --field "$DEB" Version)"
           echo "control arch:    $(dpkg-deb --field "$DEB" Architecture)"
           echo "installed size:  $(dpkg-deb --field "$DEB" Installed-Size) KB"

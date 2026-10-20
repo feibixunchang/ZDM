@@ -165,6 +165,8 @@ public sealed class ExternalRequest
     public string? Directory { get; init; }
     public string? Referer { get; init; }
     public int? Connections { get; init; }
+    public string? Source { get; init; }
+    public string? Kind { get; init; }
 
     /// <summary>
     /// Headers to replay with the request. Browsers refuse hotlink-protected
@@ -234,6 +236,10 @@ public sealed class ExternalRequest
                 Directory = o["dir"]?.ToString(),
                 Referer = o["referer"]?.ToString(),
                 Connections = connections,
+                // Provenance, so a sniffer push that had to wake the client
+                // still shows up as "嗅探" rather than "手动".
+                Source = o["source"]?.ToString(),
+                Kind = o["kind"]?.ToString(),
             };
         }
         catch
@@ -265,6 +271,8 @@ public sealed class ExternalRequest
             Filename = query.GetValueOrDefault("filename"),
             Directory = query.GetValueOrDefault("dir"),
             Referer = query.GetValueOrDefault("referer") ?? query.GetValueOrDefault("ref"),
+            Source = query.GetValueOrDefault("source"),
+            Kind = query.GetValueOrDefault("kind"),
             Connections = int.TryParse(query.GetValueOrDefault("connections"), out var c)
                 ? Math.Clamp(c, 1, 32)
                 : null,
@@ -301,6 +309,11 @@ public sealed class ExternalRequest
             sb.Append("&referer=").Append(Uri.EscapeDataString(Referer));
         if (Connections is > 0)
             sb.Append("&connections=").Append(Connections);
+        // Dropped here and the forwarded instance loses the badge.
+        if (!string.IsNullOrWhiteSpace(Source))
+            sb.Append("&source=").Append(Uri.EscapeDataString(Source));
+        if (!string.IsNullOrWhiteSpace(Kind))
+            sb.Append("&kind=").Append(Uri.EscapeDataString(Kind));
         return sb.ToString();
     }
 }

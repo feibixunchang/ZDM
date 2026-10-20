@@ -61,8 +61,8 @@ v1.11.0 起改为和 macOS `.dmg` 同一思路：**自带运行时**。
 安装与验证：
 
 ```bash
-sudo apt install ./zdm_1.11.1_amd64.deb
-zdm --version          # ZDM 1.11.1
+sudo apt install ./zdm_1.12.0_amd64.deb
+zdm --version          # ZDM 1.12.0
 zdm --selfcheck        # 报告内嵌 Python / PyQt5 / 资源路径
 zdm-desktop            # 打开桌面窗口（菜单里也有「ZDM 下载管理器」图标）
 ```
@@ -259,6 +259,34 @@ launchctl kickstart -k "gui/$(id -u)/com.zdm.service"
 2. 「加载已解压的扩展程序」→ 选择 `~/Library/Application Support/ZDM/extension`
 3. 点扩展图标 → ⚙ → 「测试连接」→ 勾选「自动接管浏览器下载」
 
+## 视频 / 音频嗅探（一键推送下载，v1.12.0 新增）
+
+装好上面那个扩展之后，**浏览器的每个网页右下角会出现一个 ZDM 圆形浮动按钮**。
+
+- 按钮上带数字角标 = 当前页面嗅探到的媒体数量（视频 / 音频）。
+- 点一下展开面板，里面列出嗅探到的每一个媒体：图标区分视频 / 音频，下面显示文件名与大小。
+- 每条右侧有「推送」按钮，点一下就直接把这个媒体交给 ZDM 下载，**走的是和「接管浏览器下载」完全一样的通道**（冷启动唤醒、原生消息、协议兜底三条路径都支持）。
+- 推送成功的条目会从面板里移除，角标数字同步减少。
+
+任务列表里会带上来源标记：`[嗅探]`、`[浏览器]`、`[网页版]`、`[协议]`，
+点顶部的「嗅探」筛选按钮可以只看嗅探来的任务。
+
+**嗅探是怎么工作的（两条来源合并）**
+
+| 来源 | 覆盖到的场景 |
+|---|---|
+| `webRequest` 响应头 | 播放、拖动进度条、切换清晰度时新发出的媒体请求（能看到 Content-Type 与大小） |
+| 页面 DOM 扫描 | 首屏就摆在那儿的直链媒体（`<video>` / `<audio>` / `<source>`） |
+
+两条来源会合并去重后一起显示，不会互相覆盖。
+
+**已知的边界（本期不支持）**
+
+- **HLS（`.m3u8`）与 DASH（`.mpd`）流媒体**：嗅探到的是「分片清单」而不是可直接下载的媒体文件，
+  面板不会列出它们。要整段下载需要引入流媒体合并引擎，计划在后续版本处理。
+- 需要登录才能看的站点：扩展只在**与页面同站**时才会带上 Cookie；跨站 CDN 不带（避免越权）。
+- 加密流（DRM，如 Widevine / FairPlay）无法下载。
+
 ## 常用命令
 
 ```bash
@@ -293,3 +321,65 @@ cd <仓库>/zdm && ./install.sh --uninstall
 9. **Qt 标准按钮英文**：加载 Qt 中文翻译，`保存 / 取消 / 是 / 否` 正常显示。
 10. **浏览器接管弹出旧版界面**：不再回退到 PATH 中的旧 `zdm-desktop`，优先使用当前安装的 GUI。
 11. **扩展**：popup 对远端文件名做 HTML 转义；`install.sh` 注册 Linux Chrome/Chromium 原生消息宿主，未启动时可自动唤醒。
+
+## v1.12.0 修复清单与新增（2026-10-20）
+
+### 新增：媒体嗅探
+
+1. **扩展新增浮动按钮 + 媒体列表面板**（`extension/sniffer.js`，Shadow DOM 隔离，站点 CSS 打不坏它）。
+2. **两条嗅探来源合并**：`webRequest` 响应头（能看到 Content-Type / 大小）+ 页面 DOM 扫描（首屏直链媒体），
+   合并去重，不会互相覆盖。
+3. **一键推送复用接管下载的通道**：`handOff()` 三条路径（冷启动唤醒 / 原生消息 / `zdm://` 协议兜底）全部支持。
+4. **任务新增来源与类型字段**：`source`（manual / browser / sniffer / webui / protocol）与 `kind`（video / audio），
+   三端（macOS / Linux / Windows）+ 网页版 UI 全部贯通，并带「嗅探」筛选。
+5. **Cookie 只发同站**：`sameSite()` 判定失败时不带 Cookie，避免越权。
+
+### 修复：macOS / Linux（Python 端）
+
+6. **打包版 GUI 起不来**：frozen 分支传 `--gui` 而不依赖 `argv[0]`（原名 `ZDM` 会进 CLI 分支，
+   argparse 把裸端口当非法子命令 exit 2）。
+7. **`zdm start` 谎报「已在运行」**：端口被非 ZDM 程序占用时不再误判，改用 `/api/state` 应答结构校验。
+8. **误杀别的进程**：kill 前用 `ps -o args=` 验证进程身份，验证不了就拒绝。
+9. **开机自启静默失败**：plist 日志改写 `~/Library/Logs`（原来写进 root 所有的 bundle，job 直接加载失败）；
+   launchd 改用 `bootstrap` + `kickstart`，失败才回退 `load -w`。
+10. **更新下载无校验**：按资产 size 校验，不符即报错；资产选择修正
+    （Windows 优先原生 `zdm-setup*.exe` 避开 PyQt5 薄壳，Linux 按架构匹配 deb，macOS 优先无架构标 dmg）。
+11. **表格控件泄漏**：`setCellWidget` 替换时不会删旧控件，旧控件被 reparent 到 viewport 永久驻留。
+    已在 `setRowCount` 之前统一摘除并释放。
+12. **Dock 唤不回窗口**：Qt 实际安装了 `QCocoaApplicationDelegate`（旧结论已过时），
+    自建 delegate 改为 `forwardingTargetForSelector_` 转发未实现的 selector。
+13. **深浅色不跟随系统**：改用 `NSDistributedNotificationCenter` 的 `AppleInterfaceThemeChangedNotification`
+    （`NSWorkspaceDidChangeNotification` 根本不存在），并去掉重复装的观察者。
+14. **设置对话框预览不切主题**：取消与保存两条路径都补 `prime()`。
+15. **退出时下载线程还在跑**：退出前等待 worker，超时强制终止。
+16. **扩展冷启动丢选项**：唤醒路径补传连接数与保存目录。
+17. **扩展误判任务已存在**：`taskExists` 加 `created_at` 下限，历史同 URL 任务不再导致新任务从未创建。
+18. **原生消息 5 秒超时过短**：放宽到 15 秒（宿主冷启动可合法耗时约 20 秒）。
+19. **网页版 XSS 与状态卡死**：`esc()` 补单引号转义；SSE 断开后状态不再永久显示「连接中断」。
+19b. **来源徽标会显示成乱码**：`QTableWidgetItem` 不解析 HTML，`<font>` 标签会被原样显示出来。
+    改为在文件名单元格放 `QLabel`（原生支持富文本），并对文件名做 HTML 转义（远端文件名可能含尖括号）。
+19c. **任务字段缺失会让整个列表空白**：`t['speed']` / `t['status']` / `t['created_at']` 等
+    原本是直接索引，一个字段缺失就抛 KeyError 并中断整次渲染（不是只影响那一行）。
+    现在全部改为 `.get()` + 数值兜底，残缺或类型异常的任务都能正常显示。
+
+### 修复：Windows 原生端（C#）
+
+20. **筛选标签全是坏的**：四个筛选标签没绑任何点击事件（`ToggleButton` 还是 `IsHitTestVisible="False"`），
+    界面看着能点却毫无反应。现已补 `OnFilterTabClick` 并新增「嗅探」筛选。
+21. **「重新下载」无效**：`RestartAsync` 取消后没有换新 `CancellationTokenSource`，probe 立刻被取消，任务变暂停。
+22. **删除任务不删文件**：补 `DeleteTaskFiles`，下载中分支等 worker 空闲后再删。
+23. **Range 被服务器忽略仍静默损坏文件**：服务器返回 200 而非 206 时直接报错。
+24. **慢网 / 大文件 30 秒必失败**：总超时取消，改为每次读、每次写各自独立计时。
+25. **Web UI 实时更新全失效**：`/api/events` 路由缺失（Web UI 连的是这个路径），已补别名。
+26. **状态保存竞态**：`SaveState()` 整体加锁。
+27. **扩展注册竞态**：注册加锁，避免并发写出半截清单。
+28. **版本号写死**：`ApiServer.Version` 改为读程序集版本。
+
+### 修复：打包与 CI
+
+29. **Linux deb 缺原生消息清单**：deb 里补 `zdm-native-host` 包装脚本与
+    `/etc/opt/chrome|chromium/native-messaging-hosts/` 清单（扩展 ID 已固定为
+    `mpodbnemeeghjpllgphpemhoogddfhjg`），并声明 `zdm://` 协议。
+30. **CI 不编译 Windows 代码**：工作流触发分支补上 `linux-native`，C# 改动不再无人验证。
+31. **CI 缺扩展校验**：新增作业校验 JS 语法、manifest 合法性与扩展 ID 未被改动；
+    deb 校验增加「必须含原生消息清单」与「体积不得小于 10 MB」（防止又打成源码壳）。

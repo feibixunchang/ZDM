@@ -44,6 +44,12 @@ def _selfcheck() -> int:
         "extension_manifest": os.path.exists(
             os.path.join(root, "extension", "manifest.json")
         ),
+        # The media sniffer is a separate content script; a package that
+        # ships the manifest but forgets sniffer.js would look fine here and
+        # still fail the moment the user opens a video page.
+        "extension_sniffer": os.path.exists(
+            os.path.join(root, "extension", "sniffer.js")
+        ),
         "theme_module": False,
         "pyqt5": "",
         "qt": "",
@@ -67,6 +73,7 @@ def _selfcheck() -> int:
     ok = bool(
         report["web_index"]
         and report["extension_manifest"]
+        and report["extension_sniffer"]
         and report["theme_module"]
         and report["pyqt5"]
     )
@@ -80,6 +87,13 @@ def main(argv=None) -> int:
         return _print_version()
     if argv and argv[0] == "--selfcheck":
         return _selfcheck()
+
+    # Explicit role override: desktop.py re-execs the frozen binary with this
+    # flag because argv[0] there is "ZDM" (CLI name), not "zdm-desktop".
+    if argv and argv[0] == "--gui":
+        import gui
+
+        return gui.main(argv[1:])
 
     name = os.path.basename(sys.argv[0] or "").lower()
     if name.startswith(("zdm-desktop", "zdm-gui")):

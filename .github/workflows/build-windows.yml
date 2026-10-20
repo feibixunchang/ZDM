@@ -9,10 +9,10 @@ name: build-windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, linux-native]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [main, linux-native]
   workflow_dispatch:
 
 permissions:

@@ -89,6 +89,43 @@ public sealed class Chunk
     public static Chunk FromArray(long[] a) => new(a[0], a[1], a[2]);
 }
 
+/// <summary>Where a task came from, matching the Python build's vocabulary.</summary>
+public static class TaskSources
+{
+    public const string Manual = "manual";
+    public const string Browser = "browser";
+    public const string Sniffer = "sniffer";
+    public const string WebUi = "webui";
+    public const string Protocol = "protocol";
+
+    /// <summary>
+    /// Anything outside the known set collapses to <see cref="Manual"/>: the
+    /// value reaches us over the loopback REST API from the browser
+    /// extension, so it is untrusted input that ends up in a UI label.
+    /// </summary>
+    // The "!" matters: the switch arms mix string? and string, so the inferred
+    // type is nullable and returning it from a non-nullable method is a warning
+    // - which this project builds with -warnaserror.
+    public static string Normalize(string? s) => s switch
+    {
+        Manual or Browser or Sniffer or WebUi or Protocol => s!,
+        _ => Manual,
+    };
+}
+
+/// <summary>Broad payload kind. Empty means "not a media file".</summary>
+public static class TaskKinds
+{
+    public const string Video = "video";
+    public const string Audio = "audio";
+
+    public static string Normalize(string? s) => s switch
+    {
+        Video or Audio => s!,
+        _ => "",
+    };
+}
+
 /// <summary>Public snapshot of a task, shaped exactly like the Python version's JSON.</summary>
 public sealed class TaskSnapshot
 {
@@ -113,4 +150,8 @@ public sealed class TaskSnapshot
     [JsonPropertyName("eta")] public int? Eta { get; set; }
     [JsonPropertyName("progress")] public double Progress { get; set; }
     [JsonPropertyName("chunks")] public long[][] Chunks { get; set; } = Array.Empty<long[]>();
+    // Provenance. Defaults keep pre-1.12.0 state files and older callers that
+    // omit both fields working unchanged.
+    [JsonPropertyName("source")] public string Source { get; set; } = TaskSources.Manual;
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "";
 }

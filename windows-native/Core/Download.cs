@@ -37,6 +37,10 @@ public sealed class Download
     public int MaxRetries { get; set; }
     public TimeSpan Timeout { get; set; }
     public long SpeedLimit { get; set; }
+    /// <summary>Who asked for this task (manual/browser/sniffer/webui/protocol).</summary>
+    public string Source { get; set; } = TaskSources.Manual;
+    /// <summary>"video"/"audio", or empty for an ordinary file download.</summary>
+    public string Kind { get; set; } = "";
 
     public long Size { get; set; }
     public TaskStatus Status { get; set; } = TaskStatus.Queued;
@@ -66,7 +70,9 @@ public sealed class Download
         string? proxy = null,
         int maxRetries = 5,
         double timeoutSeconds = 30,
-        long speedLimit = 0)
+        long speedLimit = 0,
+        string? source = null,
+        string? kind = null)
     {
         Id = id;
         Url = url;
@@ -80,6 +86,8 @@ public sealed class Download
         Timeout = TimeSpan.FromSeconds(timeoutSeconds);
         SpeedLimit = speedLimit;
         Limiter = new RateLimiter(speedLimit);
+        Source = TaskSources.Normalize(source);
+        Kind = TaskKinds.Normalize(kind);
     }
 
     public string PartPath => Path.Combine(Directory, Filename + ".part");
@@ -148,6 +156,8 @@ public sealed class Download
             Eta = Eta,
             Progress = Progress,
             Chunks = Segments?.Snapshot() ?? Array.Empty<long[]>(),
+            Source = TaskSources.Normalize(Source),
+            Kind = TaskKinds.Normalize(Kind),
         };
     }
 
@@ -165,6 +175,8 @@ public sealed class Download
         headers = Headers,
         proxy = Proxy,
         speed_limit = SpeedLimit,
+        source = Source,
+        kind = Kind,
         chunks = Segments?.Snapshot() ?? Array.Empty<long[]>(),
     };
 
@@ -193,6 +205,11 @@ public sealed class Download
         if (data.TryGetProperty("supports_range", out var sr)) SupportsRange = sr.GetBoolean();
         if (data.TryGetProperty("speed_limit", out var sl)) SpeedLimit = sl.GetInt64();
         if (data.TryGetProperty("proxy", out var px)) Proxy = px.GetString();
+        // Metadata written before 1.12.0 has neither key: keep the defaults.
+        if (data.TryGetProperty("source", out var so) && so.ValueKind == JsonValueKind.String)
+            Source = TaskSources.Normalize(so.GetString());
+        if (data.TryGetProperty("kind", out var kd) && kd.ValueKind == JsonValueKind.String)
+            Kind = TaskKinds.Normalize(kd.GetString());
 
         if (data.TryGetProperty("headers", out var hd) && hd.ValueKind == JsonValueKind.Object)
         {
@@ -435,7 +452,12 @@ public sealed class Download
                     Error = ex.Message;
                     return;
                 }
-                await Task.Delay(Math.Min(1 << chunk.Attempts, 10) * 1000);
+                // Honour cancellation while backing off: the old unbounded
+                // Task.Delay kept a worker sleeping for up to 10s after the
+                // user paused, and WaitIdleAsync's 12s budget was shaved
+                // razor-thin by it.
+                try { await Task.Delay(Math.Min(1 << chunk.Attempts, 10) * 1000, ct); }
+                catch (OperationCanceledException) { return; }
             }
         }
     }
@@ -488,7 +510,8 @@ public sealed class Download
         try
         {
             await using (var fs = new FileStream(
-                             PartPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                             PartPath, FileMode.Create, FileAccess.Write,
+                             FileShare.ReadWrite | FileShare.Delete))
             {
                 await foreach (var buf in Transport.Instance.StreamAsync(
                                    url, 0, null, Headers, Timeout, Proxy, ct))
@@ -633,7 +656,10 @@ internal sealed class RandomAccessFile : IAsyncDisposable
             path,
             FileMode.OpenOrCreate,
             FileAccess.ReadWrite,
-            FileShare.ReadWrite,
+            // FileShare.Delete is required for cancel/delete to work while
+            // workers still hold the file: without it DeleteFile fails with a
+            // sharing violation and the .part is left behind on disk.
+            FileShare.ReadWrite | FileShare.Delete,
             bufferSize: 1,
             FileOptions.Asynchronous | FileOptions.RandomAccess);
     }

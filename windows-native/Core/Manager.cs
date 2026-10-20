@@ -19,6 +19,11 @@ public sealed class AppConfig
     [JsonPropertyName("port")] public int Port { get; set; } = 9000;
     [JsonPropertyName("auto_resume")] public bool AutoResume { get; set; } = true;
     [JsonPropertyName("intercept_browser")] public bool InterceptBrowser { get; set; }
+    // The Python server exposes these two; the web UI and extension read them
+    // from /api/config, so a Windows client that dropped them answered with a
+    // different shape for the same endpoint.
+    [JsonPropertyName("auto_show_gui")] public bool AutoShowGui { get; set; } = true;
+    [JsonPropertyName("check_updates")] public bool CheckUpdates { get; set; } = true;
     [JsonPropertyName("history_limit")] public int HistoryLimit { get; set; } = 200;
 
     public AppConfig Clone() => (AppConfig)MemberwiseClone();
@@ -132,7 +137,9 @@ public sealed class Manager
         Dictionary<string, string>? headers = null,
         string? proxy = null,
         long? speedLimit = null,
-        bool startNow = true)
+        bool startNow = true,
+        string? source = null,
+        string? kind = null)
     {
         if (string.IsNullOrWhiteSpace(url) ||
             !(url.StartsWith("http://") || url.StartsWith("https://")))
@@ -151,7 +158,9 @@ public sealed class Manager
             proxy: proxy ?? (string.IsNullOrEmpty(Config.Proxy) ? null : Config.Proxy),
             maxRetries: Config.MaxRetries,
             timeoutSeconds: Config.Timeout,
-            speedLimit: speedLimit ?? 0)
+            speedLimit: speedLimit ?? 0,
+            source: source,
+            kind: kind)
         {
             Status = startNow ? TaskStatus.Queued : TaskStatus.Paused,
         };
@@ -225,6 +234,11 @@ public sealed class Manager
         if (d is null) return false;
         d.Cancel(removeFiles: true);
         await WaitIdleAsync(d);
+        // Cancel() leaves the CancellationTokenSource in the cancelled state.
+        // Resume() swaps in a fresh one - without it the next probe is
+        // cancelled immediately and the "restarted" task lands in paused
+        // instead of downloading (Python's start() does _stop.clear()).
+        d.Resume();
         d.Segments = null;
         d.Meter.Reset();
         d.Retries = 0;
@@ -251,18 +265,32 @@ public sealed class Manager
         {
             d.Cancel(removeFiles);
             await WaitIdleAsync(d);
+            // Cancel() tried to delete the .part while workers still had the
+            // file open (FileShare without Delete), so it failed silently.
+            // The workers are gone now - try again.
+            if (removeFiles) DeleteTaskFiles(d);
         }
         else if (removeFiles)
         {
-            foreach (var p in new[] { d.PartPath, d.MetaPath })
-            {
-                try { if (File.Exists(p)) File.Delete(p); } catch { /* best effort */ }
-            }
+            // A completed download owns TargetPath; deleting only the .part
+            // left the finished file behind (Python fixed this in v1.11.1).
+            DeleteTaskFiles(d);
         }
         lock (_gate) _tasks.Remove(id);
         Emit("removed", d);
         SaveState();
         return true;
+    }
+
+    private static void DeleteTaskFiles(Download d)
+    {
+        var paths = new List<string> { d.PartPath, d.MetaPath };
+        if (d.Status == TaskStatus.Completed)
+            paths.Add(d.TargetPath);
+        foreach (var p in paths)
+        {
+            try { if (File.Exists(p)) File.Delete(p); } catch { /* best effort */ }
+        }
     }
 
     public async Task PauseAllAsync()
@@ -401,6 +429,10 @@ public sealed class Manager
                     cfg.AutoResume = p.Value.GetBoolean(); break;
                 case "intercept_browser" when p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False:
                     cfg.InterceptBrowser = p.Value.GetBoolean(); break;
+                case "auto_show_gui" when p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False:
+                    cfg.AutoShowGui = p.Value.GetBoolean(); break;
+                case "check_updates" when p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False:
+                    cfg.CheckUpdates = p.Value.GetBoolean(); break;
                 case "history_limit" when p.Value.ValueKind == JsonValueKind.Number:
                     cfg.HistoryLimit = p.Value.GetInt32(); break;
             }
@@ -424,47 +456,54 @@ public sealed class Manager
         return Config;
     }
 
+    /// <summary>Serializes writes: Emit() can be called from several threads
+    /// and two concurrent saves used to fight over the same .tmp file.</summary>
+    private readonly object _saveGate = new();
+
     public void SaveState()
     {
-        try
+        lock (_saveGate)
         {
-            var tasks = new JsonArray();
-            var finished = new List<Download>();
-            var keep = new HashSet<string>();
-
-            lock (_gate)
+            try
             {
-                var limit = Math.Max(1, Config.HistoryLimit);
-                foreach (var d in _tasks.Values.Where(x => x.Status == TaskStatus.Completed)
-                             .OrderByDescending(x => x.CompletedAt ?? 0))
+                var tasks = new JsonArray();
+                var finished = new List<Download>();
+                var keep = new HashSet<string>();
+
+                lock (_gate)
                 {
-                    if (keep.Count >= limit) break;
-                    keep.Add(d.Id);
-                    finished.Add(d);
+                    var limit = Math.Max(1, Config.HistoryLimit);
+                    foreach (var d in _tasks.Values.Where(x => x.Status == TaskStatus.Completed)
+                                 .OrderByDescending(x => x.CompletedAt ?? 0))
+                    {
+                        if (keep.Count >= limit) break;
+                        keep.Add(d.Id);
+                        finished.Add(d);
+                    }
+
+                    foreach (var d in _tasks.Values)
+                    {
+                        if (d.Status == TaskStatus.Completed && !keep.Contains(d.Id))
+                            continue;
+                        tasks.Add(JsonSerializer.SerializeToNode(d.Snapshot()));
+                    }
                 }
 
-                foreach (var d in _tasks.Values)
+                var root = new JsonObject
                 {
-                    if (d.Status == TaskStatus.Completed && !keep.Contains(d.Id))
-                        continue;
-                    tasks.Add(JsonSerializer.SerializeToNode(d.Snapshot()));
-                }
+                    ["config"] = JsonSerializer.SerializeToNode(Config),
+                    ["tasks"] = tasks,
+                };
+
+                Directory.CreateDirectory(Path.GetDirectoryName(_stateFile)!);
+                var tmp = _stateFile + ".tmp";
+                File.WriteAllText(tmp, root.ToJsonString());
+                File.Move(tmp, _stateFile, overwrite: true);
             }
-
-            var root = new JsonObject
+            catch
             {
-                ["config"] = JsonSerializer.SerializeToNode(Config),
-                ["tasks"] = tasks,
-            };
-
-            Directory.CreateDirectory(Path.GetDirectoryName(_stateFile)!);
-            var tmp = _stateFile + ".tmp";
-            File.WriteAllText(tmp, root.ToJsonString());
-            File.Move(tmp, _stateFile, overwrite: true);
-        }
-        catch
-        {
-            // persistence is best effort
+                // persistence is best effort
+            }
         }
     }
 
@@ -487,6 +526,17 @@ public sealed class Manager
         }
     }
 
+    /// <summary>
+    /// Read an optional string property. Returns null when the key is absent or
+    /// holds a non-string: <c>JsonElement.GetString()</c> throws on a number,
+    /// and RestoreTask runs from the constructor, so one malformed entry would
+    /// otherwise stop the app from starting at all.
+    /// </summary>
+    private static string? Str(JsonElement t, string name) =>
+        t.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString()
+            : null;
+
     private void RestoreTask(JsonElement t)
     {
         var id = t.TryGetProperty("id", out var i) ? i.GetString() : null;
@@ -500,7 +550,11 @@ public sealed class Manager
             var done = new Download(id, url,
                 t.TryGetProperty("directory", out var dd) ? dd.GetString() ?? Config.DownloadDir : Config.DownloadDir,
                 t.TryGetProperty("filename", out var fn) ? fn.GetString() : null,
-                t.TryGetProperty("connections", out var cn) ? cn.GetInt32() : 1);
+                t.TryGetProperty("connections", out var cn) ? cn.GetInt32() : 1,
+                // ValueKind guard: a hand-edited state.json with "source": 5
+                // would otherwise throw here and take the whole startup down.
+                source: Str(t, "source"),
+                kind: Str(t, "kind"));
             done.Size = t.TryGetProperty("size", out var sz) ? sz.GetInt64() : 0;
             done.Status = TaskStatus.Completed;
             done.CompletedAt = t.TryGetProperty("completed_at", out var ca) && ca.ValueKind != JsonValueKind.Null
@@ -519,7 +573,9 @@ public sealed class Manager
             t.TryGetProperty("filename", out var fn2) ? fn2.GetString() : null,
             t.TryGetProperty("connections", out var cn2) ? cn2.GetInt32() : Config.Connections,
             timeoutSeconds: Config.Timeout,
-            speedLimit: Config.SpeedLimit);
+            speedLimit: Config.SpeedLimit,
+            source: Str(t, "source"),
+            kind: Str(t, "kind"));
 
         d.OnEvent += (evt, task) => Emit(evt, task);
         d.GlobalLimiter = GlobalLimiter;

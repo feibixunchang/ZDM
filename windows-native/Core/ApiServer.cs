@@ -21,7 +21,10 @@ namespace Zdm.App.Core;
 /// </summary>
 public sealed class ApiServer : IDisposable
 {
-    public const string Version = "1.0.0";
+    /// <summary>Reported by GET /api. Kept in sync with the assembly version
+    /// (it used to be a hard-coded "1.0.0" that nothing updated).</summary>
+    public static string Version =>
+        typeof(ApiServer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
     private static readonly Dictionary<string, string> Mime = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -39,12 +42,15 @@ public sealed class ApiServer : IDisposable
     private readonly int _port;
     private WebApplication? _app;
 
-    /// <summary>
-    /// Extension ids already whitelisted for native messaging. Seeded from the
-    /// manifest on disk so the first requests do not rewrite the file.
-    /// </summary>
+    /// <summary>Extension ids already whitelisted for native messaging. Seeded from the
+    /// manifest on disk so the first requests do not rewrite the file.</summary>
     private static readonly HashSet<string> KnownExtensionIds =
         new(NativeMessagingRegistrar.AllowedOrigins(), StringComparer.Ordinal);
+
+    /// <summary>Kestrel calls the middleware concurrently; HashSet.Add is not
+    /// thread-safe and two racing first-requests could both rewrite the
+    /// manifest.</summary>
+    private static readonly object ExtensionGate = new();
 
     public string Url { get; private set; } = "";
 
@@ -90,8 +96,14 @@ public sealed class ApiServer : IDisposable
             // new id), it is added here so the next wake-up works without the
             // user touching anything.
             var extId = ctx.Request.Headers["X-ZDM-Extension"].ToString();
-            if (extId.Length == 32 && KnownExtensionIds.Add(extId))
-                NativeMessagingRegistrar.Register(extId);
+            string? toRegister = null;
+            lock (ExtensionGate)
+            {
+                if (extId.Length == 32 && KnownExtensionIds.Add(extId))
+                    toRegister = extId;
+            }
+            if (toRegister != null)
+                NativeMessagingRegistrar.Register(toRegister);
 
             if (ctx.Request.Method == HttpMethods.Options)
             {
@@ -112,6 +124,10 @@ public sealed class ApiServer : IDisposable
 
         // ---------------- events (SSE) ----------------
         app.MapGet("/events", async ctx => { await SseAsync(ctx, manager); });
+        // The web UI connects to /api/events (the Python server accepts both
+        // spellings); without this alias the browser UI got a 404 here and
+        // never received a single live update.
+        app.MapGet("/api/events", async ctx => { await SseAsync(ctx, manager); });
 
         // ---------------- api ----------------
         app.MapGet("/api", () => Results.Json(new JsonObject
@@ -155,8 +171,12 @@ public sealed class ApiServer : IDisposable
             var headers = new Dictionary<string, string>();
             if (body?["headers"] is JsonObject h)
                 foreach (var p in h)
-                    if (p.Value != null)
-                        headers[p.Key] = p.Value.GetValue<string>();
+                    // A number/bool in the headers object used to throw
+                    // InvalidOperationException out of GetValue<string>(),
+                    // which the ArgumentException-only catch turned into a
+                    // bare 500. Skip anything that is not a string instead.
+                    if (p.Value is JsonValue v && v.GetValueKind() == JsonValueKind.String)
+                        headers[p.Key] = v.GetValue<string>()!;
 
             void Alias(string src, string dst)
             {
@@ -171,6 +191,17 @@ public sealed class ApiServer : IDisposable
 
             try
             {
+                // Only accept a JSON *string*: GetValue<string>() throws on a
+                // number or a bool, and that exception is not an
+                // ArgumentException, so it would escape as a bare 500.
+                string? Str(string key)
+                {
+                    var v = body?[key];
+                    return v is JsonValue j && j.GetValueKind() == JsonValueKind.String
+                        ? j.GetValue<string>()
+                        : null;
+                }
+
                 var d = manager.Add(
                     url,
                     directory: body?["dir"]?.GetValue<string>() ?? body?["directory"]?.GetValue<string>(),
@@ -179,7 +210,11 @@ public sealed class ApiServer : IDisposable
                     headers: headers,
                     proxy: body?["proxy"]?.GetValue<string>(),
                     speedLimit: body?["speed_limit"]?.GetValue<long?>(),
-                    startNow: body?["paused"]?.GetValue<bool?>() != true);
+                    startNow: body?["paused"]?.GetValue<bool?>() != true,
+                    // Provenance the browser extension sends with every hand-off.
+                    // Download normalises anything unexpected to "manual".
+                    source: Str("source"),
+                    kind: Str("kind"));
 
                 return Results.Json(new JsonObject
                 {
@@ -218,6 +253,15 @@ public sealed class ApiServer : IDisposable
                     break;
                 }
                 case "open":
+                    // Parity with the Python server: a finished task opens the
+                    // file itself (a .dmg starts the installer); an unfinished
+                    // one has no file yet, so it reveals the directory.
+                    if (d.Status == TaskStatus.Completed)
+                        Human.OpenFile(d.TargetPath);
+                    else
+                        Human.OpenInExplorer(d.Directory);
+                    break;
+                case "reveal":
                     Human.OpenInExplorer(d.Status == TaskStatus.Completed ? d.TargetPath : d.Directory);
                     break;
                 default:
@@ -231,12 +275,15 @@ public sealed class ApiServer : IDisposable
             });
         });
 
-        app.MapDelete("/api/tasks/{id}", (HttpContext ctx, string id) =>
+        app.MapDelete("/api/tasks/{id}", async Task<IResult> (HttpContext ctx, string id) =>
         {
             // ?files=0 keeps the partial data while dropping the task.
             var keepFiles = !(ctx.Request.Query.ContainsKey("files")
                               && ctx.Request.Query["files"] == "0");
-            var ok = manager.RemoveAsync(id, keepFiles).GetAwaiter().GetResult();
+            // Async, not GetAwaiter().GetResult(): RemoveAsync waits for the
+            // workers to wind down (up to 12s), and blocking a Kestrel thread
+            // per delete is how the thread pool gets exhausted.
+            var ok = await manager.RemoveAsync(id, keepFiles);
             return Results.Json(new JsonObject { ["ok"] = ok });
         });
 
@@ -286,8 +333,17 @@ public sealed class ApiServer : IDisposable
         app.MapPost("/api/open", async Task<IResult> (HttpContext ctx) =>
         {
             var body = await ReadJsonAsync(ctx);
-            Human.OpenInExplorer(body?["path"]?.GetValue<string>() ?? manager.Config.DownloadDir);
-            return Results.Json(new JsonObject { ["ok"] = true });
+            var path = body?["path"]?.GetValue<string>() ?? manager.Config.DownloadDir;
+            // mode=file opens the file itself, mode=reveal selects it in
+            // Explorer - the Python server accepts the same modes.
+            var mode = body?["mode"]?.GetValue<string>()?.ToLowerInvariant() ?? "dir";
+            var ok = mode switch
+            {
+                "file" => Human.OpenFile(path),
+                "reveal" => Human.OpenInExplorer(path),
+                _ => Human.OpenInExplorer(path),
+            };
+            return Results.Json(new JsonObject { ["ok"] = ok });
         });
 
         try
@@ -359,7 +415,13 @@ public sealed class ApiServer : IDisposable
         var root = Path.GetFullPath(webRoot);
         var path = Path.GetFullPath(Path.Combine(root, rel));
 
-        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        // Compare against root + separator: a bare StartsWith(root) also
+        // matches a sibling directory like "<webRoot>2" and would let
+        // /web2/... read files outside the intended tree.
+        var boundary = root.EndsWith(Path.DirectorySeparatorChar)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        if (!path.StartsWith(boundary, StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
         {
             ctx.Response.StatusCode = 404;
             await ctx.Response.WriteAsJsonAsync(new JsonObject { ["ok"] = false, ["error"] = "not found" });

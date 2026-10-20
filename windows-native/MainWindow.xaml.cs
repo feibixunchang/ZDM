@@ -231,10 +231,14 @@ public partial class MainWindow : Window
                 directory: request.Directory,
                 filename: request.Filename,
                 connections: request.Connections,
-                headers: headers.Count > 0 ? headers : null);
+                headers: headers.Count > 0 ? headers : null,
+                source: request.Source,
+                kind: request.Kind);
 
             Filter = "all";
-            StatusHint.Text = $"已接管浏览器下载：{task.Filename}";
+            StatusHint.Text = request.Source == Core.TaskSources.Sniffer
+                ? $"已接收嗅探到的媒体：{task.Filename}"
+                : $"已接管浏览器下载：{task.Filename}";
         }
         catch (Exception ex)
         {
@@ -328,6 +332,18 @@ public partial class MainWindow : Window
         PaintTab(FilterActive, _filter == "active");
         PaintTab(FilterPaused, _filter == "paused");
         PaintTab(FilterDone, _filter == "completed");
+        PaintTab(FilterSniffed, _filter == "sniffer");
+    }
+
+    /// <summary>
+    /// Filter tab click. The Tag sits on the wrapping Border (the ToggleButton
+    /// inside is deliberately not hit-testable so it cannot swallow the click);
+    /// a Border with Background="Transparent" still receives mouse events.
+    /// </summary>
+    private void OnFilterTabClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is Border { Tag: string tag } && tag.Length > 0)
+            Filter = tag;
     }
 
     private void PaintTab(Border tab, bool active)
@@ -581,6 +597,9 @@ public partial class MainWindow : Window
                            or Core.TaskStatus.Merging,
         "paused" => d.Status == Core.TaskStatus.Paused,
         "completed" => d.Status == Core.TaskStatus.Completed,
+        // The only filter that keys off provenance rather than status: media the
+        // browser extension found on a page.
+        "sniffer" => d.Source == Core.TaskSources.Sniffer,
         _ => true,
     };
 
