@@ -276,6 +276,21 @@ def fmt_eta(s) -> str:
     return f"{sec}秒"
 
 
+def fmt_clock(ts) -> str:
+    """Unix 时间戳 → 「几点」显示。今天的只给 时:分，更早的带上日期。"""
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    lt = time.localtime(ts)
+    now = time.localtime()
+    if (lt.tm_year, lt.tm_yday) == (now.tm_year, now.tm_yday):
+        return time.strftime("%H:%M", lt)
+    return time.strftime("%m-%d %H:%M", lt)
+
+
 # 来源徽标：只给非「手动」的任务打，颜色取自主题调色板（不在代码里写死，
 # 深浅色切换时才不会留下一块异色）。见 _render() 里的用法。
 SOURCE_BADGES = {
@@ -1113,8 +1128,10 @@ class MainWindow(QMainWindow):
         )
         self.filter_btns["all"].setChecked(True)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["文件", "大小", "进度", "速度", "状态", "操作"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["文件", "大小", "进度", "速度", "状态", "时间", "操作"]
+        )
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(46)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1127,9 +1144,9 @@ class MainWindow(QMainWindow):
         hh.setFixedHeight(38)
         hh.setHighlightSections(False)
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        # 5 (the action column) must fit the pause glyph plus three text
+        # 6 (the action column) must fit the pause glyph plus three text
         # buttons (34 + 50*3 + gaps + margins ~= 210).
-        for col, w in ((1, 150), (2, 240), (3, 110), (4, 90), (5, 216)):
+        for col, w in ((1, 150), (2, 240), (3, 100), (4, 84), (5, 172), (6, 216)):
             self.table.setColumnWidth(col, w)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
@@ -1282,6 +1299,7 @@ class MainWindow(QMainWindow):
         self.config = st.get("config") or {}
         self.tasks = st.get("tasks") or []
         self._render()
+        self._notify_failures()
         # Don't clobber a transient message ("正在检查更新…", "设置已保存", …)
         # that was just shown: the poll runs every 0.8s.
         if time.time() < getattr(self, "_status_hold_until", 0.0):
@@ -1297,6 +1315,33 @@ class MainWindow(QMainWindow):
         """Show a message in the status bar and keep the poller off it briefly."""
         self.statusBar().showMessage(msg)
         self._status_hold_until = time.time() + hold
+
+    def _notify_failures(self):
+        """任务失败时弹系统通知（窗口可能缩在托盘里，用户看不到表格里的红字）。
+
+        只对「这次轮询里新变成失败」的任务弹一次：用集合记下已经通知过的
+        id，重下后再失败还能再弹（restart 会换新错误，值得再次提醒）。
+        """
+        if not getattr(self, "tray", None):
+            return
+        if not hasattr(self, "_failed_seen"):
+            self._failed_seen = set()
+        for t in self.tasks:
+            tid = t.get("id")
+            if t.get("status") != "error":
+                # 离开失败态（重下/删除）就 forget，之后再次失败还能再提醒
+                self._failed_seen.discard(tid)
+                continue
+            if tid in self._failed_seen:
+                continue
+            self._failed_seen.add(tid)
+            reason = str(t.get("error") or "未知原因")[:120]
+            self.tray.showMessage(
+                "下载失败",
+                f"{t.get('filename') or '任务'}：{reason}",
+                QSystemTrayIcon.Warning,
+                6000,
+            )
 
     def _set_filter(self, key: str):
         self.filter = key
@@ -1354,8 +1399,8 @@ class MainWindow(QMainWindow):
         """
         for row in range(self.table.rowCount()):
             # Column 0 holds the name label (rich text), 2 the progress bar,
-            # 5 the action buttons. All three are replaced on every render.
-            for col in (0, 2, 5):
+            # 6 the action buttons. All three are replaced on every render.
+            for col in (0, 2, 6):
                 w = self.table.cellWidget(row, col)
                 if w is not None:
                     self.table.setCellWidget(row, col, None)
@@ -1426,6 +1471,27 @@ class MainWindow(QMainWindow):
             st_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.table.setItem(row, 4, st_item)
 
+            # 时间列：几点开始下载、预计/实际几点完成。
+            #   进行中  开始 14:03 · 预计 14:25 完成
+            #   合并中  开始 14:03 · 合并音视频…
+            #   已完成  14:03 → 14:25 完成
+            #   失败/暂停/取消  开始 14:03
+            started = t.get("started_at") or t.get("created_at") or 0
+            parts = []
+            if started:
+                parts.append(f"开始 {fmt_clock(started)}")
+            if status == "downloading":
+                if t.get("eta"):
+                    parts.append(f"预计 {fmt_clock(time.time() + _num(t['eta']))} 完成")
+            elif status == "merging":
+                parts.append("合并音视频…")
+            elif status == "completed" and t.get("completed_at"):
+                parts.append(f"{fmt_clock(t['completed_at'])} 完成")
+            time_item = QTableWidgetItem(" · ".join(parts))
+            time_item.setForeground(QColor(pal.text_muted))
+            time_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.table.setItem(row, 5, time_item)
+
             w = QWidget()
             hl = QHBoxLayout(w)
             hl.setContentsMargins(2, 0, 2, 0)
@@ -1448,9 +1514,12 @@ class MainWindow(QMainWindow):
                 self._btn(hl, "目录", lambda _=False, i=t["id"]: self._act(i, "reveal"))
             else:
                 self._btn(hl, "重下", lambda _=False, i=t["id"]: self._act(i, "restart"))
+                # 失败行额外给一个「原因」按钮：点开是二级弹窗，看完整错误
+                if status == "error" and t.get("error"):
+                    self._btn(hl, "原因", lambda _=False, i=t["id"]: self._show_error_detail(i))
             self._btn(hl, "删除", lambda _=False, i=t["id"]: self._remove(i))
             hl.addStretch(1)
-            self.table.setCellWidget(row, 5, w)
+            self.table.setCellWidget(row, 6, w)
             self.table.setRowHeight(row, 46)
         self._rows = {t["id"]: r for r, t in enumerate(items)}
         self._row_ids = [t["id"] for t in items]
@@ -1477,6 +1546,23 @@ class MainWindow(QMainWindow):
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(fn)
         layout.addWidget(b)
+
+    def _show_error_detail(self, tid: str):
+        """失败行点「原因」弹出的二级弹窗：完整错误 + 可展开的调试信息。"""
+        t = next((x for x in self.tasks if x.get("id") == tid), None)
+        if not t:
+            return
+        reason = str(t.get("error") or "未知原因")
+        box = QMessageBox(self)
+        box.setWindowTitle("下载失败 — 原因")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"文件：{t.get('filename') or '未知'}")
+        box.setInformativeText(reason)
+        box.setDetailedText(
+            f"ID: {tid}\n状态: {t.get('status')}\nURL: {t.get('url') or ''}\n错误: {reason}"
+        )
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
 
     def _bulk_button(self, layout, kind, text, tip, fn):
         """Global action button: Chinese label plus a small theme-aware glyph."""

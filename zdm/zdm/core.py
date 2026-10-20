@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
 import threading
 import time
 import urllib.request
@@ -284,6 +286,9 @@ class Download:
         self.error: Optional[str] = None
         self.supports_range = False
         self.created_at = time.time()
+        # 首次真正开始下载的时刻（resume 不覆盖）。GUI 用它显示
+        # 「几点开始下载、预计/实际几点完成」。
+        self.started_at: Optional[float] = None
         self.completed_at: Optional[float] = None
         self.meter = SpeedMeter()
         self.segmenter: Optional[Segmenter] = None
@@ -335,6 +340,7 @@ class Download:
             "proxy": self.proxy,
             "speed_limit": self.speed_limit,
             "created_at": self.created_at,
+            "started_at": self.started_at,
             "completed_at": self.completed_at,
             "eta": self.eta,
             "progress": self.progress,
@@ -484,6 +490,8 @@ class Download:
             return
 
         self.status = "downloading"
+        if self.started_at is None:
+            self.started_at = time.time()
         self._stop.clear()
         self._pause.clear()
         self.meter.reset()
@@ -659,11 +667,10 @@ class Download:
                 self._emit("error")
                 return
         target = self.target_path
-        try:
-            os.replace(self.part_path, target)
-        except OSError as e:
+        err = self._move_into_place(target)
+        if err:
             self.status = "error"
-            self.error = f"cannot move file: {e}"
+            self.error = err
             self._emit("error")
             return
         try:
@@ -678,6 +685,58 @@ class Download:
         self.status = "completed"
         self.completed_at = time.time()
         self._emit("completed")
+
+    def _move_into_place(self, target: str) -> Optional[str]:
+        """把下完的 .part 落成正式文件，返回 None 表示成功。
+
+        三个台阶（实测用户机器上 os.replace 会报 [Errno 1] Operation not
+        permitted —— 同目录改名被拒，典型原因是同名旧文件正被播放器占用/
+        加锁，或被杀毒/iCloud 云同步瞬时锁住。整个 100% 下载白跑是不可
+        接受的，所以按下面的顺序兜底）：
+          1. 目标已存在就先换成唯一名（绝不覆盖用户已有的文件）；
+          2. 原子改名，对瞬时锁（EPERM/EBUSY/ETXTBSY）重试 3 次；
+          3. copy2 + 删 .part —— 改名被永久拒绝时也能保住已下载的字节。
+        """
+        # 1) 目标已存在：换一个 "(1)" "(2)" 的名字，不覆盖旧文件
+        #    （旧文件可能正是上次下载的同名视频，正被播放器占用）。
+        if os.path.lexists(target):
+            stem, dot, ext = self.filename.rpartition(".")
+            if not dot:
+                stem, ext = self.filename, ""
+            for i in range(1, 1000):
+                cand = f"{stem}({i})" + (("." + ext) if ext else "")
+                p = os.path.join(self.directory, cand)
+                if not os.path.lexists(p):
+                    target = p
+                    break
+
+        # 2) 原子改名，瞬时锁重试
+        last: Optional[OSError] = None
+        for attempt in range(3):
+            try:
+                os.replace(self.part_path, target)
+                self.filename = os.path.basename(target)
+                return None
+            except OSError as e:
+                last = e
+                if e.errno not in (
+                    errno.EPERM, errno.EACCES, errno.EBUSY,
+                    errno.ETXTBSY, errno.EAGAIN,
+                ):
+                    break  # 换 copy 兜底也没意义（比如路径本身坏了）
+                time.sleep(0.5 * (attempt + 1))
+
+        # 3) copy 兜底（跨卷/被锁都能走）
+        try:
+            shutil.copy2(self.part_path, target)
+            try:
+                os.remove(self.part_path)
+            except OSError:
+                pass
+            self.filename = os.path.basename(target)
+            return None
+        except OSError as e:
+            return f"cannot save file: {last or e}（文件已在 {self.directory} 保留为 {os.path.basename(self.part_path)}）"
 
     def _mux_audio(self) -> bool:
         """Download the audio track and mux it into the video with ffmpeg.
