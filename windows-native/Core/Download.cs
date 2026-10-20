@@ -625,7 +625,7 @@ public sealed class Download
         var outPath = TargetPath + ".merged.mp4";
         try
         {
-            Directory.CreateDirectory(tmpDir);
+            System.IO.Directory.CreateDirectory(tmpDir);
             using (var client = new HttpClient())
             {
                 if (Headers.Count > 0)
@@ -662,7 +662,7 @@ public sealed class Download
         }
         finally
         {
-            try { if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true); } catch { }
+            try { if (System.IO.Directory.Exists(tmpDir)) System.IO.Directory.Delete(tmpDir, true); } catch { }
         }
     }
 
