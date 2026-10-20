@@ -97,23 +97,39 @@
         </Border>
 
         <!-- ================= filters ================= -->
+        <!--
+          Tag lives on the Border, not the ToggleButton: the button is
+          IsHitTestVisible="False" so it cannot swallow the click, and a
+          Border with Background="Transparent" is still hit-testable. Without
+          a handler here the tabs looked interactive but never changed the
+          filter at all (only the two "Filter = all" resets ran).
+        -->
         <!-- Surface, not AppBg: the whole top block reads as one continuous panel -->
         <Border Grid.Row="1" Background="{DynamicResource Surface}">
             <StackPanel Orientation="Horizontal" Margin="14,10,14,8">
-                <Border x:Name="FilterAll" Background="Transparent" CornerRadius="999" Margin="0,0,6,0">
-                    <ToggleButton Content="全部" Tag="all" Style="{StaticResource FilterTab}"
+                <Border x:Name="FilterAll" Tag="all" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
+                        MouseLeftButtonDown="OnFilterTabClick">
+                    <ToggleButton Content="全部" Style="{StaticResource FilterTab}"
                                   IsHitTestVisible="False"/>
                 </Border>
-                <Border x:Name="FilterActive" Background="Transparent" CornerRadius="999" Margin="0,0,6,0">
-                    <ToggleButton Content="进行中" Tag="active" Style="{StaticResource FilterTab}"
+                <Border x:Name="FilterActive" Tag="active" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
+                        MouseLeftButtonDown="OnFilterTabClick">
+                    <ToggleButton Content="进行中" Style="{StaticResource FilterTab}"
                                   IsHitTestVisible="False"/>
                 </Border>
-                <Border x:Name="FilterPaused" Background="Transparent" CornerRadius="999" Margin="0,0,6,0">
-                    <ToggleButton Content="已暂停" Tag="paused" Style="{StaticResource FilterTab}"
+                <Border x:Name="FilterPaused" Tag="paused" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
+                        MouseLeftButtonDown="OnFilterTabClick">
+                    <ToggleButton Content="已暂停" Style="{StaticResource FilterTab}"
                                   IsHitTestVisible="False"/>
                 </Border>
-                <Border x:Name="FilterDone" Background="Transparent" CornerRadius="999">
-                    <ToggleButton Content="已完成" Tag="completed" Style="{StaticResource FilterTab}"
+                <Border x:Name="FilterDone" Tag="completed" Background="Transparent" CornerRadius="999"
+                        MouseLeftButtonDown="OnFilterTabClick">
+                    <ToggleButton Content="已完成" Style="{StaticResource FilterTab}"
+                                  IsHitTestVisible="False"/>
+                </Border>
+                <Border x:Name="FilterSniffed" Tag="sniffer" Background="Transparent" CornerRadius="999"
+                        MouseLeftButtonDown="OnFilterTabClick">
+                    <ToggleButton Content="嗅探" Style="{StaticResource FilterTab}"
                                   IsHitTestVisible="False"/>
                 </Border>
             </StackPanel>
@@ -154,15 +170,71 @@
                     <DataGridTemplateColumn Header="文件" Width="*">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
+                                <!-- One root only: a DataTemplate with two children
+                                     is a XAML compile error. The name row is a Grid
+                                     (not a horizontal StackPanel) so a long file
+                                     name ellipsises instead of pushing the badges
+                                     out of the cell. -->
                                 <StackPanel>
-                                    <TextBlock Text="{Binding Filename}" FontWeight="SemiBold"
-                                               Foreground="{Binding FilenameBrush}"
-                                               TextTrimming="CharacterEllipsis"/>
-                                    <!-- Shown only when the completed file is gone -->
-                                    <TextBlock Text="⚠ 文件已不存在"
-                                               FontSize="11" FontWeight="SemiBold"
-                                               Foreground="{DynamicResource StatusPaused}"
-                                               Visibility="{Binding ShowMissingHint, Converter={StaticResource BoolToVis}}"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{Binding Filename}"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{Binding FilenameBrush}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <!-- Provenance tag: only present for tasks the
+                                             browser extension or the sniffer pushed in. -->
+                                        <TextBlock Grid.Column="1" Text="{Binding SourceBadge}"
+                                                   FontSize="10" FontWeight="Bold"
+                                                   Margin="6,0,0,0" VerticalAlignment="Center"
+                                                   Visibility="{Binding ShowSourceBadge, Converter={StaticResource BoolToVis}}">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground"
+                                                            Value="{DynamicResource TextMuted}"/>
+                                                    <Style.Triggers>
+                                                        <!-- Which colour: TaskRow.SourceBadgeKey -->
+                                                        <DataTrigger Binding="{Binding SourceBadgeKey}"
+                                                                     Value="status_downloading">
+                                                            <Setter Property="Foreground"
+                                                                    Value="{DynamicResource StatusDownloading}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding SourceBadgeKey}"
+                                                                     Value="status_merging">
+                                                            <Setter Property="Foreground"
+                                                                    Value="{DynamicResource StatusMerging}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding SourceBadgeKey}"
+                                                                     Value="status_queued">
+                                                            <Setter Property="Foreground"
+                                                                    Value="{DynamicResource StatusQueued}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding SourceBadgeKey}"
+                                                                     Value="status_paused">
+                                                            <Setter Property="Foreground"
+                                                                    Value="{DynamicResource StatusPaused}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <TextBlock Grid.Column="2" Text="{Binding KindBadge}"
+                                                   FontSize="10"
+                                                   Margin="4,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource TextMuted}"
+                                                   Visibility="{Binding ShowKindBadge, Converter={StaticResource BoolToVis}}"/>
+                                        <!-- Shown only when the completed file is gone -->
+                                        <TextBlock Grid.Column="3" Text="⚠ 文件已不存在"
+                                                   FontSize="11" FontWeight="SemiBold"
+                                                   Margin="6,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource StatusPaused}"
+                                                   Visibility="{Binding ShowMissingHint, Converter={StaticResource BoolToVis}}"/>
+                                    </Grid>
                                     <TextBlock Text="{Binding Url}" FontSize="11"
                                                Foreground="{DynamicResource TextMuted}"
                                                TextTrimming="CharacterEllipsis"/>

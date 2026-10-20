@@ -53,9 +53,16 @@ def cli_cmd(*args: str) -> list:
 
 
 def gui_cmd(*args: str) -> list:
-    """argv that opens the desktop window with the same runtime we are using."""
+    """argv that opens the desktop window with the same runtime we are using.
+
+    A frozen build has one executable whose *name* selects the role
+    (``zdm-desktop`` -> GUI, anything else -> CLI). Re-execing the raw binary
+    would land in the CLI branch, where argparse rejects the bare port number -
+    so the frozen branch passes the explicit ``--gui`` switch instead of
+    relying on argv[0].
+    """
     if is_frozen():
-        return [exe_path(), *args]
+        return [exe_path(), "--gui", *args]
     return [sys.executable or "python3", os.path.join(app_root(), "gui.py"), *args]
 
 

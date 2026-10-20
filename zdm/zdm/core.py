@@ -206,6 +206,38 @@ STATUS = (
     "merging",
 )
 
+# Where a task came from. The web UI, the browser extension and the desktop
+# clients all render this as a small badge, and the extension's sniffer uses it
+# to filter "media found on this page" from ordinary downloads. Anything not in
+# this tuple is normalised to "manual" on the way in (see Manager.add), so a
+# stale or hostile payload cannot invent new labels.
+SOURCES = ("manual", "browser", "sniffer", "webui", "protocol")
+# Broad content kind. Empty string means "not a media file" (an ordinary
+# download), which is what every pre-1.12.0 task effectively was.
+KINDS = ("", "video", "audio")
+
+
+def normalize_source(value, default: str = "manual") -> str:
+    """Coerce an untrusted value into one of <see cref="SOURCES"/>.
+
+    The value arrives as JSON from the browser extension (or anything else that
+    can reach the loopback API), so it can be a number, a list or null. Calling
+    ``.strip()`` on those used to raise AttributeError inside the request
+    handler - the only ValueError catch in the server let it escape and the
+    connection was dropped mid-request. Type-check first, then whitelist.
+    """
+    if not isinstance(value, str):
+        return default
+    v = value.strip().lower()
+    return v if v in SOURCES else default
+
+
+def normalize_kind(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    v = value.strip().lower()
+    return v if v in KINDS else ""
+
 
 class Download:
     """One download task: metadata + running state."""
@@ -222,6 +254,8 @@ class Download:
         max_retries: int = 5,
         timeout: float = 30.0,
         speed_limit: int = 0,
+        source: str = "manual",
+        kind: str = "",
     ):
         self.id = id
         self.url = url
@@ -234,6 +268,9 @@ class Download:
         self.max_retries = max(0, int(max_retries))
         self.timeout = timeout
         self.speed_limit = speed_limit
+        # Provenance: who asked for this task, and what kind of payload it is.
+        self.source = normalize_source(source)
+        self.kind = normalize_kind(kind)
 
         self.size = 0
         self.status = "queued"
@@ -294,6 +331,8 @@ class Download:
             "completed_at": self.completed_at,
             "eta": self.eta,
             "progress": self.progress,
+            "source": self.source,
+            "kind": self.kind,
             "chunks": seg,
         }
 
@@ -309,6 +348,8 @@ class Download:
             "headers": self.headers,
             "proxy": self.proxy,
             "speed_limit": self.speed_limit,
+            "source": self.source,
+            "kind": self.kind,
             "chunks": self.segmenter.snapshot() if self.segmenter else [],
         }
 
@@ -325,6 +366,9 @@ class Download:
         self.proxy = data.get("proxy")
         self.speed_limit = int(data.get("speed_limit", 0) or 0)
         self.limiter.set_rate(self.speed_limit)
+        # Tasks persisted before 1.12.0 have no source/kind; keep "manual".
+        self.source = normalize_source(data.get("source"), self.source)
+        self.kind = normalize_kind(data.get("kind") or self.kind)
         chunks = data.get("chunks") or []
         if chunks and self.size:
             self.segmenter = Segmenter(

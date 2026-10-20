@@ -102,6 +102,33 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def _pid_is_zdm(pid: int) -> bool:
+    """True when the pid still belongs to a ZDM process.
+
+    ``zdm stop`` used to SIGTERM whatever number sat in the pid file. Pids get
+    reused, and killing an unrelated process is unforgivable, so verify the
+    command line first. When the check is impossible (no ``ps``), refuse to
+    kill: the API shutdown above already covers the normal case.
+    """
+    if pid <= 0:
+        return False
+    try:
+        r = subprocess.run(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    cmd = (r.stdout or "").strip().lower()
+    if not cmd:
+        return False
+    return "zdm" in cmd
+
+
 def cmd_stop(args) -> int:
     port = _resolve_port(args)
     r = _api("POST", "action", {"action": "shutdown"}, port=port)
@@ -109,7 +136,8 @@ def cmd_stop(args) -> int:
         if os.path.exists(PID_FILE):
             with open(PID_FILE, encoding="utf-8") as f:
                 pid = int(f.read().strip())
-            os.kill(pid, 15)
+            if _pid_is_zdm(pid):
+                os.kill(pid, 15)
             os.remove(PID_FILE)
     except Exception:
         pass
@@ -286,6 +314,141 @@ def cmd_open(args) -> int:
     return 0
 
 
+# ----------------------------------------------------------------- native host
+def _native_host_api(port: int, path: str, body=None, timeout: float = 5.0):
+    import urllib.request
+
+    url = f"http://127.0.0.1:{port}/api/{path}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
+    req.add_header("Content-Type", "application/json")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def cmd_native_host(args) -> int:
+    """Chrome/Chromium native-messaging host (``--native-host``).
+
+    The browser extension calls connectNative("com.zdm.launcher") when the
+    local service is not running. Chrome launches this process with a
+    length-prefixed JSON message on stdin and expects a length-prefixed JSON
+    reply on stdout - nothing else may ever touch stdout.
+
+    This lives in the CLI (and not only in zdm_native_host.py) because the
+    frozen Linux/Windows builds have no loose script on disk: the manifest
+    points at the bundled executable itself, which must answer the protocol
+    by name.
+    """
+    import struct
+
+    def send(obj) -> None:
+        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        sys.stdout.buffer.write(struct.pack("=I", len(data)))
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
+    try:
+        header = sys.stdin.buffer.read(4)
+        if len(header) < 4:
+            return 1
+        length = struct.unpack("=I", header)[0]
+        if length <= 0 or length > 4 * 1024 * 1024:
+            return 1
+        msg = json.loads(sys.stdin.buffer.read(length).decode("utf-8", "replace"))
+    except Exception:
+        return 1
+
+    port = int(load_config().get("port") or 9000)
+
+    def ping() -> bool:
+        try:
+            return bool(_native_host_api(port, "state", None, timeout=1.0).get("ok"))
+        except Exception:
+            return False
+
+    if not ping():
+        try:
+            subprocess.Popen(
+                runtime.cli_cmd("start", "--daemon", "--no-open"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                **_detached(),
+            )
+        except Exception:
+            pass
+        for _ in range(80):  # up to 20s for a cold client
+            time.sleep(0.25)
+            if ping():
+                break
+        else:
+            send({"ok": False, "error": "ZDM service failed to start"})
+            return 0
+
+    url = str(msg.get("url") or "").strip()
+    if not url:
+        send({"ok": True, "started": True})
+        return 0
+
+    body = {"url": url}
+    if msg.get("filename"):
+        body["filename"] = msg["filename"]
+    if msg.get("connections"):
+        body["connections"] = msg["connections"]
+    if msg.get("dir"):
+        body["dir"] = msg["dir"]
+    if msg.get("referer"):
+        body["headers"] = {"Referer": msg["referer"]}
+    # The extension tags every hand-off; without these a sniffer push that had
+    # to go through native messaging would show up as a plain manual task.
+    if msg.get("cookie"):
+        body.setdefault("headers", {})["Cookie"] = msg["cookie"]
+    if msg.get("source"):
+        body["source"] = msg["source"]
+    if msg.get("kind"):
+        body["kind"] = msg["kind"]
+    try:
+        res = _native_host_api(port, "tasks", body, timeout=10.0)
+        send({"ok": bool(res.get("ok")), "id": res.get("id"), "error": res.get("error")})
+    except Exception as e:  # noqa: BLE001
+        send({"ok": False, "error": str(e)})
+    return 0
+
+
+# ----------------------------------------------------------------- zdm:// scheme
+def _handle_protocol_url(target: str) -> int:
+    """``zdm://add?url=...`` - the fallback wake-up path used by the extension."""
+    from urllib.parse import parse_qs, urlparse
+
+    parsed = urlparse(target)
+    if parsed.netloc not in ("add", "open", ""):
+        return 1
+    q = parse_qs(parsed.query)
+    url = (q.get("url") or [""])[0].strip()
+    if url:
+        port = int(load_config().get("port") or 9000)
+        body = {"url": url}
+        headers = {}
+        for key in ("filename", "referer", "source", "kind", "cookie"):
+            v = (q.get(key) or [""])[0].strip()
+            if not v:
+                continue
+            if key in ("referer", "cookie"):
+                headers["Referer" if key == "referer" else "Cookie"] = v
+            else:
+                body[key] = v
+        if headers:
+            body["headers"] = headers
+        try:
+            _api("POST", "tasks", body, port=port)
+        except Exception:
+            pass
+    desktop._last_launch = 0.0
+    desktop.ensure_desktop([], int(load_config().get("port") or 9000))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="zdm", description="ZDM download manager")
     p.add_argument("--port", type=int, default=0, help="service port (default 9000)")
@@ -356,6 +519,12 @@ def main(argv=None) -> int:
         argv = sys.argv[1:]
     if not argv:
         argv = ["start"]
+    # Chrome native-messaging host mode: stdio protocol, never argparse.
+    if argv and argv[0] == "--native-host":
+        return cmd_native_host(argv)
+    # Launched through the registered zdm:// scheme handler.
+    if argv and argv[0].startswith("zdm://"):
+        return _handle_protocol_url(argv[0])
     args = build_parser().parse_args(argv)
     return args.func(args)
 

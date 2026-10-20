@@ -16,6 +16,42 @@ public sealed class TaskRow
     public string Id => Task.Id;
     public string Filename => Task.Filename;
 
+    /// <summary>
+    /// Source tag shown next to the file name, or empty when the task came from
+    /// the desktop client ("manual" - the overwhelming majority, so tagging it
+    /// would be pure noise). Colours come from the palette so they follow the
+    /// theme instead of being baked into the XAML.
+    /// </summary>
+    public string SourceBadge => Task.Source switch
+    {
+        TaskSources.Browser => "浏览器",
+        TaskSources.Sniffer => "嗅探",
+        TaskSources.WebUi => "网页版",
+        TaskSources.Protocol => "协议",
+        _ => "",
+    };
+
+    public bool ShowSourceBadge => SourceBadge.Length > 0;
+
+    public string SourceBadgeKey => Task.Source switch
+    {
+        TaskSources.Browser => "status_downloading",
+        TaskSources.Sniffer => "status_merging",
+        TaskSources.WebUi => "status_queued",
+        TaskSources.Protocol => "status_paused",
+        _ => "text_muted",
+    };
+
+    /// <summary>"视频"/"音频" for media sniffed by the extension, else empty.</summary>
+    public string KindBadge => Task.Kind switch
+    {
+        TaskKinds.Video => "视频",
+        TaskKinds.Audio => "音频",
+        _ => "",
+    };
+
+    public bool ShowKindBadge => KindBadge.Length > 0;
+
     /// <summary>Dead records are dimmed so they do not read as actionable.</summary>
     public Brush FilenameBrush => IsMissingFile
         ? Palettes.Missing

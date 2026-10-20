@@ -19,7 +19,7 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                         # repo root
 BUILD_DIR="${1:-$(pwd)/macos-build}"
-VERSION="${2:-1.11.1}"
+VERSION="${2:-1.12.0}"
 APP="$BUILD_DIR/ZDM.app"
 STAGE="$BUILD_DIR/dmg-root"
 

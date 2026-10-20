@@ -139,6 +139,8 @@ class Manager:
         proxy: Optional[str] = None,
         speed_limit: Optional[int] = None,
         start_now: bool = True,
+        source: Optional[str] = None,
+        kind: Optional[str] = None,
     ) -> Download:
         if not url or not str(url).startswith(("http://", "https://")):
             raise ValueError("只支持 http/https 链接")
@@ -158,6 +160,8 @@ class Manager:
             max_retries=int(cfg["max_retries"]),  # type: ignore[arg-type]
             timeout=float(cfg["timeout"]),  # type: ignore[arg-type]
             speed_limit=int(speed_limit or 0),
+            source=source or "manual",
+            kind=kind or "",
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter
@@ -373,6 +377,8 @@ class Manager:
                     id=t["id"], url=t["url"],
                     directory=t.get("directory") or str(self.config["download_dir"]),
                     filename=t.get("filename"), connections=int(t.get("connections") or 1),
+                    source=t.get("source") or "manual",
+                    kind=t.get("kind") or "",
                 )
                 d.size = int(t.get("size") or 0)
                 d.status = "completed"
@@ -394,6 +400,8 @@ class Manager:
                 max_retries=int(self.config["max_retries"]),  # type: ignore[arg-type]
                 timeout=float(self.config["timeout"]),  # type: ignore[arg-type]
                 speed_limit=int(t.get("speed_limit") or 0),
+                source=t.get("source") or "manual",
+                kind=t.get("kind") or "",
             )
             d.set_event_callback(self._on_task_event)
             d.global_limiter = self.global_limiter

@@ -29,7 +29,7 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"       # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                             # repo root
 BUILD_DIR="${1:-$(pwd)/linux-build}"
-VERSION="${2:-1.11.1}"
+VERSION="${2:-1.12.0}"
 
 DIST="$BUILD_DIR/dist"
 PYBUILD="$BUILD_DIR/pybuild"
@@ -128,6 +128,7 @@ bad = []
 if not r.get("frozen"): bad.append("not running frozen")
 if not r.get("web_index"): bad.append("web/index.html missing")
 if not r.get("extension_manifest"): bad.append("extension/manifest.json missing")
+if not r.get("extension_sniffer"): bad.append("extension/sniffer.js missing (media sniffer)")
 if not r.get("theme_module"): bad.append("theme.py not importable")
 if not r.get("pyqt5"): bad.append("PyQt5 not importable")
 if r.get("version") != want:
@@ -196,15 +197,49 @@ Name=ZDM 下载管理器
 Name[en]=ZDM Download Manager
 GenericName=下载管理器
 Comment=多线程下载管理器（浏览器扩展可接管下载）
-Exec=/usr/bin/zdm-desktop
+Exec=/usr/bin/zdm-desktop %u
 TryExec=/usr/bin/zdm-desktop
 Icon=zdm
 Terminal=false
 Categories=Network;FileTransfer;
 Keywords=download;zdm;下载;
+MimeType=x-scheme-handler/zdm;
 StartupNotify=true
 StartupWMClass=ZDM
 DESKTOP
+
+# Chrome native-messaging host: without it the extension's connectNative()
+# fails on every cold start and "browser takeover" silently degrades to the
+# zdm:// fallback (which needs the scheme handler below to exist at all).
+# The manifest path cannot carry arguments on Linux, so it points at a tiny
+# wrapper that adds "--native-host" - the bundled ZDM ELF speaks the protocol.
+EXT_ID="mpodbnemeeghjpllgphpemhoogddfhjg"   # id pinned by extension/manifest.json's key
+cat >"$APPDIR/zdm-native-host" <<'WRAPPER'
+#!/bin/sh
+# Chrome/Chromium native-messaging host shim for the frozen bundle.
+exec /opt/zdm/ZDM --native-host "$@"
+WRAPPER
+chmod 0755 "$APPDIR/zdm-native-host"
+for hostdir in /etc/opt/chrome/native-messaging-hosts /etc/chromium/native-messaging-hosts; do
+    install -Dm644 /dev/null "$STAGE$hostdir/com.zdm.launcher.json"
+    cat >"$STAGE$hostdir/com.zdm.launcher.json" <<MANIFEST
+{
+  "name": "com.zdm.launcher",
+  "description": "ZDM 下载管理器启动器",
+  "path": "/opt/zdm/zdm-native-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://$EXT_ID/"]
+}
+MANIFEST
+done
+
+# System-wide default handler for the zdm:// scheme (the extension's fallback
+# wake-up path). /etc/xdg/mimeapps.list is the XDG system default location.
+install -Dm644 /dev/null "$STAGE/etc/xdg/mimeapps.list"
+cat >"$STAGE/etc/xdg/mimeapps.list" <<'MIME'
+[Default Applications]
+x-scheme-handler/zdm=zdm.desktop
+MIME
 
 install -m644 "$REPO/LICENSE.txt" "$STAGE/usr/share/doc/zdm/copyright"
 install -m644 "$SRC/README.md" "$STAGE/usr/share/doc/zdm/README.md"
@@ -235,6 +270,9 @@ set -e
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q /usr/share/applications || true
 fi
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+fi
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
@@ -250,6 +288,10 @@ cat >"$STAGE/DEBIAN/prerm" <<'PRERM'
 set -e
 # Stop a running desktop client so no file stays mapped from /opt/zdm.
 pkill -f '/opt/zdm/ZDM' >/dev/null 2>&1 || true
+# Drop the browser integration we registered in postinst: a stale host
+# manifest makes Chrome launch a binary that no longer exists.
+rm -f /etc/opt/chrome/native-messaging-hosts/com.zdm.launcher.json \
+      /etc/chromium/native-messaging-hosts/com.zdm.launcher.json
 exit 0
 PRERM
 chmod 0755 "$STAGE/DEBIAN/prerm"
@@ -276,14 +318,25 @@ TARROOT="$BUILD_DIR/portable"
 rm -rf "$TARROOT"
 mkdir -p "$TARROOT/zdm-linux"
 cp -a "$APP/." "$TARROOT/zdm-linux/"
+# Same native-messaging shim as the .deb ships, so the extension's
+# connectNative() also works from the portable install.
+cat >"$TARROOT/zdm-linux/zdm-native-host" <<'WRAPPER'
+#!/bin/sh
+# Chrome/Chromium native-messaging host shim: resolves its own location so the
+# bundle can live anywhere (~/.local/share/zdm, a USB stick, ...).
+HERE="$(cd "$(dirname "$0")" && pwd)"
+exec "$HERE/ZDM" --native-host "$@"
+WRAPPER
+chmod 0755 "$TARROOT/zdm-linux/zdm-native-host"
 cat >"$TARROOT/zdm-linux/install.sh" <<'USERINSTALL'
 #!/bin/sh
 # User-level install: no root, no dependencies. Copies the bundle to
-# ~/.local/opt/zdm and adds launchers to ~/.local/bin and the app menu.
+# ~/.local/share/zdm and adds launchers to ~/.local/bin and the app menu.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="${XDG_DATA_HOME:-$HOME/.local/share}/zdm"
 BIN="$HOME/.local/bin"
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 mkdir -p "$DEST" "$BIN" "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 rm -rf "$DEST.new" "$DEST.old"
 cp -a "$HERE/." "$DEST.new"
@@ -296,13 +349,35 @@ cat >"${XDG_DATA_HOME:-$HOME/.local/share}/applications/zdm.desktop" <<EOF
 Type=Application
 Name=ZDM 下载管理器
 Comment=多线程下载管理器（浏览器扩展可接管下载）
-Exec=$BIN/zdm-desktop
+Exec=$BIN/zdm-desktop %u
 Icon=$DEST/_internal/extension/icons/icon256.png
 Terminal=false
 Categories=Network;FileTransfer;
+MimeType=x-scheme-handler/zdm;
 StartupNotify=true
 StartupWMClass=ZDM
 EOF
+# Register the native-messaging host (per user) so the browser extension can
+# wake ZDM with connectNative(), and claim the zdm:// scheme.
+for hostroot in "$CFG/google-chrome/NativeMessagingHosts" "$CFG/chromium/NativeMessagingHosts"; do
+    mkdir -p "$hostroot"
+    cat >"$hostroot/com.zdm.launcher.json" <<MANIFEST
+{
+  "name": "com.zdm.launcher",
+  "description": "ZDM 下载管理器启动器",
+  "path": "$DEST/zdm-native-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://mpodbnemeeghjpllgphpemhoogddfhjg/"]
+}
+MANIFEST
+done
+mkdir -p "$CFG"
+if ! grep -q 'x-scheme-handler/zdm' "$CFG/mimeapps.list" 2>/dev/null; then
+    printf '[Default Applications]\nx-scheme-handler/zdm=zdm.desktop\n' >>"$CFG/mimeapps.list"
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q "${XDG_DATA_HOME:-$HOME/.local/share}/applications" >/dev/null 2>&1 || true
+fi
 echo "installed to $DEST"
 echo "run: $BIN/zdm-desktop   (or 'zdm gui' for the CLI)"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "note: add $BIN to PATH to use the 'zdm' command";; esac

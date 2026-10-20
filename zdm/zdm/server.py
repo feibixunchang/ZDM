@@ -169,8 +169,13 @@ class Handler(BaseHTTPRequestHandler):
                     proxy=body.get("proxy"),
                     speed_limit=body.get("speed_limit"),
                     start_now=body.get("paused") is not True,
+                    source=body.get("source"),
+                    kind=body.get("kind"),
                 )
-            except ValueError as e:
+            except (ValueError, TypeError) as e:
+                # TypeError as well as ValueError: the body is untrusted JSON,
+                # and int() on a list/dict raises TypeError, which used to
+                # escape this handler and drop the connection without a reply.
                 return self._error(400, str(e))
             # If the desktop client is not open (typical when the download comes
             # from the browser extension), bring it up so the user sees the task.
@@ -336,7 +341,13 @@ def serve(
 
 
 def ping(host: str = "127.0.0.1", port: int = 9000) -> Optional[dict]:
-    """Check whether a service is already listening."""
+    """Check whether a ZDM service is listening.
+
+    A bare TCP connect is not enough: another program may own the port, and
+    ``zdm start`` used to report "service already running" for it (the failed
+    HTTP probe still returned a truthy dict). The response must carry the API's
+    own signature before we call it ours.
+    """
     import socket
     import urllib.request
 
@@ -347,6 +358,13 @@ def ping(host: str = "127.0.0.1", port: int = 9000) -> Optional[dict]:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(f"http://{host}:{port}/api/state?_={time.time()}", timeout=1.5) as r:
-            return json.loads(r.read().decode("utf-8"))
+            data = json.loads(r.read().decode("utf-8"))
     except Exception:
-        return {"ok": True, "unknown": True}
+        return None
+    if not isinstance(data, dict):
+        return None
+    # /api/state answers {"ok": true, "config": ..., "tasks": [...]}; /api
+    # answers {"ok": true, "version": ...}. Anything else is a foreign service.
+    if data.get("ok") is True and ("tasks" in data or "config" in data or "version" in data):
+        return data
+    return None

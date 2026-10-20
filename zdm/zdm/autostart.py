@@ -88,11 +88,47 @@ _MAC_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>{app_dir}/zdm.log</string>
-  <key>StandardErrorPath</key><string>{app_dir}/zdm.log</string>
+  <key>StandardOutPath</key><string>{log_path}</string>
+  <key>StandardErrorPath</key><string>{log_path}</string>
 </dict>
 </plist>
 """
+
+
+def _mac_log_path() -> str:
+    """Writable log location for the launchd job.
+
+    The plist used to point at ``<bundle>/Contents/Resources/zdm.log``. A bundle
+    installed in /Applications is root-owned, so launchd (running as the user)
+    could not create the file and the whole job failed to load - while the GUI
+    checkbox still showed "enabled". ~/Library/Logs is always writable.
+    """
+    d = os.path.join(os.path.expanduser("~"), "Library", "Logs", "ZDM")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(d, "zdm.log")
+
+
+def _mac_load(p: str) -> None:
+    """Load the agent with the modern bootstrap API, falling back to load(8)."""
+    domain = f"gui/{os.getuid()}"
+    r = subprocess.run(["launchctl", "bootstrap", domain, p], capture_output=True)
+    if r.returncode == 0:
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"{domain}/com.zdm.service"],
+            capture_output=True,
+        )
+        return
+    # Already loaded, or an older macOS without bootstrap.
+    subprocess.run(["launchctl", "load", "-w", p], capture_output=True)
+
+
+def _mac_unload(p: str) -> None:
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", domain, p], capture_output=True)
+    subprocess.run(["launchctl", "unload", "-w", p], capture_output=True)
 
 
 def _mac_enable(app_dir: str, py: str) -> None:
@@ -103,13 +139,17 @@ def _mac_enable(app_dir: str, py: str) -> None:
         f"    <string>{a}</string>" for a in runtime.cli_cmd("serve")
     )
     with open(p, "w", encoding="utf-8") as f:
-        f.write(_MAC_PLIST.format(program_args=program_args, app_dir=app_dir))
-    subprocess.run(["launchctl", "load", "-w", p], capture_output=True)
+        f.write(
+            _MAC_PLIST.format(
+                program_args=program_args, log_path=_mac_log_path()
+            )
+        )
+    _mac_load(p)
 
 
 def _mac_disable() -> None:
     p = _mac_plist_path()
-    subprocess.run(["launchctl", "unload", "-w", p], capture_output=True)
+    _mac_unload(p)
     try:
         os.remove(p)
     except OSError:

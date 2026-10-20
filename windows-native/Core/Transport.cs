@@ -208,8 +208,11 @@ public sealed class Transport : IDisposable
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         var current = url;
+        // Per-read deadline, not a total-stream one: a 2 GB file over a slow
+        // link legitimately takes hours, and the old CancelAfter(timeout)
+        // aborted every such transfer after 30s no matter how healthy the
+        // connection was. Python's http.client timeout is per socket read.
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(timeout);
 
         for (var hop = 0; hop <= MaxRedirects; hop++)
         {
@@ -217,8 +220,14 @@ public sealed class Transport : IDisposable
             try
             {
                 using var req = BuildRequest(current, headers, start, end);
+                // The client timeout is infinite (streaming reads must not be
+                // bounded), so give the connect + response-headers phase its
+                // own deadline. Once the body starts flowing only the per-read
+                // deadline applies.
+                using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
+                sendCts.CancelAfter(timeout);
                 resp = await _client.SendAsync(
-                    req, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token);
+                    req, HttpCompletionOption.ResponseHeadersRead, sendCts.Token);
 
                 var status = (int)resp.StatusCode;
                 if (status is 301 or 302 or 303 or 307 or 308)
@@ -232,12 +241,21 @@ public sealed class Transport : IDisposable
                 if (status is not (200 or 206))
                     throw new HttpFailureException($"HTTP {status}");
 
+                // Asked for a range but got the whole body: every worker would
+                // then overwrite the file from its own offset and the final
+                // size check would still pass (same total length) - silent
+                // corruption. Python's transport treats this as an error too.
+                if (status == 200 && end.HasValue)
+                    throw new HttpFailureException("server ignored Range request (200)");
+
                 var bytes = 64 * 1024;
                 await using var stream = await resp.Content.ReadAsStreamAsync(timeoutCts.Token);
                 var buffer = new byte[bytes];
                 while (true)
                 {
-                    var read = await stream.ReadAsync(buffer.AsMemory(0, bytes), timeoutCts.Token);
+                    using var readCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
+                    readCts.CancelAfter(timeout);
+                    var read = await stream.ReadAsync(buffer.AsMemory(0, bytes), readCts.Token);
                     if (read <= 0)
                         yield break;
                     var chunk = new byte[read];

@@ -137,24 +137,24 @@ def _spawn_python_gui(urls, port: int) -> bool:
     """Fallback: re-run the desktop client with a PyQt5-capable runtime.
 
     A frozen build ships its own interpreter and has no ``gui.py`` on disk, so
-    we simply re-exec the bundle; ``zdm_app`` sees the ``gui`` subcommand and
+    we simply re-exec the bundle; ``zdm_app`` sees the ``--gui`` switch and
     opens the window. Everything else uses the script + an interpreter that
     really can import PyQt5.
     """
     code = code_dir()
     args = [str(port)] + list(urls or [])
+    # The bundle lives in /opt (root-owned, read-only for the user) and a .app
+    # may run from a read-only volume: write the child's log next to the
+    # config, never inside the code directory.
+    try:
+        from .manager import config_dir
+
+        log_path = os.path.join(config_dir(), "gui.log")
+    except Exception:
+        log_path = os.path.join(os.path.expanduser("~"), ".zdm-gui.log")
+    cwd = os.path.expanduser("~")
     if runtime.is_frozen():
         cmd = runtime.gui_cmd(*args)
-        # The bundle lives in /opt (root-owned, read-only for the user): write
-        # the child's log next to the config, never inside the bundle.
-        try:
-            from .manager import config_dir
-
-            log_path = os.path.join(config_dir(), "gui.log")
-            cwd = os.path.expanduser("~")
-        except Exception:
-            log_path = os.devnull
-            cwd = os.path.expanduser("~")
     else:
         gui = os.path.join(code, "gui.py")
         if not os.path.exists(gui):
@@ -163,11 +163,9 @@ def _spawn_python_gui(urls, port: int) -> bool:
         if not py:
             return False
         cmd = [py, gui] + args
-        log_path = os.path.join(code, "gui.log")
-        cwd = code
     try:
         with open(log_path, "a", encoding="utf-8") as log:
-            subprocess.Popen(
+            p = subprocess.Popen(
                 cmd,
                 stdout=log,
                 stderr=log,
@@ -175,11 +173,25 @@ def _spawn_python_gui(urls, port: int) -> bool:
                 cwd=cwd,
                 **_detached(),
             )
-        return True
     except Exception as e:  # noqa: BLE001
         global _last_error
         _last_error = f"{type(e).__name__}: {e}"
         return False
+    # "Popen did not throw" is not success: a broken argv (e.g. the frozen
+    # binary re-execing itself under the CLI name) makes the child exit within
+    # milliseconds, and ensure_desktop used to report it as launched anyway.
+    # A single-instance wake-up also exits fast - but with code 0 - so only a
+    # non-zero exit counts as failure.
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        rc = p.poll()
+        if rc is not None:
+            if rc == 0:
+                return True  # woke an existing window and exited cleanly
+            _last_error = f"desktop client exited with code {rc} (see {log_path})"
+            return False
+        time.sleep(0.1)
+    return True
 
 
 def ensure_desktop(urls=None, port: int = 9000) -> bool:

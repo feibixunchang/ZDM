@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from html import escape as _html_escape
 
 # Make the bundled ``zdm`` package importable when run from its install dir.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -241,8 +242,18 @@ def default_port() -> int:
         return 9000
 
 
+def _num(v, default: float = 0.0) -> float:
+    """把任务字段转成数字。字段来自 REST 响应，理论上类型正确，
+    但旧版客户端或写坏的状态文件可能塞了字符串，float() 会直接抛
+    ValueError 把整个表格渲染带崩。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def fmt_size(n) -> str:
-    n = float(n or 0)
+    n = _num(n)
     if n < 1024:
         return f"{int(n)} B"
     for unit in ("KB", "MB", "GB", "TB"):
@@ -253,6 +264,7 @@ def fmt_size(n) -> str:
 
 
 def fmt_eta(s) -> str:
+    s = _num(s)
     if not s or s <= 0:
         return ""
     s = int(s)
@@ -262,6 +274,44 @@ def fmt_eta(s) -> str:
     if m:
         return f"{m}分{sec}秒"
     return f"{sec}秒"
+
+
+# 来源徽标：只给非「手动」的任务打，颜色取自主题调色板（不在代码里写死，
+# 深浅色切换时才不会留下一块异色）。见 _render() 里的用法。
+SOURCE_BADGES = {
+    "browser": ("浏览器", "status_downloading"),
+    "sniffer": ("嗅探", "status_merging"),
+    "webui": ("网页版", "status_queued"),
+    "protocol": ("协议", "status_queued"),
+}
+
+
+def _esc(s) -> str:
+    """HTML 转义。文件名来自远端（可能是网页上的标题），必须转义后才能进
+    QLabel 的富文本，否则尖括号会被当成标签解析。"""
+    return _html_escape(str(s if s is not None else ""), quote=True)
+
+
+def _name_with_badge(task: dict, pal) -> str:
+    """文件名 + 来源徽标（富文本 HTML）。
+
+    注意：这段 HTML 是给 QLabel 用的，**不能**直接塞进 QTableWidgetItem
+    ——后者不解析 HTML，会把 <font ...> 原样显示出来。
+
+    徽标用 <font> 上色而不是另起一列：文件名列本身是 Stretch，
+    再加一列会把最需要宽度的文件名挤掉。
+    """
+    name = str(task.get("filename") or "")
+    src = task.get("source") or ""
+    entry = SOURCE_BADGES.get(src)
+    if not entry:
+        return _esc(name)
+    label, attr = entry
+    color = getattr(pal, attr, pal.text_muted)
+    return (
+        f'<span style="font-weight:600">{_esc(name)}</span>'
+        f'&nbsp;&nbsp;<span style="color:{color};font-size:11px">[{_esc(label)}]</span>'
+    )
 
 
 class Api:
@@ -384,11 +434,13 @@ from PyQt5.QtWidgets import (  # noqa: E402
 class _ZDMReopenDelegate:
     """Placeholder retained for backwards compatibility.
 
-    We no longer replace the NSApplication delegate: Qt's own Cocoa integration
-    already implements applicationShouldHandleReopen:, and swapping it out (with an
-    imperfect forwarding shim) breaks Qt's native window-restoration. Instead we
-    observe NSApplicationDidBecomeActiveNotification, which fires reliably whenever
-    the Dock icon is clicked, and restore the window from there.
+    The real delegate is built by :func:`_build_reopen_delegate_class`. We DO
+    replace the NSApplication delegate (Qt installs its own
+    ``QCocoaApplicationDelegate`` - verified on Qt 5.15.19, and it responds to
+    ``applicationShouldHandleReopen:``), but the replacement keeps a reference
+    to Qt's delegate and forwards every selector it does not implement, so
+    Qt's native entry points (openFiles:, openURLs:, termination, dock menu)
+    keep working.
     """
 
     _zdm_target = None
@@ -398,16 +450,17 @@ class _ZDMReopenDelegate:
 def _build_reopen_delegate_class():
     """Build the NSObject subclass that handles applicationShouldHandleReopen:.
 
-    Qt's QApplication on macOS does NOT install an NSApplication delegate for the
-    reopen callback (verified: NSApplication.delegate() is None), so installing our
-    own delegate is safe and is the canonical way to receive the Dock-icon click.
-
-    The delegate must implement exactly one selector; we deliberately do NOT try to
-    forward unknown selectors, because forwarding through a plain NSObject subclass
-    is error-prone (Objective-C selectors cannot be proxied with Python super()).
+    Qt installs ``QCocoaApplicationDelegate`` as soon as the QApplication
+    exists, and that delegate does implement the reopen selector - but its
+    implementation does not restore a window the user hid to the tray, which
+    is why ZDM needs its own. Because we swap the delegate out, the class also
+    implements ``forwardingTargetForSelector_:`` and hands every *other*
+    selector to the delegate we replaced; without that, replacing the delegate
+    silently drops Qt's native behaviour (file-open requests, URL schemes,
+    termination confirmation, ...).
     """
     try:
-        import objc
+        import objc  # noqa: F401  (PyObjC must be importable for NSObject)
         from AppKit import NSObject
     except Exception:
         return None
@@ -427,6 +480,13 @@ def _build_reopen_delegate_class():
                     except Exception:
                         pass
             return True
+
+        def forwardingTargetForSelector_(self, sel):
+            """Route everything we do not implement to Qt's own delegate."""
+            orig = self._zdm_orig
+            if orig is not None and orig.respondsToSelector_(sel):
+                return orig
+            return None
 
     return _Delegate
 
@@ -493,29 +553,36 @@ class ZDMApplication(QApplication):
     def _install_macos_reopen_hook(self, win):
         """Restore the window when the Dock icon is clicked (macOS).
 
-        Clicking the Dock icon of an app that has no visible windows makes Cocoa
-        post NSApplicationDidBecomeActiveNotification (and Qt also implements
-        applicationShouldHandleReopen: internally). We observe the notification and
-        re-show our window. This does NOT replace the NSApplication delegate, so
-        Qt's own macOS behaviour stays intact.
+        Two mechanisms, in order of reliability:
+
+        1. our own ``applicationShouldHandleReopen:`` delegate. Qt installs
+           ``QCocoaApplicationDelegate`` (verified on Qt 5.15.19) and that
+           delegate also answers reopen - but it does not restore a window the
+           user hid to the tray. So we swap the delegate out and *forward*
+           every selector we do not implement back to Qt's delegate, which
+           keeps its openFiles:/openURLs:/termination behaviour intact;
+        2. a ``NSApplicationDidBecomeActiveNotification`` observer as a
+           backstop (cmd-tab, foreground switches).
         """
         if sys.platform != "darwin":
             return
         # 1) Primary mechanism: install our own Cocoa delegate that implements
         #    applicationShouldHandleReopen:hasVisibleWindows: - the canonical
         #    "user clicked the Dock icon while the app has no visible windows"
-        #    callback. Qt's QApplication does NOT install an NSApplication
-        #    delegate for this (verified: NSApplication.delegate() is None), so
-        #    this fills a gap rather than fighting Qt.
+        #    callback. Qt's delegate implements it too but does not restore a
+        #    tray-hidden window, so we swap the delegate out - and keep Qt's
+        #    one reachable through forwardingTargetForSelector_ so none of its
+        #    other native entry points are lost.
         if _ZDMReopenDelegate is not None:
             try:
                 from AppKit import NSApplication
                 ns = NSApplication.sharedApplication()
                 d = _ZDMReopenDelegate.alloc().init()
                 d._zdm_target = self
+                d._zdm_orig = ns.delegate()  # Qt's QCocoaApplicationDelegate
                 ns.setDelegate_(d)
                 self._reopen_delegate = d
-                _dlog("[init] reopen delegate installed")
+                _dlog("[init] reopen delegate installed (forwarding to Qt's)")
             except Exception as e:
                 _dlog(f"[init] delegate failed: {type(e).__name__}: {e}")
 
@@ -1026,7 +1093,8 @@ class MainWindow(QMainWindow):
         hl.setSpacing(4)
         self.filter_btns = {}
         for key, label in (("all", "全部"), ("downloading", "进行中"),
-                           ("paused", "已暂停"), ("completed", "已完成")):
+                           ("paused", "已暂停"), ("completed", "已完成"),
+                           ("sniffer", "嗅探")):
             b = QPushButton(label)
             b.setCheckable(True)
             b.setFlat(True)
@@ -1216,8 +1284,8 @@ class MainWindow(QMainWindow):
         # that was just shown: the poll runs every 0.8s.
         if time.time() < getattr(self, "_status_hold_until", 0.0):
             return
-        running = [t for t in self.tasks if t["status"] == "downloading"]
-        total_speed = sum(t.get("speed") or 0 for t in running)
+        running = [t for t in self.tasks if t.get("status") == "downloading"]
+        total_speed = sum(_num(t.get("speed")) for t in running)
         self.statusBar().showMessage(
             f"已连接 · v{VERSION} · 端口 {self.config.get('port', self.port)} · "
             f"进行中 {len(running)} · 总速度 {fmt_size(total_speed)}/s · 共 {len(self.tasks)} 项"
@@ -1242,8 +1310,12 @@ class MainWindow(QMainWindow):
         if f == "all":
             return list(self.tasks)
         if f == "downloading":
-            return [t for t in self.tasks if t["status"] in ("downloading", "queued", "merging")]
-        return [t for t in self.tasks if t["status"] == f]
+            return [t for t in self.tasks if t.get("status") in ("downloading", "queued", "merging")]
+        if f == "sniffer":
+            # Media the browser extension found on a page. This is the only
+            # filter that keys off provenance rather than status.
+            return [t for t in self.tasks if t.get("source") == "sniffer"]
+        return [t for t in self.tasks if t.get("status") == f]
 
     def _task_at_row(self, row: int):
         """Map a visual table row to the task it currently shows.
@@ -1268,10 +1340,33 @@ class MainWindow(QMainWindow):
         # colours.
         self._render()
 
+    def _release_row_widgets(self):
+        """Drop the cell widgets of the previous render.
+
+        setCellWidget does NOT delete the widget it replaces: the old one is
+        reparented to the viewport (measured: viewport children jump from 24
+        to 48 on the render after a 4-row table, and stay there until the
+        event loop gets around to dispatching the deferred deletes). hide()
+        first so a replaced widget can never paint over its successor, then
+        deleteLater() so the C++ object is reaped on the next loop iteration.
+        """
+        for row in range(self.table.rowCount()):
+            # Column 0 holds the name label (rich text), 2 the progress bar,
+            # 5 the action buttons. All three are replaced on every render.
+            for col in (0, 2, 5):
+                w = self.table.cellWidget(row, col)
+                if w is not None:
+                    self.table.setCellWidget(row, col, None)
+                    w.hide()
+                    w.deleteLater()
+
     def _render(self):
         items = self._visible()
-        items.sort(key=lambda t: t["created_at"], reverse=True)
+        # created_at may be missing on a task restored from an old state file;
+        # a KeyError in the sort key would abort the whole render.
+        items.sort(key=lambda t: t.get("created_at") or 0, reverse=True)
         self._sync_bulk_buttons()
+        self._release_row_widgets()
         self.table.setRowCount(len(items))
         pal = palette()
         colors = {
@@ -1281,19 +1376,30 @@ class MainWindow(QMainWindow):
             "merging": pal.status_merging,
         }
         for row, t in enumerate(items):
-            pct = min(100.0, t.get("progress") or 0)
-            status = t["status"]
+            pct = min(100.0, _num(t.get("progress")))
+            status = t.get("status") or "queued"
             color = colors.get(status, pal.status_downloading)
 
-            name_item = QTableWidgetItem(t["filename"])
-            name_item.setToolTip(t["url"])
-            f = QFont()
-            f.setBold(True)
-            name_item.setFont(f)
-            self.table.setItem(row, 0, name_item)
+            # Where the task came from, as a coloured tag after the name. Only
+            # the non-default sources get one: tagging every "manual" row would
+            # be noise, and the point is to spot the extension/sniffer ones.
+            #
+            # The name cell holds a QLabel rather than a QTableWidgetItem
+            # because only the label renders the <span> markup that colours
+            # the tag; a table item would show the raw tags as text.
+            name_label = QLabel(_name_with_badge(t, pal))
+            name_label.setTextFormat(Qt.RichText)
+            name_label.setToolTip(t.get("url") or "")
+            name_label.setStyleSheet("background: transparent;")
+            self.table.setCellWidget(row, 0, name_label)
 
+            # Every field is read with .get(): a task that came from an older
+            # client (or a half-written state file) may be missing "speed" or
+            # "downloaded", and a KeyError here would take down the whole
+            # table render instead of just that one row.
             size_item = QTableWidgetItem(
-                f"{fmt_size(t['downloaded'])} / {fmt_size(t['size']) if t['size'] else '未知'}"
+                f"{fmt_size(t.get('downloaded'))} / "
+                f"{fmt_size(t.get('size')) if t.get('size') else '未知'}"
             )
             size_item.setForeground(QColor(pal.text_muted))
             size_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1306,7 +1412,9 @@ class MainWindow(QMainWindow):
                 label = str(t["error"])[:46]
             self.table.setCellWidget(row, 2, ProgressCell(pct, label, color))
 
-            speed_text = f"{fmt_size(t['speed'])}/s" if status == "downloading" else "—"
+            speed_text = (
+                f"{fmt_size(t.get('speed'))}/s" if status == "downloading" else "—"
+            )
             speed_item = QTableWidgetItem(speed_text)
             speed_item.setForeground(QColor(pal.text_strong))
             self.table.setItem(row, 3, speed_item)
@@ -1388,8 +1496,8 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, "btn_pause_all"):
             return
-        active = any(t["status"] in ("downloading", "queued", "merging") for t in self.tasks)
-        resumable = any(t["status"] in ("paused", "error", "canceled") for t in self.tasks)
+        active = any(t.get("status") in ("downloading", "queued", "merging") for t in self.tasks)
+        resumable = any(t.get("status") in ("paused", "error", "canceled") for t in self.tasks)
         for btn, kind, on in (
             (self.btn_pause_all, "pause", active),
             (self.btn_resume_all, "play", resumable),
@@ -1488,7 +1596,9 @@ class MainWindow(QMainWindow):
         self.update_download_btn.setText("下载中…")
         self._status(f"正在下载更新 {asset['name']} …", hold=60)
         self._background(
-            lambda: update.download(asset["url"], dest, proxy=proxy),
+            lambda: update.download(
+                asset["url"], dest, proxy=proxy, expected_size=asset.get("size") or 0
+            ),
             lambda path: self._on_update_downloaded(path, info),
         )
 
@@ -1762,6 +1872,9 @@ class MainWindow(QMainWindow):
             tm = theme_manager()
             if tm is not None:
                 tm.apply()
+                # The preview overwrote _last_dark; re-sync it or the next
+                # system appearance flip is mistaken for "no change".
+                tm.prime()
             return
         # Persist the chosen appearance (and apply it if it changed).
         self._theme_preview = None
@@ -1770,6 +1883,7 @@ class MainWindow(QMainWindow):
             chosen = appearance.currentData()
             if chosen and chosen != tm.mode:
                 tm.set_mode(chosen)
+            tm.prime()
         try:
             autostart.set_enabled(autostart_cb.isChecked())
         except Exception as e:
@@ -1831,7 +1945,7 @@ class MainWindow(QMainWindow):
         t = self._task_at_row(row)
         if not t:
             return
-        if t["status"] == "completed":
+        if t.get("status") == "completed":
             self._act(t["id"], "open")   # opens the file itself (e.g. the .dmg)
         else:
             self._run(self.api.open_path, t["directory"])
@@ -1845,8 +1959,8 @@ class MainWindow(QMainWindow):
             return
         menu = make_menu(self)
         style_glass_menu(menu)
-        menu.addAction("复制链接", lambda: QApplication.clipboard().setText(t["url"]))
-        if t["status"] == "completed":
+        menu.addAction("复制链接", lambda: QApplication.clipboard().setText(t.get("url") or ""))
+        if t.get("status") == "completed":
             menu.addAction("打开文件", lambda: self._act(t["id"], "open"))
             menu.addAction("在文件夹中显示", lambda: self._act(t["id"], "reveal"))
         menu.addSeparator()
@@ -1931,6 +2045,18 @@ class MainWindow(QMainWindow):
             self.poll.wait(2000)
         except Exception:
             pass
+        # In-flight API workers (e.g. a 30s-timeout pause request) must not
+        # still be running when the interpreter tears down, or Qt aborts with
+        # "QThread: Destroyed while thread is still running".
+        for w in list(getattr(self, "_workers", [])):
+            try:
+                if w.isRunning():
+                    w.wait(3000)
+                    if w.isRunning():
+                        w.terminate()
+                        w.wait(500)
+            except Exception:
+                pass
         if self.tray:
             self.tray.hide()
         QApplication.quit()
