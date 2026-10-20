@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Zdm.App.Core;
@@ -139,7 +139,8 @@ public sealed class Manager
         long? speedLimit = null,
         bool startNow = true,
         string? source = null,
-        string? kind = null)
+        string? kind = null,
+        string? audioUrl = null)
     {
         if (string.IsNullOrWhiteSpace(url) ||
             !(url.StartsWith("http://") || url.StartsWith("https://")))
@@ -160,7 +161,8 @@ public sealed class Manager
             timeoutSeconds: Config.Timeout,
             speedLimit: speedLimit ?? 0,
             source: source,
-            kind: kind)
+            kind: kind,
+            audioUrl: audioUrl)
         {
             Status = startNow ? TaskStatus.Queued : TaskStatus.Paused,
         };
@@ -575,7 +577,8 @@ public sealed class Manager
             timeoutSeconds: Config.Timeout,
             speedLimit: Config.SpeedLimit,
             source: Str(t, "source"),
-            kind: Str(t, "kind"));
+            kind: Str(t, "kind"),
+            audioUrl: Str(t, "audio_url"));
 
         d.OnEvent += (evt, task) => Emit(evt, task);
         d.GlobalLimiter = GlobalLimiter;

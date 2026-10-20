@@ -213,6 +213,7 @@ function launchViaNative(req) {
         dir: req.dir || undefined,
         source: req.source || undefined,
         kind: req.kind || undefined,
+        audio_url: req.audio_url || undefined,
       });
     } catch (e) {
       finish(false);
@@ -237,6 +238,9 @@ function buildProtocolUrl(req) {
   // 只认启动参数，丢掉 source 会让「浏览器接管」显示成「手动添加」。
   if (req.source) q.set("source", req.source);
   if (req.kind) q.set("kind", req.kind);
+  if (req.audio_url) q.set("audio_url", req.audio_url);
+  // Cookie 也要活过协议跳转：需要登录的视频站，没有它就是 403。
+  if (req.cookie) q.set("cookie", req.cookie);
   return "zdm://add?" + q.toString();
 }
 
@@ -319,6 +323,8 @@ async function handOff(req) {
       headers,
       source: req.source || "browser",
       kind: req.kind || undefined,
+      // DASH 的视频轨需要配套音频，后端会合并
+      audio_url: req.audio_url || undefined,
     });
 
   // 1. 客户端已在运行：直接 POST。

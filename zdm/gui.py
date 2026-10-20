@@ -409,6 +409,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -417,6 +418,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -1843,6 +1845,28 @@ class MainWindow(QMainWindow):
         form.addRow("", autostart_cb)
         form.addRow("", auto_gui_cb)
         form.addRow("", close_tray_cb)
+        # ---- site cookies (YouTube / Bilibili need a logged-in session) ----
+        cookies_box = QGroupBox("站点 Cookie（用于需要登录的视频站）")
+        cookies_box.setToolTip(
+            "浏览器扩展推送任务时会自动带上当前页面的 Cookie，一般不用填。\n"
+            "只有从桌面端手动添加链接、或服务器要求登录态时才需要。"
+        )
+        cf = QFormLayout(cookies_box)
+        site_cookies = cfg.get("site_cookies") or {}
+        yt_cookie = QPlainTextEdit(str(site_cookies.get("youtube") or ""))
+        yt_cookie.setPlaceholderText("从浏览器 F12 → Application → Cookies 复制，或用扩展自动带")
+        yt_cookie.setMaximumHeight(72)
+        yt_cookie.setTabChangesFocus(True)
+        bili_cookie = QPlainTextEdit(str(site_cookies.get("bilibili") or ""))
+        bili_cookie.setPlaceholderText("B站的 SESSDATA（登录后可下 1080P+ / 会员内容）")
+        bili_cookie.setMaximumHeight(72)
+        bili_cookie.setTabChangesFocus(True)
+        cf.addRow("YouTube", yt_cookie)
+        cf.addRow("B站", bili_cookie)
+        clear_btn = QPushButton("清空两个站点的 Cookie")
+        clear_btn.clicked.connect(lambda: (yt_cookie.setPlainText(""), bili_cookie.setPlainText("")))
+        cf.addRow("", clear_btn)
+        form.addRow(cookies_box)
         # ---- version + updates ----
         ver_row = QWidget()
         vh = QHBoxLayout(ver_row)
@@ -1898,6 +1922,10 @@ class MainWindow(QMainWindow):
             "auto_resume": auto.isChecked(),
             "auto_show_gui": auto_gui_cb.isChecked(),
             "check_updates": update_cb.isChecked(),
+            "site_cookies": {
+                "youtube": yt_cookie.toPlainText().strip(),
+                "bilibili": bili_cookie.toPlainText().strip(),
+            },
         })
         _gui_cfg_set(close_to_tray=close_tray_cb.isChecked())
         if getattr(self, "autostart_action", None) is not None:

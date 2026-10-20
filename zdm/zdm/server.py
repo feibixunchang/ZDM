@@ -10,12 +10,54 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional, Tuple
+from urllib.parse import urlparse
 
 from . import __version__ as VERSION
 from . import desktop
 from .manager import Manager
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
+
+# Which configured cookie belongs to which host. The media itself often lives
+# on a CDN (googlevideo.com, bilivideo.com) while the session cookie belongs
+# to the site (youtube.com, bilibili.com) — so we match on the *site* hosts
+# and only fall back to the configured cookie when the caller's URL is one we
+# know. CDN hosts are listed too because some players hand out CDN URLs that
+# still need the first-party session.
+SITE_COOKIE_HOSTS = {
+    "youtube": (
+        "youtube.com",
+        "youtu.be",
+        "googlevideo.com",
+        "ytimg.com",
+        "ggpht.com",
+    ),
+    "bilibili": (
+        "bilibili.com",
+        "bilivideo.com",
+        "bilivideo.cn",
+        "hdslb.com",
+        "biliapi.net",
+    ),
+}
+
+# Referer that matches the site, so a first-party session is accepted.
+SITE_REFERRERS = {
+    "youtube": "https://www.youtube.com/",
+    "bilibili": "https://www.bilibili.com/",
+}
+
+
+def _site_referer(url: str) -> str:
+    """Best-guess Referer for a URL, based on the known video sites."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+    for site, patterns in SITE_COOKIE_HOSTS.items():
+        if any(host == p or host.endswith("." + p) for p in patterns):
+            return SITE_REFERRERS.get(site, "")
+    return ""
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -142,6 +184,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse()
         return self._error(404, "not found")
 
+    def _site_cookie_for(self, url: str) -> str:
+        """Look up a configured site cookie for this URL's host.
+
+        The browser extension normally sends the page's own cookie with each
+        task, so this is only the fallback: a task started from the desktop
+        app, or a media URL on a host we recognise but the extension could not
+        authenticate against.
+        """
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            return ""
+        if not host:
+            return ""
+        cookies = self.manager.config.get("site_cookies") or {}
+        if not isinstance(cookies, dict):
+            return ""
+        for site, patterns in SITE_COOKIE_HOSTS.items():
+            if not any(host == p or host.endswith("." + p) for p in patterns):
+                continue
+            value = cookies.get(site)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
     def _api_post(self, parts):
         body = self._body()
 
@@ -159,6 +226,16 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 if body.get(src):
                     headers[dst] = body[src]
+            # Fall back to the cookie configured in Settings when the caller
+            # did not send one. Never override an explicit cookie.
+            if not headers.get("Cookie"):
+                auto_cookie = self._site_cookie_for(url)
+                if auto_cookie:
+                    headers["Cookie"] = auto_cookie
+                    # A first-party session is only accepted with the matching
+                    # Referer; without it the server answers 403.
+                    if not headers.get("Referer"):
+                        headers["Referer"] = _site_referer(url)
             try:
                 d = self.manager.add(
                     url=url,
@@ -171,6 +248,7 @@ class Handler(BaseHTTPRequestHandler):
                     start_now=body.get("paused") is not True,
                     source=body.get("source"),
                     kind=body.get("kind"),
+                    audio_url=body.get("audio_url"),
                 )
             except (ValueError, TypeError) as e:
                 # TypeError as well as ValueError: the body is untrusted JSON,

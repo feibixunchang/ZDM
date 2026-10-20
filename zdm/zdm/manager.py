@@ -62,6 +62,12 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "auto_show_gui": True,
     # Look for a newer release on startup (GitHub Releases).
     "check_updates": True,
+    # Cookies for sites that need a logged-in session (YouTube / Bilibili).
+    # Shape: {"youtube": "SID=...", "bilibili": "SESSDATA=..."}
+    # The browser extension normally sends the page's own cookie along with
+    # each task; these are the fallback for tasks started from the desktop app
+    # or for servers that only accept a first-party session.
+    "site_cookies": {},
 }
 
 
@@ -141,6 +147,7 @@ class Manager:
         start_now: bool = True,
         source: Optional[str] = None,
         kind: Optional[str] = None,
+        audio_url: Optional[str] = None,
     ) -> Download:
         if not url or not str(url).startswith(("http://", "https://")):
             raise ValueError("只支持 http/https 链接")
@@ -162,6 +169,7 @@ class Manager:
             speed_limit=int(speed_limit or 0),
             source=source or "manual",
             kind=kind or "",
+            audio_url=audio_url or "",
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter
@@ -402,6 +410,7 @@ class Manager:
                 speed_limit=int(t.get("speed_limit") or 0),
                 source=t.get("source") or "manual",
                 kind=t.get("kind") or "",
+                audio_url=t.get("audio_url") or "",
             )
             d.set_event_callback(self._on_task_event)
             d.global_limiter = self.global_limiter
