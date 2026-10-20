@@ -63,6 +63,124 @@
     return null;
   }
 
+  /* 页面里的 playerResponse 只有一半可用：adaptiveFormats（1080P/720P 等
+     高清轨）几乎全是 signatureCipher 加密形式，没有直接的 f.url —— 解密
+     要扒 base.js 做 signature 运算，脆且慢。
+     这里改走 yt-dlp 同款路线：用页面自己的 innertube 凭据，以 ANDROID
+     客户端身份调 /youtubei/v1/player —— 这个客户端返回的是**未加密直链**
+     （url 字段直接可用），也不用做 n 参数变换。MAIN world 里 fetch 是
+     同源请求，没有 CORS 问题。 */
+  let ytApiCache = null; // { videoId, at, formats }
+  function ytVideoId() {
+    try {
+      const p = document.getElementById("movie_player");
+      if (p && typeof p.getVideoData === "function") {
+        const d = p.getVideoData();
+        if (d && d.video_id) return d.video_id;
+      }
+    } catch (_) {
+      /* 播放器没起来 */
+    }
+    try {
+      return new URLSearchParams(location.search).get("v") || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  async function ytInnertubeFormats() {
+    const videoId = ytVideoId();
+    if (!videoId) return [];
+    // 同一个视频 60s 内不重复打接口（菜单反复开关不能每次都请求）
+    if (ytApiCache && ytApiCache.videoId === videoId && Date.now() - ytApiCache.at < 60000) {
+      return ytApiCache.formats;
+    }
+    let key = "";
+    try {
+      key = (window.ytcfg && (ytcfg.get("INNERTUBE_API_KEY") || (ytcfg.data_ && ytcfg.data_.INNERTUBE_API_KEY))) || "";
+    } catch (_) {
+      key = "";
+    }
+    const body = {
+      videoId,
+      context: {
+        client: {
+          clientName: "ANDROID",
+          clientVersion: "19.09.37",
+          androidSdkVersion: 30,
+          hl: "en",
+          gl: "US",
+        },
+      },
+    };
+    try {
+      const r = await fetch(
+        "/youtubei/v1/player" + (key ? "?key=" + encodeURIComponent(key) + "&prettyPrint=false" : "?prettyPrint=false"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      const sd = j && j.streamingData;
+      const playability = j && j.playabilityStatus && j.playabilityStatus.status;
+      if (!sd || (playability && playability !== "OK")) {
+        ytApiCache = { videoId, at: Date.now(), formats: [] };
+        return [];
+      }
+      const urlOf = (f) => {
+        if (f && f.url) return f.url;
+        // ANDROID 客户端理论上都是明文 url；万一给了 cipher 也解一下
+        const c = f && (f.signatureCipher || f.cipher);
+        if (!c) return "";
+        try {
+          const q = new URLSearchParams(c);
+          return q.get("url") || "";
+        } catch (_) {
+          return "";
+        }
+      };
+      const out = [];
+      const push = (f, kind) => {
+        const url = urlOf(f);
+        if (!url) return;
+        let size = num(f.contentLength);
+        if (!size) {
+          try {
+            size = num(new URLSearchParams(url.split("?")[1] || "").get("clen"));
+          } catch (_) {
+            size = 0;
+          }
+        }
+        out.push({
+          label: ytLabel(f, kind),
+          url,
+          kind,
+          size,
+          mime: f.mimeType || "",
+          width: num(f.width),
+          height: num(f.height),
+          itag: num(f.itag),
+          audioQuality: f.audioQuality || "",
+          bitrate: num(f.bitrate),
+        });
+      };
+      (sd.formats || []).forEach((f) => push(f, "video+muxed"));
+      (sd.adaptiveFormats || []).forEach((f) => {
+        const m = f.mimeType || "";
+        if (m.startsWith("video/")) push(f, "video");
+        else if (m.startsWith("audio/")) push(f, "audio");
+      });
+      ytApiCache = { videoId, at: Date.now(), formats: out };
+      return out;
+    } catch (_) {
+      ytApiCache = { videoId, at: Date.now(), formats: [] };
+      return [];
+    }
+  }
+
   function ytLabel(f, kind) {
     const h = num(f.height);
     if (kind === "audio") {
@@ -91,30 +209,53 @@
     return parts.join(" · ") || "默认";
   }
 
-  function ytFormats() {
-    const sd = ytPlayerResponse();
-    if (!sd) return [];
+  async function ytFormats() {
+    // 主路：innertube（未加密直链 + contentLength）
+    let formats = [];
+    try {
+      formats = await ytInnertubeFormats();
+    } catch (_) {
+      formats = [];
+    }
+    // 兜底：页面 playerResponse 里本来就带明文 url 的条目（通常是 360P muxed）
+    if (!formats.length) {
+      const sd = ytPlayerResponse();
+      if (sd) {
+        const push = (f, kind) => {
+          if (!f || !f.url) return;
+          formats.push({
+            label: ytLabel(f, kind),
+            url: f.url,
+            kind: kind,
+            size: num(f.contentLength),
+            mime: f.mimeType || "",
+            width: num(f.width),
+            height: num(f.height),
+            itag: num(f.itag),
+            audioQuality: f.audioQuality || "",
+            bitrate: num(f.bitrate),
+          });
+        };
+        (sd.formats || []).forEach((f) => push(f, "video+muxed"));
+        (sd.adaptiveFormats || []).forEach((f) => {
+          const m = f.mimeType || "";
+          if (m.startsWith("video/")) push(f, "video");
+          else if (m.startsWith("audio/")) push(f, "audio");
+        });
+      }
+    }
+    // 按 itag 去重（先到者优先），视频从高分辨率到低排序、音频按码率
+    const seen = new Set();
     const out = [];
-    const push = (f, kind) => {
-      if (!f || !f.url) return;
-      out.push({
-        label: ytLabel(f, kind),
-        url: f.url,
-        kind: kind,
-        size: num(f.contentLength),
-        mime: f.mimeType || "",
-        width: num(f.width),
-        height: num(f.height),
-        itag: num(f.itag),
-        audioQuality: f.audioQuality || "",
-        bitrate: num(f.bitrate),
-      });
-    };
-    (sd.formats || []).forEach((f) => push(f, "video+muxed"));
-    (sd.adaptiveFormats || []).forEach((f) => {
-      const m = f.mimeType || "";
-      if (m.startsWith("video/")) push(f, "video");
-      else if (m.startsWith("audio/")) push(f, "audio");
+    for (const f of formats) {
+      const k = f.itag || f.url;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(f);
+    }
+    out.sort((a, b) => {
+      if (a.kind === "audio" && b.kind === "audio") return (b.bitrate || 0) - (a.bitrate || 0);
+      return (b.height || 0) - (a.height || 0);
     });
     return out;
   }
@@ -355,11 +496,12 @@
     return null;
   };
 
-  S.currentFormats = () => {
+  S.currentFormats = async () => {
     const site = S.siteOf();
     if (!site) return [];
     try {
-      return S.SITES[site].formats() || [];
+      // formats() 可能是异步的（YouTube 要调 innertube 接口）
+      return (await S.SITES[site].formats()) || [];
     } catch (_) {
       return [];
     }
@@ -379,10 +521,10 @@
 
   /* 播放页的视频信息（标题 + 清晰度）。每次都重新读页面数据 ——
      __playinfo__ / ytInitialPlayerResponse 是播放器加载完之后才写进页面的。 */
-  S.playerFormats = () => {
+  S.playerFormats = async () => {
     const site = S.siteOf();
     if (!site) return null;
-    const fmts = S.currentFormats();
+    const fmts = await S.currentFormats();
     let title = "";
     try {
       const info = S.SITES[site].playerInfo ? S.SITES[site].playerInfo() : null;
@@ -401,12 +543,12 @@
     };
   };
 
-  S.formatsForCard = (card) => {
+  S.formatsForCard = async (card) => {
     const site = S.siteOf();
     if (!site) return null;
     const info = S.SITES[site].cardInfo(card);
     if (!info) return null;
-    const fmts = S.currentFormats();
+    const fmts = await S.currentFormats();
     return {
       site,
       title: info.title,
@@ -459,7 +601,7 @@
   //   - JS 自定义属性（el.__x = v）是每个 world 各自一份，跨 world 读不到；
   //   - attribute 是共享的，但只能放字符串，放不了函数。
   // postMessage 的 event 对象是两个 world 共享的，所以能用它传函数调用。
-  window.addEventListener("message", (ev) => {
+  window.addEventListener("message", async (ev) => {
     const d = ev.data;
     if (!d || d.__zdm !== "query") return;
     let out = null;
@@ -478,8 +620,8 @@
             }
           : null;
       }
-      else if (d.what === "currentFormats") out = S.currentFormats();
-      else if (d.what === "playerFormats") out = S.playerFormats();
+      else if (d.what === "currentFormats") out = await S.currentFormats();
+      else if (d.what === "playerFormats") out = await S.playerFormats();
       else if (d.what === "playerElement") {
         const el = S.playerElement();
         // 元素本身留在 MAIN world，只回传它的标识
@@ -490,7 +632,7 @@
       } else if ((d.what === "formatsForCard" || d.what === "cardInfo") && d.sel) {
         const el = resolveEl(d.sel);
         if (d.what === "formatsForCard") {
-          out = el ? S.formatsForCard(el) : null;
+          out = el ? await S.formatsForCard(el) : null;
         } else {
           const site = S.siteOf();
           out = el && site && S.SITES[site] && S.SITES[site].cardInfo
