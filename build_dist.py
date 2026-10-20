@@ -59,6 +59,7 @@ def stage_files(dst):
                         dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__"))
     for f in ("zdm.py", "gui.py", "theme.py", "README.md", "install.sh",
+              "zdm_native_host.py",
               "install.ps1", "install.bat", "setup.cmd", "build_macos_dmg.sh",
               "zdm_launcher.m", "build_macos_app.sh", "LICENSE.txt"):
         src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
@@ -176,7 +177,8 @@ def build_macos_zip():
     shutil.copytree(os.path.join(ZDM, "extension"), os.path.join(d, "extension"),
                     dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__"))
-    for f in ("install.sh", "install.ps1", "install.bat", "build_macos_dmg.sh",
+    for f in ("install.sh", "zdm_native_host.py", "install.ps1", "install.bat",
+              "build_macos_dmg.sh",
               "zdm_launcher.m", "build_macos_app.sh", "README.md", "LICENSE.txt"):
         src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
             else os.path.join(ROOT, f)
