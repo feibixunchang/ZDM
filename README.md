@@ -27,7 +27,7 @@
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
 | Windows（PyQt5） | `ZDM-PyQt5-Setup-1.12.0.exe` | 双击运行，用户级安装、无需管理员 |
 | Windows（原生） | `ZDM-Setup-1.12.0.exe` | C#/WPF 客户端，双击安装，见下方专节 |
-| 浏览器扩展 | `ZDM-Connector-1.2.1.zip` | 解压后在 `chrome://extensions` 加载已解压的扩展程序 |
+| 浏览器扩展 | 随上面各包附带 | 装好后从 `~/Library/Application Support/ZDM/extension`（macOS）加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-PyQt5-Setup-*.exe` 在 `ubuntu-latest`
 > 上构建，`ZDM-<version>.dmg` 在 `macos-latest` 上构建（由
