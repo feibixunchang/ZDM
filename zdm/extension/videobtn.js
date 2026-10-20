@@ -152,7 +152,18 @@
   setTimeout(() => {
     if (fallbackTried || bridgeReady()) return;
     fallbackTried = true;
-    injectMainWorld();
+    const h = location.hostname.toLowerCase();
+    // 只有 B站放行 chrome-extension: 的站点才退回 <script src> 注入兜底。
+    // YouTube 的 CSP script-src 不含 chrome-extension:，注入必被拦并抛 CSP
+    // 报错（用户此前在扩展里看到的「错误」正是它）。YouTube 完全依赖
+    // background 的 registerContentScripts(MAIN world) —— 那条通道走浏览器
+    // 原生注入、不受页面 CSP 约束；若它失效则 YouTube 上优雅降级为
+    // 「无清晰度」，而不是抛错。
+    if (h.includes("bilibili.com") || h.includes("bilivideo.com")) {
+      injectMainWorld();
+    } else {
+      __err("站点适配器桥接未就绪且无法兜底注入（" + h + "）：YouTube 清晰度将不可用");
+    }
   }, 1200);
   waitForBridge();
 
@@ -473,60 +484,23 @@
     return "";
   }
 
-  async function openMenuFor(card, btn) {
-    // 换一个菜单开：先把上一个的「延迟关闭」撤掉，否则那个定时器
-    // 会在 260ms 后把新开的菜单一起判死刑。
-    cancelPendingClose();
-    closeMenu();
-    const onPlayer = card.__zdmIsPlayer === true;
-    const { host, root } = makeHost("menu");
-    const menu = document.createElement("div");
-    menu.className = "menu";
-    root.appendChild(menu);
-    if (onPlayer) {
-      // 播放器的菜单同样挂到 body 上，否则会被站点的全屏遮罩压住
-      host.classList.add("on-player", "menu");
-      document.body.appendChild(host);
-      const place = () => {
-        const r = card.getBoundingClientRect();
-        const w = btn ? btn.getBoundingClientRect().width : 98;
-        host.style.top = Math.round(r.top + 44) + "px";
-        host.style.left = Math.round(r.right - w - 56) + "px";
-      };
-      place();
-      openMenu = { card, host, root, btn, place, at: Date.now() };
-      window.addEventListener("resize", place);
-      window.addEventListener("scroll", place, { passive: true });
-    } else {
-      card.appendChild(host);
-      openMenu = { card, host, root, btn, at: Date.now() };
+  /* 向 MAIN world 要数据，带重试：播放页的清晰度是播放器初始化后才写进
+     页面的，刚打开时经常还空着，重试一两次就能拿到。 */
+  async function askWithRetry(what, tries) {
+    let last = null;
+    for (let i = 0; i < tries; i++) {
+      const d = await ask(what);
+      last = d;
+      if (d && d.formats && d.formats.length) return d;
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, 1500));
     }
+    return last;
+  }
 
-    // 卡片走 cardInfo，播放器走 playerFormats —— 播放页没有卡片，
-    // 但播放器本身就是「正在播放的那个视频」。
-    const isPlayer = card.__zdmIsPlayer === true;
-    // 通过 postMessage 向 MAIN world 要数据
-    const info = isPlayer
-      ? await ask("playerFormats")
-      : await ask("formatsForCard", cssPathOf(card));
-    if (!info) {
-      menu.innerHTML = '<div class="tip">没能识别这个视频。</div>';
-      return;
-    }
-
-    if (!info.formats.length) {
-      // 站点能识别，但当前页面拿不到清晰度数据
-      menu.innerHTML =
-        '<div class="tip"><b>这个视频的清晰度还读不到</b><br>' +
-        "列表页只加载了封面，没加载媒体地址。<br>" +
-        "点开视频进入播放页后，鼠标移到播放器上就能看到「下载此视频」了。</div>";
-      return;
-    }
-
+  function renderFormats(menu, info) {
     const head = document.createElement("h4");
     head.textContent = info.title || "选择清晰度";
     menu.appendChild(head);
-
     for (const f of info.formats) {
       const row = document.createElement("div");
       row.className = "item";
@@ -569,6 +543,65 @@
       });
       menu.appendChild(row);
     }
+  }
+
+  async function openMenuFor(card, btn) {
+    // 换一个菜单开：先把上一个的「延迟关闭」撤掉，否则那个定时器
+    // 会在 260ms 后把新开的菜单一起判死刑。
+    cancelPendingClose();
+    closeMenu();
+    const onPlayer = card.__zdmIsPlayer === true;
+    const { host, root } = makeHost("menu");
+    const menu = document.createElement("div");
+    menu.className = "menu";
+    root.appendChild(menu);
+    if (onPlayer) {
+      // 播放器的菜单同样挂到 body 上，否则会被站点的全屏遮罩压住
+      host.classList.add("on-player", "menu");
+      host.style.visibility = "hidden";
+      document.body.appendChild(host);
+      const place = () => {
+        const r = card.getBoundingClientRect();
+        const w = btn ? btn.getBoundingClientRect().width : 98;
+        host.style.top = Math.round(r.top + 44) + "px";
+        host.style.left = Math.round(r.right - w - 56) + "px";
+      };
+      openMenu = { card, host, root, btn, place, onPlayer: true, at: Date.now() };
+      place();
+      host.style.visibility = "visible";
+      window.addEventListener("resize", place);
+      window.addEventListener("scroll", place, { passive: true });
+    } else {
+      card.appendChild(host);
+      openMenu = { card, host, root, btn, at: Date.now() };
+    }
+
+    // 卡片走 cardInfo，播放器走 playerFormats —— 播放页没有卡片，
+    // 但播放器本身就是「正在播放的那个视频」。
+    const isPlayer = onPlayer;
+    if (isPlayer) {
+      // 先给个「读取中」，播放器初始化完清晰度才会进来
+      menu.innerHTML = '<div class="tip">正在读取清晰度…</div>';
+    }
+    const info = isPlayer
+      ? await askWithRetry("playerFormats", 3)
+      : await ask("formatsForCard", cssPathOf(card));
+    if (!info) {
+      menu.innerHTML = '<div class="tip">没能识别这个视频。</div>';
+      return;
+    }
+
+    if (!info.formats || !info.formats.length) {
+      // 站点能识别，但当前页面拿不到清晰度数据。
+      // 播放页仍为空：多半是播放器还在加载，或该视频需要登录/付费。
+      menu.innerHTML =
+        '<div class="tip"><b>这个视频的清晰度还读不到</b><br>' +
+        "播放器可能还在加载，或该视频需要登录 / 付费。<br>" +
+        "稍等几秒再点一次「下载此视频」试试。</div>";
+      return;
+    }
+
+    renderFormats(menu, info);
   }
 
   /* ------------------------------------------------------------ 推送 */
@@ -771,35 +804,102 @@
     if (e.key === "Escape") closeMenu();
   }
 
+  /* ------------------------------------------------------------ 播放器按钮定位
+   *
+   * 关键坑（用户第三轮反馈的核心）：
+   *   - YouTube 的播放器选择器若命中整页容器 ytd-watch-flexy（横跨整屏），
+   *     按钮会被放到整页右上角、飞出播放窗口。
+   *   - B站 #bilibili-player 是整列容器（视频+简介+评论），同样会偏。
+   *   - 播放器是 SPA 异步渲染的，document_idle 时它的 rect 可能还是
+   *     (0,0,0,0)，一次性定位会把按钮钉在左上角，要等滚动/resize 才归位。
+   *
+   * 解法：只保留「不被其它候选包含」且「面积最小」的那一个元素（真正的
+   * 播放器），并用 requestAnimationFrame 循环持续把它和菜单钉在播放器
+   * 右上角；定位有效前先隐藏，避免闪到左上角。 */
+
+  const trackedPlayers = new Map(); // playerEl -> { host, btn, shown, top, left }
+  let rafScheduled = false;
+
+  function schedulePositionLoop() {
+    if (rafScheduled) return;
+    if (!trackedPlayers.size && !(openMenu && openMenu.onPlayer)) return;
+    rafScheduled = true;
+    requestAnimationFrame(positionTick);
+  }
+
+  function positionTick() {
+    rafScheduled = false;
+    for (const [p, t] of trackedPlayers) {
+      if (!t.host || !t.host.isConnected) {
+        trackedPlayers.delete(p);
+        continue;
+      }
+      placePlayer(p, t);
+    }
+    if (openMenu && openMenu.onPlayer && openMenu.host && openMenu.host.isConnected) {
+      placePlayerMenu(openMenu);
+    }
+    if (trackedPlayers.size || (openMenu && openMenu.onPlayer)) schedulePositionLoop();
+  }
+
+  function placePlayer(p, t) {
+    const r = p.getBoundingClientRect();
+    if (r.width < 40 || r.height < 40) return; // 还没布局好
+    const w = t.btn && t.btn.isConnected ? t.btn.getBoundingClientRect().width : 98;
+    const top = Math.round(r.top + 10);
+    const left = Math.round(r.right - w - 56); // 让开右上角自带控件
+    if (top !== t.top || left !== t.left) {
+      t.host.style.top = top + "px";
+      t.host.style.left = left + "px";
+      t.top = top;
+      t.left = left;
+    }
+    if (!t.shown) {
+      t.host.style.visibility = "visible";
+      t.shown = true;
+    }
+  }
+
+  function placePlayerMenu(om) {
+    const card = om.card;
+    if (!card) return;
+    const r = card.getBoundingClientRect();
+    const w = om.btn && om.btn.isConnected ? om.btn.getBoundingClientRect().width : 98;
+    om.host.style.top = Math.round(r.top + 44) + "px";
+    om.host.style.left = Math.round(r.right - w - 56) + "px";
+  }
+
   /* ------------------------------------------------------------ 扫描 */
 
   function scan() {
     // 1) 播放页的播放器
     if (PLAYER_SEL) {
-      let player = null;
+      let players = [];
       try {
-        player = document.querySelector(PLAYER_SEL);
+        players = Array.from(document.querySelectorAll(PLAYER_SEL));
       } catch (_) {
-        player = null;
+        players = [];
       }
-      if (player && !player.__zdmBtn) {
+      // 只保留不被其它候选包含的元素（最里层），再按面积升序取最小的那个 ——
+      // 这才是真正的播放器，而不是包着它的整页/整列容器。
+      players = players.filter((p) => !players.some((q) => q !== p && p.contains(q)));
+      players.sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        return ra.width * ra.height - rb.width * rb.height;
+      });
+      const player = players[0];
+      if (player && !trackedPlayers.has(player)) {
         player.__zdmIsPlayer = true;
         ensureButton(player);
-        // 按钮是 fixed 定位，要按播放器的实际位置摆放。
-        const place = () => {
-          const host = player.__zdmBtnHost;
-          if (!host) return;
-          const r = player.getBoundingClientRect();
-          const btn = player.__zdmBtn;
-          const w = btn ? btn.getBoundingClientRect().width : 98;
-          host.style.top = Math.round(r.top + 10) + "px";
-          // 往左让开播放器右上角自己的控件（YouTube 的 Logo、B站的投屏等）
-          host.style.left = Math.round(r.right - w - 56) + "px";
-        };
-        place();
-        player.__zdmPlace = place;
-        window.addEventListener("resize", place);
-        window.addEventListener("scroll", place, { passive: true });
+        const host = player.__zdmBtnHost;
+        const btn = player.__zdmBtn;
+        if (host) {
+          host.style.visibility = "hidden"; // 定位有效前先藏好
+          trackedPlayers.set(player, { host, btn, shown: false, top: 0, left: 0 });
+          placePlayer(player, trackedPlayers.get(player));
+          schedulePositionLoop();
+        }
       }
     }
 

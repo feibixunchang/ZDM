@@ -132,9 +132,21 @@ function classifyResponse(details) {
   // Range 响应的 Content-Length 只是这一小段的长度（实测 B站是 1024），
   // 拿它当文件大小会把它误判成「小于 64KB 的埋点」而丢掉。
   const len = total || partLen;
+  const host = (() => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch (_) {
+      return "";
+    }
+  })();
+  // YouTube 的媒体走 *.googlevideo.com/videoplayback：URL 没有 .mp4/.m4s
+  // 后缀，Content-Type 也可能是 application/octet-stream。纯靠扩展名/
+  // ContentType 会把整个 YouTube 漏掉（嗅探恒为 0）。按 host 直接认定。
+  const KNOWN_MEDIA_HOST = /(^|\.)googlevideo\.com$/;
   let kind = null;
   if (ct.startsWith("video/")) kind = "video";
   else if (ct.startsWith("audio/")) kind = "audio";
+  else if (KNOWN_MEDIA_HOST.test(host)) kind = "video"; // YouTube 直链几乎都是视频轨
   else if (
     (ct === "application/octet-stream" || ct === "binary/octet-stream" || ct === "") &&
     MEDIA_EXT.test(url)

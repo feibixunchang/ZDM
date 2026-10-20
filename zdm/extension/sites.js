@@ -294,9 +294,12 @@
 
   /* ---------------------------------------------------------------- 站点表 */
 
-  const YT_PLAYER = "ytd-watch-flexy, ytd-player, #movie_player, .html5-video-player";
+  // 注意：videobtn.js 会 querySelectorAll 全部候选，再「去掉被包含的、取面积
+  // 最小的」—— 那才是真正的播放器（ytd-watch-flexy 是整页容器、#bilibili-player
+  // 是整列容器，都会把按钮带偏）。这里把具体的播放器选择器列全即可。
+  const YT_PLAYER = "#movie_player, .html5-video-player, #player, ytd-player, ytd-watch-flexy";
   const BILI_PLAYER =
-    "#bilibili-player, .bpx-player-container, .bpx-player-video-area, #bilibili-player-video-area";
+    ".bpx-player-video-area, #bilibili-player-video-area, .bpx-player-container, #bilibili-player";
 
   /* 「这张卡片是不是一个视频」的判据，以纯数据下发。
 
