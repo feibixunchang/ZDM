@@ -270,6 +270,7 @@ def _python_with_qt() -> Optional[str]:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=20,
+                **runtime.silent_proc_kwargs(),
             )
             if r.returncode == 0:
                 return py
@@ -289,6 +290,7 @@ def cmd_gui(args) -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=30,
+            **runtime.silent_proc_kwargs(),
         )
         for _ in range(30):
             time.sleep(0.2)

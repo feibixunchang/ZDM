@@ -219,7 +219,8 @@ def _win_enable(app_dir: str, py: str) -> None:
                 f"$l.WorkingDirectory='{app_dir}';$l.WindowStyle=7;$l.Save()"
             )
             subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps], capture_output=True
+                ["powershell", "-NoProfile", "-Command", ps], capture_output=True,
+                **runtime.silent_proc_kwargs(),
             )
         except Exception:
             pass

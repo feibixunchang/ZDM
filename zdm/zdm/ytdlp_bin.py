@@ -24,6 +24,17 @@ _PROBE_SUBDIRS = ("bin", "vendor", "yt-dlp")
 _BINARY_NAMES = ("yt-dlp", "yt-dlp_macos", "yt-dlp.exe", "yt-dlp_linux")
 
 
+def _no_window() -> dict:
+    """Windows 上不创建控制台窗口（GUI 进程拉起 yt-dlp 会弹黑窗）。
+
+    与 runtime.silent_proc_kwargs 同义，但本模块约定只依赖标准库，
+    所以在这里放一份本地实现（runtime 也不能反过来 import 本模块）。
+    """
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 def binary_path() -> Optional[str]:
     """找到可用的 yt-dlp 可执行文件。"""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -93,6 +104,7 @@ def extract_json(
             timeout=timeout,
             env=child_env(),
             check=False,
+            **_no_window(),
         )
     except subprocess.TimeoutExpired:
         return None, "解析超时（YouTube 可能在做风控）"
@@ -168,6 +180,7 @@ def download(
             text=True,
             bufsize=1,
             env=child_env(),
+            **_no_window(),
         )
     except OSError as e:
         return 1, f"无法执行 yt-dlp：{e}"

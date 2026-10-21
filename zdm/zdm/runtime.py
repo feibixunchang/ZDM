@@ -26,6 +26,21 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def silent_proc_kwargs() -> dict:
+    """Extra ``subprocess`` kwargs that suppress the console window on Windows.
+
+    GUI 进程（无控制台）拉起 ffmpeg / yt-dlp / curl / powershell 这类控制台
+    程序时，Windows 会给子进程分配一个**新的**控制台窗口 —— 用户看到的就是
+    「点一下下载弹个黑窗」。加 ``CREATE_NO_WINDOW`` 后子进程不继承也不新建
+    控制台。POSIX 上是空参数，调用处直接 ``**silent_proc_kwargs()``。
+    """
+    if os.name == "nt":
+        import subprocess
+
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 def app_root() -> str:
     """Directory that holds the read-only resources (``web/``, ``extension/``).
 
