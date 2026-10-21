@@ -6,8 +6,10 @@ import errno
 import json
 import os
 import shutil
+import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -17,6 +19,103 @@ from .http import HttpError, filename_from_headers
 MIN_SPLIT = 1 << 20  # 1 MiB: minimum remaining size to justify splitting
 HAS_PWRITE = hasattr(os, "pwrite")
 O_BINARY = getattr(os, "O_BINARY", 0)  # Windows: without it files open in text mode
+
+# 有些 CDN（尤其 B站音轨）没有 UA/Referer 就直接 403。
+DEFAULT_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _find_ffmpeg() -> Optional[str]:
+    """Locate ffmpeg on this machine, tolerating a sandbox/app PATH.
+
+    The ZDM.app process does not inherit the user's interactive-shell PATH, so a
+    bare ``shutil.which("ffmpeg")`` misses Homebrew/MacPorts installs (e.g.
+    /opt/homebrew/bin). Windows has no such convention at all — there ffmpeg is
+    wherever the user unzipped it — so probe the common install roots there too.
+
+    Keep this list in sync across the three platforms: a path missing here means
+    「B站下载没声音」only on that OS, which is impossible to notice when you only
+    test on one machine.
+    """
+    exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    candidates = [
+        # --- macOS ---
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/local/bin/ffmpeg",
+        # --- Linux ---
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/snap/bin/ffmpeg",
+        "/var/lib/flatpak/exports/bin/ffmpeg",
+        # --- 随 app 一起分发（三端同一思路：放在可执行文件旁边） ---
+        os.path.join(os.path.dirname(sys.executable or ""), exe),
+        "/Applications/ZDM.app/Contents/Resources/ffmpeg",
+    ]
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA", "")
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        user = os.environ.get("USERPROFILE", "")
+        candidates += [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            os.path.join(pf, "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(pf86, "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"),
+            os.path.join(local, "Programs", "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(user, "scoop", "shims", "ffmpeg.exe"),
+            os.path.join(user, "chocolatey", "bin", "ffmpeg.exe"),
+        ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    if shutil.which("ffmpeg"):
+        return shutil.which("ffmpeg")
+    # 兜底：把常见 bin 目录拼进 PATH 再找一次。
+    # 分隔符必须用 os.pathsep —— 在 Windows 上硬写 ":" 会把整条 PATH 拼坏，
+    # 于是「装了 ffmpeg 也永远找不到」。
+    extra = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/local/bin",
+        "/snap/bin",
+    ]
+    if os.name == "nt":
+        extra = [
+            r"C:\ffmpeg\bin",
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links"),
+        ]
+    aug = os.pathsep.join(
+        [p for p in [os.environ.get("PATH", "")] + extra if p]
+    )
+    return shutil.which("ffmpeg", path=aug)
+
+
+def _probe_has_audio(path: str) -> Optional[bool]:
+    """文件里到底有没有音轨。ffmpeg 不可用/探测失败时返回 None（不下结论）。
+
+    只用来「说实话」：DASH 视频轨天生无声，如果调用方没配 audio_url，
+    以前的实现会静默当成功保存，用户只会觉得「下载坏了」。
+    """
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return None
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", path],
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception:
+        return None
+    text = (proc.stderr or b"").decode("utf-8", "ignore")
+    if "Input #0" not in text:
+        return None
+    return "Audio:" in text
 
 
 def _write_at(fd, tls, path, data, offset):
@@ -214,7 +313,7 @@ STATUS = (
 # to filter "media found on this page" from ordinary downloads. Anything not in
 # this tuple is normalised to "manual" on the way in (see Manager.add), so a
 # stale or hostile payload cannot invent new labels.
-SOURCES = ("manual", "browser", "sniffer", "webui", "protocol")
+SOURCES = ("manual", "browser", "sniffer", "player", "webui", "protocol")
 # Broad content kind. Empty string means "not a media file" (an ordinary
 # download), which is what every pre-1.12.0 task effectively was.
 KINDS = ("", "video", "audio")
@@ -242,9 +341,47 @@ def normalize_kind(value) -> str:
     return v if v in KINDS else ""
 
 
+def needs_sequential(url: str) -> bool:
+    """YouTube 的 googlevideo 直链只能**从头顺序**读。
+
+    实测（2026-10，android_vr 解出的 1080p 直链）：
+      Range: bytes=0-1023        → 206
+      Range: bytes=1000000-...   → 403 Forbidden
+    在 URL 上追加 range=/rn= 参数也没用，同样 403 —— 签名（lsig/sig +
+    sparams）把「从 0 开始」写死在里面了。
+
+    所以这类地址必须单连接下载：8 线程分片会让 7 个线程从中间开始取，
+    每个都拿到 403，任务直接失败（用户看到的就是「YouTube 一直下载失败」）。
+    """
+    if not url:
+        return False
+    try:
+        p = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    host = (p.hostname or "").lower()
+    if host != "googlevideo.com" and not host.endswith(".googlevideo.com"):
+        return False
+    return "/videoplayback" in (p.path or "")
+
+
+def _effective_connections(url: str, connections: int) -> int:
+    """按地址特性收敛连接数（目前只有 YouTube 直链需要单连接）。"""
+    if needs_sequential(url):
+        return 1
+    return max(1, int(connections))
+
+class _YTAbort(Exception):
+    """内部信号：进度回调发现用户暂停/取消，用来立刻中断 yt-dlp。
+
+    不用 KeyboardInterrupt（会连整个进程一起打），也不用 yt-dlp 自己的
+    DownloadCancelled —— 那个只在特定阶段生效。这里抛什么都会被 yt-dlp
+    包成 DownloadError，调用方再看 self._stop 判断真实意图。
+    """
+
+
 class Download:
     """One download task: metadata + running state."""
-
     def __init__(
         self,
         id: str,
@@ -260,13 +397,15 @@ class Download:
         source: str = "manual",
         kind: str = "",
         audio_url: str = "",
+        yt_page: str = "",
+        yt_height: int = 0,
     ):
         self.id = id
         self.url = url
         self.final_url = url
         self.directory = directory
         self.filename = filename or "download"
-        self.connections = max(1, int(connections))
+        self.connections = _effective_connections(url, connections)
         self.headers: Dict[str, str] = dict(headers or {})
         self.proxy = proxy
         self.max_retries = max(0, int(max_retries))
@@ -280,6 +419,16 @@ class Download:
         # download it too and mux the two with ffmpeg — otherwise the video
         # would be silent.
         self.audio_url = audio_url or ""
+        # YouTube 专用通道：页面地址 + 目标高度。有值时整个任务交给 yt-dlp
+        # 下载（原因见 _run_ytdlp）。普通下载这两个字段都是空。
+        self.yt_page = yt_page or ""
+        self.yt_height = int(yt_height or 0)
+        self._yt_bytes = 0        # 当前这一路流已下载的字节
+        self._yt_completed = 0    # 之前几路流（视频轨）已完成的字节
+        self._yt_speed = 0.0
+        self._yt_proc = None      # 正在跑的 yt-dlp 子进程（暂停/取消要 terminate）
+        # 音视频合并失败的具体原因（哪一步断了）。None 表示没试过/成功。
+        self.mux_error: Optional[str] = None
 
         self.size = 0
         self.status = "queued"
@@ -331,8 +480,10 @@ class Download:
             "size": self.size,
             "status": self.status,
             "error": self.error,
+            # 音轨合并失败的具体一步（下载 / ffmpeg / 复查），出错弹窗用
+            "mux_error": self.mux_error,
             "downloaded": self.downloaded,
-            "speed": round(self.meter.speed()),
+            "speed": round(self._yt_speed if self.yt_page else self.meter.speed()),
             "connections": self.connections,
             "supports_range": self.supports_range,
             "transport": self.transport_name,
@@ -346,6 +497,9 @@ class Download:
             "progress": self.progress,
             "source": self.source,
             "kind": self.kind,
+            "audio_url": self.audio_url,
+            "yt_page": self.yt_page,
+            "yt_height": self.yt_height,
             "chunks": seg,
         }
 
@@ -364,6 +518,8 @@ class Download:
             "source": self.source,
             "kind": self.kind,
             "audio_url": self.audio_url,
+            "yt_page": self.yt_page,
+            "yt_height": self.yt_height,
             "chunks": self.segmenter.snapshot() if self.segmenter else [],
         }
 
@@ -372,7 +528,10 @@ class Download:
         self.final_url = data.get("final_url", self.url)
         self.filename = data.get("filename", self.filename)
         self.size = int(data.get("size", 0) or 0)
-        self.connections = int(data.get("connections", self.connections) or 1)
+        # 恢复时也要按地址特性收敛：老 meta 里可能存着 8 连接。
+        self.connections = _effective_connections(
+            self.final_url or self.url, int(data.get("connections", self.connections) or 1)
+        )
         self.supports_range = bool(data.get("supports_range"))
         self.transport_name = data.get("transport") or "native"
         self._transport = transport_mod.make(self.transport_name)
@@ -380,6 +539,8 @@ class Download:
         self.proxy = data.get("proxy")
         self.speed_limit = int(data.get("speed_limit", 0) or 0)
         self.audio_url = str(data.get("audio_url") or "")
+        self.yt_page = str(data.get("yt_page") or self.yt_page or "")
+        self.yt_height = int(data.get("yt_height") or self.yt_height or 0)
         self.limiter.set_rate(self.speed_limit)
         # Tasks persisted before 1.12.0 have no source/kind; keep "manual".
         self.source = normalize_source(data.get("source"), self.source)
@@ -393,22 +554,45 @@ class Download:
     # ---------- progress ----------
     @property
     def downloaded(self) -> int:
+        # yt-dlp 通道自己记账（视频轨 + 音频轨是两个文件，meter 一个都统计不到）
+        if self.yt_page:
+            if self.status == "completed" and self.size:
+                return self.size
+            return max(0, self._yt_bytes)
+        # 合流后文件变大（视频轨 + 音频轨），而 meter 只累计了视频轨的字节。
+        # 已完成的项再拿 meter 算，就会显示成「54.5 MB / 57.2 MB、95.3%」——
+        # 明明下完了却像没下完。完成态直接按最终文件大小报。
+        if self.status == "completed" and self.size:
+            return self.size
         if self.segmenter:
             return self.segmenter.downloaded()
         return self.meter.total
 
     @property
     def progress(self) -> float:
+        if self.yt_page:
+            # 视频轨下完还有音频轨，那会儿远没结束，不能像分块下载那样直接报 100
+            if self.status == "completed":
+                return 100.0
+            if not self.size:
+                return 0.0
+            return min(99.5, round(self.downloaded / self.size * 100, 2))
+        # 合流/完成阶段：字节已经全部到手，百分比只能是 100。
+        if self.status in ("merging", "completed"):
+            return 100.0
         if not self.size:
             return 0.0
-        return round(self.downloaded / self.size * 100, 2)
+        return min(100.0, round(self.downloaded / self.size * 100, 2))
 
     @property
     def eta(self) -> Optional[int]:
-        sp = self.meter.speed()
+        sp = self._yt_speed if self.yt_page else self.meter.speed()
         if not sp or not self.size:
             return None
-        return int((self.size - self.downloaded) / sp)
+        left = self.size - self.downloaded
+        if left <= 0:
+            return 0
+        return int(left / sp)
 
     # ---------- control ----------
     def set_event_callback(self, cb: Optional[Callable[[str, "Download"], None]]) -> None:
@@ -481,6 +665,9 @@ class Download:
 
     def start(self) -> None:
         """Run the download to completion in the calling thread."""
+        if self.yt_page:
+            self._start_ytdlp()
+            return
         try:
             self._prepare()
         except Exception as e:
@@ -548,6 +735,187 @@ class Download:
                     self._emit("error")
                     return
             time.sleep(0.2)
+
+    # ---------- YouTube：交给 yt-dlp（见 _run_ytdlp 的说明） ----------
+    def _start_ytdlp(self) -> None:
+        self.status = "downloading"
+        if self.started_at is None:
+            self.started_at = time.time()
+        self._stop.clear()
+        self._pause.clear()
+        self._emit("started")
+        self._run_ytdlp()
+
+    def _yt_progress(self, d: dict) -> None:
+        """yt-dlp 子进程的进度回报（格式见 ytdlp_bin._parse_progress）。"""
+        if self._stop.is_set():
+            return
+        st = d.get("status")
+        if st == "downloading":
+            self.status = "downloading"
+            done = int(d.get("downloaded") or 0)
+            total = int(d.get("total") or 0)
+            self._yt_bytes = self._yt_completed + done
+            if total:
+                self.size = self._yt_completed + total
+            sp = d.get("speed") or 0
+            if sp:
+                self._yt_speed = float(sp)
+            self._emit("progress")
+        elif st == "finished":
+            got = int(d.get("downloaded") or d.get("total") or 0)
+            if got:
+                self._yt_completed += got
+                self._yt_bytes = max(self._yt_bytes, self._yt_completed)
+            # 视频轨下完还要下音频 + ffmpeg 合流，别在这时报 100%
+            self.status = "merging"
+            self._emit("progress")
+        elif st == "merging":
+            self.status = "merging"
+            self._emit("progress")
+
+    def _yt_take_proc(self, proc) -> None:
+        self._yt_proc = proc
+
+    def _run_ytdlp(self) -> None:
+        """YouTube 任务专用下载通道。
+
+        为什么不复用下面的分块引擎：Google 从 2025 年起给 googlevideo 直链
+        加了「顺序分段」限制。实测同一个直链（带 cookie 也一样）：
+            Range: bytes=0-262143      → 206
+            Range: bytes=524288-786431 → 403 Forbidden
+            Range: bytes=0-（开放式）  → 403 Forbidden
+        也就是说直链只认「从头开始的一小段」，后续分段要按 JS 挑战现算签名。
+        自研引擎按 8 段并发去取，每个线程都撞 403 —— 这就是「YouTube 每次都
+        下载失败/进度 0 卡死」的真正原因。yt-dlp 会解挑战、按段重取、下完
+        自动合并音轨，所以整条任务交给它跑（用独立可执行文件，绕开 app 内嵌
+        的 Python 3.9 —— 新版 yt-dlp 要求 3.10+）。
+        """
+        from . import yt_resolve, ytdlp_bin
+
+        binp = ytdlp_bin.binary_path()
+        if not binp:
+            self.status = "error"
+            self.error = "找不到 yt-dlp 可执行文件（app 的 bin/yt-dlp 缺失或不可执行）"
+            self._emit("error")
+            return
+
+        stem = "zdm-" + self.id
+        cookie = (self.headers or {}).get("Cookie") or ""
+        cookie_path = None
+        if cookie:
+            try:
+                cookie_path = yt_resolve._cookiefile(cookie)
+            except Exception:  # noqa: BLE001
+                cookie_path = None
+        # Cookie 已经写成 cookiefile 了，别再用 -add-header 重复塞一遍
+        headers = {
+            k: v for k, v in (self.headers or {}).items() if k.lower() != "cookie"
+        }
+
+        try:
+            rc, err = ytdlp_bin.download(
+                binp,
+                self.yt_page,
+                fmt=yt_resolve.format_selector(self.yt_height),
+                outtmpl=os.path.join(self.directory, stem + ".%(ext)s"),
+                ffmpeg=_find_ffmpeg(),
+                cookie_path=cookie_path,
+                proxy=self.proxy,
+                headers=headers,
+                ratelimit=self.speed_limit,
+                timeout=self.timeout,
+                on_progress=self._yt_progress,
+                should_stop=self._stop.is_set,
+                on_proc=self._yt_take_proc,
+            )
+        finally:
+            self._yt_proc = None
+            if cookie_path:
+                try:
+                    os.remove(cookie_path)
+                except OSError:
+                    pass
+
+        if self.status == "canceled":
+            self._yt_cleanup(stem)
+            self._emit("canceled")
+            return
+        if self._stop.is_set():
+            self._yt_cleanup(stem, keep_partial=True)
+            self.status = "paused"
+            self._emit("paused")
+            return
+
+        path = self._yt_output(stem)
+        if (rc != 0 or err) or not path:
+            self._yt_cleanup(stem)
+            self.status = "error"
+            self.error = (err or f"yt-dlp 退出码 {rc}，没有产出文件").strip()[:400]
+            self._emit("error")
+            return
+
+        # 换成用户看得懂的文件名（扩展已经按标题算好了）
+        final = _unique_name(self.directory, self.filename or os.path.basename(path))
+        target = os.path.join(self.directory, final)
+        moved = None
+        last: Optional[Exception] = None
+        for attempt in (os.replace, shutil.move):
+            try:
+                attempt(path, target)
+                moved = target
+                break
+            except OSError as e:
+                moved = None
+                last = e
+        if not moved:
+            self.status = "error"
+            self.error = f"文件下完了但改名失败：{last}"
+            self._emit("error")
+            return
+        self.filename = final
+        try:
+            self.size = os.path.getsize(target)
+        except OSError:
+            pass
+        self._yt_bytes = self.size
+        try:
+            os.remove(self.meta_path)
+        except OSError:
+            pass
+        self.status = "completed"
+        self.completed_at = time.time()
+        self.error = None
+        self._emit("completed")
+
+    def _yt_output(self, stem: str) -> Optional[str]:
+        """找出 yt-dlp 真正产出的那个文件（合并后是 stem.mp4）。"""
+        import glob
+
+        cands = []
+        for p in glob.glob(os.path.join(self.directory, stem + ".*")):
+            if not os.path.isfile(p):
+                continue
+            if p.endswith((".part", ".ytdl", ".temp", ".tmp")):
+                continue
+            cands.append(p)
+        if not cands:
+            return None
+        # 多轨时选最大的那个（视频轨），音频轨通常小一个量级
+        return max(cands, key=os.path.getsize)
+
+    def _yt_cleanup(self, stem: str, keep_partial: bool = False) -> None:
+        """清掉 yt-dlp 的临时文件。暂停时保留 .part，方便续传。"""
+        import glob
+
+        for p in glob.glob(os.path.join(self.directory, stem + ".*")):
+            base = os.path.basename(p)
+            if keep_partial and (base.endswith(".part") or base.endswith(".ytdl")):
+                continue
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
     def _run_segmented(self) -> None:
         threads = []
@@ -678,10 +1046,28 @@ class Download:
         except OSError:
             pass
         # A DASH video track has no sound until the audio track is muxed in.
-        if self.audio_url and not self._mux_audio():
-            # The video itself is fine; only the audio is missing. Report it
-            # instead of throwing the whole file away.
-            self.error = "音频轨合并失败（缺少 ffmpeg 或音频下载失败），视频已保存但无声音"
+        # 嗅探路径只拿得到画面轨。B站可以用 URL 里的 cid + Referer 里的 BV
+        # 号反查一条音轨，先试着补齐，补到了就照常合流。
+        if not self.audio_url and self.kind == "video":
+            self.audio_url = self._bili_audio_url() or ""
+        if self.audio_url:
+            if not self._mux_audio():
+                # 视频本身是好的，只是没有声音：保留文件，但把失败的
+                # **具体一步**报出来（下载 / ffmpeg / 复查），否则用户
+                # 只能看到「合并失败」这种毫无信息量的结论。
+                self.error = "视频已保存但无声音 —— " + (
+                    self.mux_error or "音视频合并失败"
+                )
+        elif self.kind == "video":
+            # 调用方没配音频轨。DASH 视频轨天生无声 —— 以前这里静默当成功，
+            # 用户只看到「下载完成」却听不到声音，完全无从判断。
+            has_audio = _probe_has_audio(target)
+            if has_audio is False:
+                self.error = (
+                    "只下到了画面、没有音轨（这条直链是纯视频轨，"
+                    "没配上配套音频）。B站可点「下载此视频」重下；"
+                    "嗅探请等列表里出现音频条目后再推送。"
+                )
         self.status = "completed"
         self.completed_at = time.time()
         self._emit("completed")
@@ -738,31 +1124,131 @@ class Download:
         except OSError as e:
             return f"cannot save file: {last or e}（文件已在 {self.directory} 保留为 {os.path.basename(self.part_path)}）"
 
+    def _bili_audio_url(self) -> str:
+        """B站：从已下载的视频直链反查配套音频直链。
+
+        嗅探面板只能给出画面轨（音频是另一次请求，可能早于扩展注入或被
+        浏览器合并）。这时扩展侧配不到音频，但 URL 路径里有 cid
+        （/upgcxcode/99/91/<cid>/），Referer 里有 BV 号 —— 用这两个就能
+        调 playurl 自取一条音轨，不需要登录态。
+        """
+        import re as _re
+
+        url = self.url or ""
+        if not _re.search(r"/upgcxcode/|bilivideo\.(com|cn)", url, _re.I):
+            return ""
+        referer = ""
+        for k, v in (self.headers or {}).items():
+            if k.lower() == "referer":
+                referer = v or ""
+                break
+        bv = ""
+        for src in (referer, url):
+            m = _re.search(r"(BV[0-9A-Za-z]{10})", src or "")
+            if m:
+                bv = m.group(1)
+                break
+        m = _re.search(r"/upgcxcode/\d+/\d+/(\d+)/", url)
+        cid = m.group(1) if m else ""
+        if not bv or not cid:
+            return ""
+
+        api_headers = {
+            "User-Agent": DEFAULT_UA,
+            "Referer": "https://www.bilibili.com/",
+            "Origin": "https://www.bilibili.com",
+        }
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler(
+                {"http": self.proxy, "https": self.proxy} if self.proxy else {}
+            )
+        )
+
+        def get_json(u: str):
+            req = urllib.request.Request(u, headers=api_headers)
+            with opener.open(req, timeout=min(self.timeout or 10, 10)) as resp:
+                return json.loads(resp.read().decode("utf-8", "ignore"))
+
+        try:
+            view = get_json(
+                "https://api.bilibili.com/x/web-interface/view?bvid=" + bv
+            )
+            aid = (view.get("data") or {}).get("aid")
+            if not aid:
+                return ""
+            pu = get_json(
+                "https://api.bilibili.com/x/player/playurl"
+                f"?fnval=4048&fnver=0&fourk=1&avid={aid}&cid={cid}"
+            )
+            dash = ((pu.get("data") or {}).get("dash")) or {}
+            audios = [a for a in (dash.get("audio") or []) if a.get("baseUrl")]
+            if not audios:
+                return ""
+            audios.sort(key=lambda a: a.get("bandwidth") or 0, reverse=True)
+            return audios[0]["baseUrl"]
+        except Exception:
+            return ""
+
     def _mux_audio(self) -> bool:
         """Download the audio track and mux it into the video with ffmpeg.
 
         Returns True on success. On failure the video file is left untouched
-        (silent but playable) and the caller reports it.
+        (silent but playable) and ``self.mux_error`` records *which* step
+        broke — 单纯一句「合并失败」在音轨 CDN 403 时毫无用处。
         """
-        import shutil
         import subprocess
         import tempfile
 
-        ffmpeg = shutil.which("ffmpeg")
+        self.mux_error = ""
+        ffmpeg = _find_ffmpeg()
         if not ffmpeg:
+            self.mux_error = "找不到 ffmpeg，无法把音轨合进视频"
             return False
         video = self.target_path
         if not os.path.exists(video):
+            self.mux_error = "视频文件不在预期位置"
             return False
+
+        headers = dict(self.headers or {})
+        # CDN 对 Referer 极敏感（B站 bilivideo / YouTube googlevideo 缺了就
+        # 403）。没带就按站点补一个 —— 否则音轨必然下不下来。
+        if not any(k.lower() == "referer" for k in headers):
+            host = (urllib.parse.urlparse(self.audio_url).hostname or "").lower()
+            if "bilivideo" in host or "bilibili" in host:
+                headers["Referer"] = "https://www.bilibili.com/"
+            elif "googlevideo" in host or "youtube" in host:
+                headers["Referer"] = "https://www.youtube.com/"
+        if not any(k.lower() == "user-agent" for k in headers):
+            headers["User-Agent"] = DEFAULT_UA
+
         tmpdir = tempfile.mkdtemp(prefix="zdmmux")
         audio_path = os.path.join(tmpdir, "audio.bin")
+        out_path = video + ".merged.mp4"
         try:
-            # The audio track is a small file; a plain GET is enough.
-            req = urllib.request.Request(self.audio_url, headers=self.headers or {})
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(req, timeout=self.timeout) as resp, open(audio_path, "wb") as fh:
-                shutil.copyfileobj(resp, fh)
-            out_path = video + ".merged.mp4"
+            # 1) 音轨下载。Honour the task proxy (googlevideo 需要) but never
+            #    the sandbox's own proxy settings.
+            proxy = self.proxy
+            if proxy:
+                handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+            else:
+                handler = urllib.request.ProxyHandler({})
+            try:
+                req = urllib.request.Request(self.audio_url, headers=headers)
+                opener = urllib.request.build_opener(handler)
+                with opener.open(req, timeout=self.timeout) as resp, open(audio_path, "wb") as fh:
+                    shutil.copyfileobj(resp, fh)
+            except Exception as e:
+                self.mux_error = f"音轨下载失败：{e}"
+                return False
+            try:
+                if not os.path.getsize(audio_path):
+                    self.mux_error = "音轨下载到 0 字节（直链可能已过期）"
+                    return False
+            except OSError:
+                self.mux_error = "音轨文件写入失败"
+                return False
+
+            # 2) 合并
             cmd = [
                 ffmpeg, "-y", "-loglevel", "error",
                 "-i", video,
@@ -770,16 +1256,39 @@ class Download:
                 "-c", "copy", "-map", "0:v:0", "-map", "1:a:0",
                 out_path,
             ]
-            proc = subprocess.run(
-                cmd, capture_output=True, timeout=600,
-                env={**os.environ, "PATH": os.environ.get("PATH", "")},
-            )
-            if proc.returncode != 0 or not os.path.exists(out_path):
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, timeout=600,
+                    env={**os.environ, "PATH": os.environ.get("PATH", "")},
+                )
+            except Exception as e:
+                self.mux_error = f"ffmpeg 执行失败：{e}"
                 return False
-            os.replace(out_path, video)
+            if proc.returncode != 0 or not os.path.exists(out_path):
+                raw = (proc.stderr or b"").decode("utf-8", "ignore").strip()
+                tail = raw.splitlines()[-1] if raw else f"返回码 {proc.returncode}"
+                self.mux_error = f"ffmpeg 合并失败：{tail}"
+                return False
+
+            # 3) 落到正式文件名（目标可能正被播放器占用 → EPERM）
+            try:
+                os.replace(out_path, video)
+            except OSError:
+                try:
+                    os.remove(video)
+                    os.replace(out_path, video)
+                except OSError:
+                    shutil.copy2(out_path, video)
+            try:
+                self.size = os.path.getsize(video)
+            except OSError:
+                pass
+
+            # 4) 复查：音轨真的进去了吗（ffmpeg 返回 0 也可能没合上）
+            if _probe_has_audio(video) is False:
+                self.mux_error = "合并完成但文件里仍没有音轨"
+                return False
             return True
-        except Exception:
-            return False
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -818,6 +1327,7 @@ class Download:
     def pause(self) -> None:
         if self.status in ("downloading", "queued"):
             self._stop.set()
+            self._kill_yt_proc()
             if self.status == "downloading":
                 self.status = "paused"
             self._join_workers()
@@ -830,6 +1340,7 @@ class Download:
 
     def cancel(self, remove_files: bool = True) -> None:
         self._stop.set()
+        self._kill_yt_proc()
         self.status = "canceled"
         self._close_fd()
         if remove_files:
@@ -842,6 +1353,17 @@ class Download:
 
     def is_active(self) -> bool:
         return self.status == "downloading"
+
+    def _kill_yt_proc(self) -> None:
+        """停掉 yt-dlp 子进程。不 terminate 的话「暂停」要等它下完才生效。"""
+        proc = self._yt_proc
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _unique_name(directory: str, filename: str) -> str:

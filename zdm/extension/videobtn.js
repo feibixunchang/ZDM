@@ -230,6 +230,40 @@
   }, 1200);
   waitForBridge();
 
+  /* 把「itag → 字节数」这张表交给 background，让它把嗅探列表里
+     还挂着「大小未知」的条目补齐。YouTube 的播放列表经常在
+     playerResponse 就绪前就抓到了直链，那时还没有长度可读，所以要重试几次。 */
+  async function syncSnifferSizes() {
+    let sentLadder = false;
+    for (let i = 0; i < 8; i++) {
+      try {
+        // 先把「清晰度 → 大小」阶梯交过去：SABR 之后 videoplayback 的响应
+        // 里根本没有长度，面板上那几条「大小未知」只有这张表能解释清楚。
+        if (!sentLadder) {
+          const lad = await ask("videoLadder");
+          const rows = (lad && lad.rows) || [];
+          if (rows.length) {
+            sentLadder = true;
+            await send({
+              type: "sniffer-ladder",
+              pageUrl: location.href,
+              title: (lad && lad.title) || "",
+              rows,
+            });
+          }
+        }
+        const lens = await ask("contentLengths");
+        if (lens && Object.keys(lens).length) {
+          await send({ type: "sniffer-sizes", sizes: lens });
+          if (sentLadder) return;
+        }
+      } catch (_) {
+        /* 忽略，下一轮再试 */
+      }
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+  }
+
   async function boot() {
     try {
       const site = await ask("siteOf");
@@ -247,6 +281,7 @@
       S = cfg;
       PLAYER_SEL = cfg.player || "";
       start();
+      if (siteName === "youtube") syncSnifferSizes();
     } catch (e) {
       __err("boot: " + (e && e.message));
       console.warn("[ZDM] 初始化失败:", e && e.message, e && e.stack);
@@ -491,6 +526,10 @@
   }
   function scheduleClose() {
     cancelPendingClose();
+    // 鼠标已经进过菜单、或用户点过某一档：菜单从此不再自动关。
+    // 以前是鼠标一离开就 260ms 关闭，在 YouTube 播放器上（鼠标动一下
+    // 控制条就重排）菜单经常「只显示片刻」，用户手还没按下去就没了。
+    if (openMenu && openMenu.pinned) return;
     closeTimer = setTimeout(() => {
       closeTimer = null;
       closeMenu();
@@ -560,13 +599,60 @@
     return last;
   }
 
-  function renderFormats(menu, info) {
-    const head = document.createElement("h4");
+  /* 一行的身份。合并两次解析结果时靠它判断「这一档是不是已经有了」：
+     同一个高度只留一行，音频用码率区分。 */
+  function fmtKey(f) {
+    if (!f) return "";
+    if (f.height) return "h:" + f.height + ":" + (f.kind || "video");
+    if (f.kind === "audio") return "a:" + (f.bitrate || f.label || "");
+    return "l:" + (f.label || "");
+  }
+
+  /* opts.merge：把新结果并进已有菜单，而不是清空重建。
+     为什么必须这样：以前 yt-dlp 的结果回来时会 menu.textContent = ""，
+     用户正好点在某一行上，那一行就从 DOM 里被摘掉了 —— 表现就是
+     「点了完全没反应」。合并时只更新数据、补大小，行本身不动。 */
+  function renderFormats(menu, info, opts) {
+    const merge = !!(opts && opts.merge);
+    let head = merge ? menu.querySelector("h4") : null;
+    if (!merge) menu.textContent = "";
+    if (!head) {
+      head = document.createElement("h4");
+      menu.insertBefore(head, menu.firstChild);
+    }
     head.textContent = info.title || "选择清晰度";
-    menu.appendChild(head);
+
+    const existing = new Map();
+    if (merge) {
+      menu.querySelectorAll(".item").forEach((r) => {
+        if (r.dataset && r.dataset.key) existing.set(r.dataset.key, r);
+      });
+    }
+
     for (const f of info.formats) {
+      const key = fmtKey(f);
+      const old = key ? existing.get(key) : null;
+      if (old) {
+        // 已有这一档：把更好的一份数据换进去（ladder 那份常常没直链，
+        // yt-dlp 那份有），同时补上之前缺的大小。
+        if (!old.__zdmFmt || (!old.__zdmFmt.url && f.url)) old.__zdmFmt = f;
+        if (f.size) {
+          let sz = old.querySelector(".sz");
+          if (!sz) {
+            sz = document.createElement("span");
+            sz.className = "sz";
+            old.appendChild(sz);
+          }
+          sz.textContent = fmtSize(f.size);
+        }
+        continue;
+      }
       const row = document.createElement("div");
       row.className = "item";
+      row.dataset.key = key;
+      // 行自己记着最新的格式数据：后台解析结果合并进来时改的是它，
+      // 点击回调读的也是它，所以「先开菜单、后到直链」也能正常推送。
+      row.__zdmFmt = f;
       const lbl = document.createElement("span");
       lbl.className = "lbl";
       lbl.textContent = f.label;
@@ -577,34 +663,37 @@
         sz.textContent = fmtSize(f.size);
         row.appendChild(sz);
       }
-      row.addEventListener("click", async (ev) => {
-        ev.stopPropagation();
-        row.classList.add("done");
-        lbl.textContent = "推送中…";
-        const ok = await pushFormat(info, f, row);
-        if (ok) {
-          lbl.textContent = "已推送";
-          setTimeout(closeMenu, 900);
-        } else {
-          row.classList.remove("done");
-          row.classList.add("failed");
-          lbl.textContent = "推送失败，重试";
-          row.onclick = null;
-          row.addEventListener("click", async (e2) => {
-            e2.stopPropagation();
-            row.classList.remove("failed");
-            lbl.textContent = "推送中…";
-            if (await pushFormat(info, f, row)) {
-              lbl.textContent = "已推送";
-              setTimeout(closeMenu, 900);
-            } else {
-              row.classList.remove("failed");
-              lbl.textContent = "重试";
-            }
-          });
-        }
-      });
+      row.addEventListener("click", (ev) => onPick(info, row, ev));
       menu.appendChild(row);
+    }
+  }
+
+  /* 点某一行。重试也走这里 —— 以前失败分支会再挂一个 listener，
+     挂第二次之后同一个行有两套回调，状态就乱了。 */
+  async function onPick(info, row, ev) {
+    if (ev) ev.stopPropagation();
+    const menu = row.parentElement;
+    if (menu) menu.__zdmBusy = true;      // 别再让后台结果替换列表
+    if (openMenu) openMenu.pinned = true; // 用户已经在操作，菜单不许自动关
+    if (row.__zdmPending) return;
+    const lbl = row.querySelector(".lbl");
+    row.__zdmPending = true;
+    row.classList.remove("failed");
+    row.classList.add("done");
+    if (lbl) lbl.textContent = "推送中…";
+    let ok = false;
+    try {
+      ok = await pushFormat(info, row.__zdmFmt, row);
+    } finally {
+      row.__zdmPending = false;
+    }
+    if (ok) {
+      if (lbl) lbl.textContent = "已推送";
+      setTimeout(closeMenu, 900);
+    } else {
+      row.classList.remove("done");
+      row.classList.add("failed");
+      if (lbl) lbl.textContent = "推送失败，点这里重试";
     }
   }
 
@@ -639,55 +728,224 @@
       openMenu = { card, host, root, btn, at: Date.now() };
     }
 
+    // 鼠标/手指一进菜单，就把菜单钉住（不再自动关）。
+    // YouTube 播放器上鼠标一动控制条就重排，靠「离开 260ms 自动关」根本
+    // 点不到 —— 用户看到的就是菜单「只闪一下」。
+    const pin = () => {
+      if (openMenu && openMenu.root === root) openMenu.pinned = true;
+    };
+    root.addEventListener("mouseover", pin);
+    root.addEventListener("pointerdown", pin, true);
+
     // 卡片走 cardInfo，播放器走 playerFormats —— 播放页没有卡片，
     // 但播放器本身就是「正在播放的那个视频」。
     const isPlayer = onPlayer;
-    if (isPlayer) {
-      // 先给个「读取中」，播放器初始化完清晰度才会进来
-      menu.innerHTML = '<div class="tip">正在读取清晰度…</div>';
-    }
+    // 先给个「读取中」：B站卡片现在要按自己的 bvid/cid 去问接口，
+    // 播放器的清晰度也要等播放器初始化完才会进来。
+    menu.innerHTML = '<div class="tip">正在读取清晰度…</div>';
     // 桥接没起来时重试只是白等（MAIN world 里没人应答），一次就放弃
     const tries = bridgeReady() ? 3 : 1;
-    const info = isPlayer
-      ? await askWithRetry("playerFormats", tries)
-      : await ask("formatsForCard", cssPathOf(card));
+    let info;
+    const isYt = isPlayer && (siteName === "youtube" || (S && S.name === "youtube"));
+    let ytNote = "";
+    if (isYt) {
+      lastYtError = "";
+      const ytTitle = () =>
+        document.title.replace(/\s*-\s*YouTube\s*$/, "") || "YouTube 视频";
+      const putNote = (html) => {
+        const note = document.createElement("div");
+        note.className = "tip";
+        note.innerHTML = html;
+        menu.insertBefore(note, menu.firstChild);
+        return note;
+      };
+
+      /* 1) 先用播放器自己的阶梯铺菜单。
+         getAvailableQualityLevels() 是播放器本地状态：不请求接口、不看
+         登录态、不需要 PO token，几十毫秒就返回。用户以前点开菜单要盯着
+         「正在读取清晰度…」十几秒（yt-dlp 在跑），现在不会再出现了。 */
+      const ladder = await ytLadderFormats();
+      if (ladder.length) {
+        renderFormats(menu, {
+          site: "youtube",
+          title: ytTitle(),
+          pageUrl: location.href,
+          cover: "",
+          duration: "",
+          formats: ladder,
+          hasFormats: true,
+        });
+        putNote(
+          "<b>清晰度取自播放器本身</b><br>" +
+            "列表马上会补上本机解析的结果（含每档大小）。" +
+            "点某一档如果播放器没在拉那一路流，会自动改用本机解析的直链。"
+        );
+        /* 2) 后台再问一次本机 yt-dlp（带浏览器登录态）。它成功的话一次就能
+           给出完整阶梯和文件大小，而且点下去不用等切档。
+           注意用 merge 而不是重建列表：重建会在用户手指正按着的时候
+           把那一行从 DOM 里抽掉（「点了完全没反应」就是这么来的）。 */
+        resolveYouTube().then((better) => {
+          if (!better || !better.formats || !better.formats.length) return;
+          if (!openMenu || openMenu.root !== root) return; // 菜单已关/已换
+          renderFormats(menu, better, { merge: true });
+          putNote("<b>已用本机解析补齐</b><br>每档都带文件大小，点击直接推送。");
+        });
+        return;
+      }
+
+      /* 3) 播放器没给出阶梯（播放器没初始化 / 特殊页面）：
+           退回 yt-dlp，再退回嗅探直链，最后才是页面内 innertube。 */
+      let yinfo = await resolveYouTube();
+      if (!(yinfo && yinfo.formats && yinfo.formats.length)) {
+        const sniffed = await sniffedYtFormats();
+        if (sniffed.length) {
+          yinfo = {
+            site: "youtube",
+            title: ytTitle(),
+            pageUrl: location.href,
+            cover: "",
+            duration: "",
+            formats: sniffed,
+            hasFormats: true,
+          };
+          ytNote =
+            "<b>只拿到当前正在播放的清晰度</b><br>" +
+            "本机解析被 YouTube 拦了，这里给的是播放器自己正在用的直链。";
+        }
+      }
+      if (!(yinfo && yinfo.formats && yinfo.formats.length)) {
+        const local = await askWithRetry("playerFormats", tries);
+        if (local && local.formats && local.formats.length) {
+          yinfo = local;
+          ytNote =
+            "<b>只拿到 360P</b><br>" +
+            "本机解析被 YouTube 拦了，只能退回页面内解析。";
+        }
+      }
+      info = yinfo;
+    } else {
+      info = isPlayer
+        ? await askWithRetry("playerFormats", tries)
+        : await ask("formatsForCard", cssPathOf(card));
+    }
     if (!info) {
       menu.innerHTML = '<div class="tip">没能识别这个视频。</div>';
       return;
     }
 
     if (!info.formats || !info.formats.length) {
+      // 两条路都走空了，且 yt-dlp 明确说是人机验证/登录态问题：
+      // 给出能真正解决的建议，而不是笼统的「等几秒再试」。
+      if (isYt && /bot|Sign in|confirm|cookie/i.test(lastYtError || "")) {
+        menu.innerHTML =
+          '<div class="tip"><b>YouTube 要求人机验证</b><br>' +
+          "请先在浏览器里登录 YouTube 账号，然后刷新本页、<br>" +
+          "再点一次「下载此视频」。<br>" +
+          "<span style='opacity:.7'>" +
+          (lastYtError || "").slice(0, 140) +
+          "</span></div>";
+        return;
+      }
       // 站点能识别，但当前页面拿不到清晰度数据。
       // 播放页仍为空：多半是播放器还在加载，或该视频需要登录/付费。
       menu.innerHTML =
         '<div class="tip"><b>这个视频的清晰度还读不到</b><br>' +
         "播放器可能还在加载，或该视频需要登录 / 付费。<br>" +
-        "稍等几秒再点一次「下载此视频」试试。</div>";
+        "稍等几秒再点一次「下载此视频」试试。" +
+        (isYt && lastYtError
+          ? "<br><span style='opacity:.65'>" + escapeHtml(lastYtError).slice(0, 160) + "</span>"
+          : "") +
+        "</div>";
       return;
     }
 
     renderFormats(menu, info);
+    if (ytNote) {
+      const note = document.createElement("div");
+      note.className = "tip";
+      note.innerHTML =
+        ytNote +
+        "<br>登录 YouTube 后刷新本页再点一次，可拿到全部清晰度。";
+      menu.insertBefore(note, menu.firstChild);
+    }
   }
 
   /* ------------------------------------------------------------ 推送 */
 
   async function pushFormat(info, f, row) {
+    const lbl = row && row.querySelector(".lbl");
+    const setLbl = (s) => {
+      if (lbl) lbl.textContent = s;
+    };
+
+    // YouTube 有页面地址就够了：后端会用 yt-dlp 去下（直链只能从头顺序读
+    // 一小段，分块引擎下不动）。所以这里不用等「切清晰度再截直链」，
+    // 点下去就能立刻入队。
+    const ytPage =
+      info && info.site === "youtube" && f && f.height
+        ? info.pageUrl || location.href
+        : "";
+
+    if ((!f || !f.url) && !ytPage) {
+      // 播放器阶梯里的档位还没抓到直链（用户选的不是当前播放的那一档）。
+      // 先切档、再等浏览器把它拉下来，然后才真正推送。
+      if (f && f.ytLevel) {
+        setLbl("切换清晰度中…");
+        const got = await resolveYtLevel(f);
+        if (got) {
+          f = { ...f, url: got.url, size: got.size || f.size };
+          if (got.audio_url) f.audio_url = got.audio_url;
+        }
+      }
+      // 切档后仍然没抓到（YouTube 对正在缓冲的那一路根本不会再发请求，
+      // 光靠嗅探必然落空）。此时直接回退到本机 yt-dlp 的同清晰度直链 ——
+      // 以前到这一步就报「这一档没抓到直链，换一档试试」，等于把锅甩给用户。
+      if (!f || !f.url) {
+        setLbl("改用本机解析…");
+        const better = await resolveYouTube();
+        const list = (better && better.formats) || [];
+        const same = f && f.height
+          ? list.find((x) => x.height && x.height === f.height && x.url)
+          : null;
+        const pick = same || list.find((x) => x.url);
+        if (!pick || !pick.url) {
+          setLbl("没拿到直链，稍后再试");
+          return false;
+        }
+        f = {
+          ...pick,
+          size: pick.size || (f && f.size) || 0,
+          label: (f && f.label) || pick.label,
+        };
+      }
+    }
+
     const body = {
-      url: f.url,
+      // YouTube 走页面地址（后端用 yt-dlp 下）；其它站点用直链
+      url: f.url || ytPage,
       filename: buildName(info, f),
       referer: info.pageUrl,
-      source: "sniffer",
+      // 从播放界面的「下载此视频」推的，和嗅探面板里点「推送」不是一回事。
+      // 以前这里也写 sniffer，任务列表里全标成「嗅探」，排查时就被带偏了。
+      source: "player",
       kind: f.kind && f.kind.startsWith("audio") ? "audio" : "video",
       // 同站才带 cookie（跨站 CDN 不带）
       cookie: sameSite(f.url, info.pageUrl) ? document.cookie || undefined : undefined,
       // 站点标记，后端可以据此补 Cookie / 换 UA
       site: info.site,
     };
-    // DASH 的视频轨没有声音。把同站点的音频轨一起给后端，
-    // 由它下载后用 ffmpeg 合并成一个有声的视频。
+    // YouTube：把页面地址和想要的高度一起交给后端，由它用 yt-dlp 下载。
+    // 直链只能从头顺序读一小段（Google 的分段签名限制），分块引擎下不动，
+    // 所以真正干活的是后端的 yt-dlp 通道。
+    if (info.site === "youtube" && f.height) {
+      body.page_url = info.pageUrl;
+      body.height = f.height;
+    }
+    // DASH 的视频轨没有声音。优先用后端（yt-dlp）已经配好的 audio_url，
+    // 否则退而在本页格式列表里挑最好的音频轨，一起交给后端用 ffmpeg 合并。
     if (f.kind === "video") {
-      const audio = pickAudio(info.formats);
-      if (audio) body.audio_url = audio.url;
+      const audio = f.audio_url || (pickAudio(info.formats) || {}).url;
+      if (audio) body.audio_url = audio;
     }
     const r = await send({ type: "sniffer-push", item: body });
     if (!r || !r.ok) {
@@ -707,6 +965,247 @@
     return audios[0];
   }
 
+  /* YouTube 主路径：把视频页 URL + 本机浏览器里 YouTube 的登录态（含 HttpOnly
+     的 __Secure-1PSID 等）交给 ZDM，由它用 yt-dlp 解开 signatureCipher / n
+     参数得到可直接下载的直链（ghostdownload 同款思路：桌面端解密 + 带上登录态）。
+     YouTube 现在对未登录请求一律要求「人机验证」，所以必须带上浏览器 cookie。 */
+  let lastYtError = ""; // yt-dlp 解析失败原因，两种路径都失败时才提示用
+
+  /* itag → 高度。嗅探到的 googlevideo 直链只带 itag，靠它反推清晰度。
+     必须把 AV1(394-402) / VP9(330-337) 也列全：YouTube 现在默认给 AV1，
+     漏了它们反推出来就是 0，菜单只能写「当前播放」（截图里就是这现象）。 */
+  const YT_ITAG_HEIGHT = {
+    5: 240, 6: 270, 17: 144, 18: 360, 22: 720, 34: 360, 35: 480, 36: 240, 37: 1080,
+    43: 360, 44: 480, 45: 720, 46: 1080,
+    133: 240, 134: 360, 135: 480, 136: 720, 137: 1080, 138: 2160,
+    160: 144, 212: 480, 213: 480, 214: 720, 215: 720, 216: 1080, 217: 1080,
+    264: 1440, 266: 2160, 298: 720, 299: 1080, 302: 720, 303: 1080,
+    308: 1440, 315: 2160,
+    // VP9
+    330: 144, 331: 240, 332: 360, 333: 480, 334: 720, 335: 1080, 336: 1440, 337: 2160,
+    // AV1
+    394: 144, 395: 240, 396: 360, 397: 480, 398: 720, 399: 1080, 400: 1440,
+    401: 2160, 402: 4320,
+  };
+  const YT_AUDIO_ITAG = new Set([139, 140, 141, 171, 172, 249, 250, 251, 256, 258, 325, 328]);
+
+  /* 把嗅探到的 googlevideo 直链整理成「高度 → 直链」的索引。
+     YouTube 的播放器此刻正在用的 URL 是**已经签好名、浏览器自己刚拉过**的，
+     不需要解 signatureCipher、不需要登录态、也不需要 PO token。
+     唯一要处理的是 URL 里的 range 参数 —— 带着它只能取到那一小段。 */
+  async function sniffIndex() {
+    let items = [];
+    try {
+      const r = await send({ type: "sniffer-list" });
+      items = (r && r.items) || [];
+    } catch (_) {
+      return { byHeight: {}, audio: null };
+    }
+    const byHeight = {};
+    let audio = null;
+    for (const it of items) {
+      const u = it && it.url;
+      if (!u || !/\/videoplayback\?/.test(u)) continue;
+      let p;
+      try {
+        p = new URL(u);
+      } catch (_) {
+        continue;
+      }
+      const itag = Number(p.searchParams.get("itag") || 0);
+      const size = Number(p.searchParams.get("clen") || it.size || 0);
+      p.searchParams.delete("range");
+      p.searchParams.delete("rn");
+      const url = p.toString();
+      if (YT_AUDIO_ITAG.has(itag) || it.kind === "audio") {
+        if (!audio || size > audio.size) audio = { url, size };
+        continue;
+      }
+      const h = YT_ITAG_HEIGHT[itag] || 0;
+      if (!h) continue;
+      const prev = byHeight[h];
+      // 同一档会被切成很多段请求，留最大的那条
+      if (!prev || size > prev.size) byHeight[h] = { url, size, itag };
+    }
+    return { byHeight, audio };
+  }
+
+  async function sniffedYtFormats() {
+    const { byHeight, audio } = await sniffIndex();
+    return Object.keys(byHeight)
+      .map(Number)
+      .sort((a, b) => b - a)
+      .map((h) => ({
+        label: h + "P · 视频+音频",
+        url: byHeight[h].url,
+        kind: "video",
+        size: byHeight[h].size,
+        height: h,
+        itag: byHeight[h].itag,
+        audio_url: audio ? audio.url : undefined,
+      }));
+  }
+
+  /* itag → 字节数（页面里就有，见 sites.js 的 ytContentLens）。
+     再转成「高度 → 该高度最大的一份」，给菜单标大小用。 */
+  async function ytSizesByHeight() {
+    const lens = await ask("contentLengths");
+    const out = {};
+    for (const k of Object.keys(lens || {})) {
+      const h = YT_ITAG_HEIGHT[Number(k)] || 0;
+      if (!h) continue;
+      const n = Number(lens[k]) || 0;
+      if (n > (out[h] || 0)) out[h] = n;
+    }
+    return out;
+  }
+
+  /* 播放器自己的清晰度阶梯。
+
+     为什么这条最可靠：getAvailableQualityLevels() 是播放器本地状态，不请求
+     接口、不看登录态、不需要 PO token —— YouTube 拦得住 yt-dlp，拦不住
+     它自己已经加载好的播放器。点某一档时我们再让播放器切过去，浏览器就会
+     真的去拉那一路流，然后从嗅探里把直链截下来。 */
+  async function ytLadderFormats() {
+    const levels = await ask("qualityLevels");
+    if (!Array.isArray(levels) || !levels.length) return [];
+    const [{ byHeight, audio }, sizes] = await Promise.all([
+      sniffIndex(),
+      ytSizesByHeight(),
+    ]);
+    const audioUrl = audio ? audio.url : undefined;
+    // 嗅探里没有音频轨时（暂停播放、或音频段早于扩展注入）退回页面格式
+    // 列表；再拿不到就让后端去补 —— 总之不能把「会没声音」当正常交付。
+    let fallbackAudio = "";
+    if (!audioUrl) {
+      try {
+        const local = await ask("playerFormats");
+        const a = pickAudio(local && local.formats);
+        if (a) fallbackAudio = a.url;
+      } catch (_) {
+        fallbackAudio = "";
+      }
+    }
+    return levels.map((l) => ({
+      label: l.height + "P · 视频+音频",
+      url: (byHeight[l.height] || {}).url || "",
+      kind: "video",
+      size: (byHeight[l.height] || {}).size || sizes[l.height] || 0,
+      height: l.height,
+      ytLevel: l.q,
+      // 音频轨整段视频只有一条，任何档位都配它
+      audio_url: audioUrl || fallbackAudio || undefined,
+    }));
+  }
+
+  /* 选了一个「还没抓过」的档位：先切档，再轮询嗅探列表等它的直链出现。 */
+  async function resolveYtLevel(f) {
+    if (!f.ytLevel) return null;
+    // 该档的直链可能已经在嗅探列表里（刚才播过），先看一眼，别白切档。
+    let idx = await sniffIndex();
+    if (!(idx.byHeight[f.height] && idx.byHeight[f.height].url)) {
+      const r = await ask("setQuality", f.ytLevel);
+      if (!r || !r.ok) return null;
+    }
+    const start = Date.now();
+    const deadline = start + 12000;
+    let nudged = false;
+    while (Date.now() < deadline) {
+      idx = await sniffIndex();
+      const hit = idx.byHeight[f.height];
+      if (hit && hit.url) {
+        // 音频轨可能没被抓到（例如暂停状态播放器不再请求音频段）。
+        // 退回页面自己的格式列表里找一条，否则下下来没有声音。
+        let aUrl = idx.audio ? idx.audio.url : undefined;
+        if (!aUrl) {
+          const local = await ask("playerFormats");
+          const a = pickAudio(local && local.formats);
+          if (a) aUrl = a.url;
+        }
+        return { url: hit.url, size: hit.size, audio_url: aUrl };
+      }
+      // 缓冲还够时播放器压根不会重新请求 → 轻微 seek 推它一把。
+      if (!nudged && Date.now() - start > 2000) {
+        nudged = true;
+        await ask("nudge");
+      }
+      await new Promise((res) => setTimeout(res, 600));
+    }
+    return null;
+  }
+
+  /* 把后端解析出的「itag → 字节数」交给 background，补掉嗅探面板里的
+     「大小未知」。YouTube 的 videoplayback 分包响应既没有 Content-Length
+     也没有 Content-Range，URL 里也常常不带 clen，除了这张表没别的来源。 */
+  function syncBackendSizes(formats) {
+    const sizes = {};
+    for (const f of formats || []) {
+      if (f && f.itag && f.size) sizes[f.itag] = f.size;
+    }
+    if (Object.keys(sizes).length) send({ type: "sniffer-sizes", sizes }).catch(() => {});
+  }
+
+  /* 把后端解出的完整阶梯交给嗅探面板。面板上那几条 videoplayback 是
+     SABR 流式请求，本身没有「文件大小」这个概念（chunked，无 Content-Length
+     / Content-Range / itag / clen），所以只能按清晰度报大小。 */
+  function publishLadder(formats, title) {
+    const rows = [];
+    for (const f of formats || []) {
+      if (!f || !f.size) continue;
+      const h = Number(f.height) || 0;
+      if (!h) continue; // 纯音频轨不进面板，视频行自带配套音轨
+      rows.push({
+        height: h,
+        size: Number(f.size) || 0,
+        label: String(h) + "P" + (f.codec ? " · " + f.codec : ""),
+      });
+    }
+    if (!rows.length) return;
+    rows.sort((a, b) => b.height - a.height);
+    send({
+      type: "sniffer-ladder",
+      pageUrl: location.href,
+      title: title || "",
+      rows,
+    }).catch(() => {});
+  }
+
+  async function resolveYouTube() {
+    const url = location.href;
+    try {
+      // cookie 由 background（service worker）去取 —— 这里是 content script，
+      // chrome.cookies 在 isolated world 里**根本不存在**，以前在这里取只会
+      // 抛 TypeError 再被 catch 吞掉，于是「带登录态」从未真正发生过。
+      // 详见 background.js 的 youtubeCookieText()。
+      const r = await send({
+        type: "zdm-youtube-resolve",
+        url,
+      });
+      if (r && r.ok && r.formats && r.formats.length) {
+        syncBackendSizes(r.formats);
+        publishLadder(r.formats, r.title);
+        return {
+          site: "youtube",
+          title: r.title || "YouTube 视频",
+          pageUrl: url,
+          cover: "",
+          duration: "",
+          formats: r.formats,
+          hasFormats: true,
+        };
+      }
+      if (r && r.error) {
+        // 先只记下来不弹提示：还要试一次页面内 innertube（它自带浏览器
+        // 登录态，很可能直接成功）。两条路都失败时才在菜单里说明原因。
+        lastYtError = r.error;
+        dbg("yt-dlp 解析失败: " + r.error);
+      }
+    } catch (e) {
+      dbg("yt-dlp 解析异常: " + (e && e.message));
+    }
+    return null;
+  }
+
   function sameSite(a, b) {
     try {
       const x = new URL(a).hostname.toLowerCase();
@@ -715,6 +1214,16 @@
     } catch (_) {
       return false;
     }
+  }
+
+  /* 要拼进 innerHTML 的外部文本（解析器报错原因）必须先转义，
+     否则里面的 < > 会被当成标签，把提示整段吃掉。 */
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   function buildName(info, f) {
@@ -838,7 +1347,15 @@
   }
 
   function onClick(e) {
-    if (!isOurButton(e)) return;
+    if (!isOurButton(e)) {
+      // 菜单现在是「钉住」的（不会因为鼠标挪开而关），所以必须给一个
+      // 明确的关闭方式：点到菜单以外的任何地方就收起。
+      if (openMenu) {
+        const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+        if (path.indexOf(openMenu.host) === -1) closeMenu();
+      }
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     // 从 composedPath 里找出按钮所属的 host（它记着对应的卡片 / 播放器）。

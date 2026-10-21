@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Build distributable packages for ZDM on all three platforms.
+"""Build distributable packages for ZDM.
 
 Outputs (into ./dist):
-  - zdm_1.13.0_amd64.deb       Linux  (self-contained: bundled CPython + PyQt5)
+  - zdm_1.14.7_amd64.deb       Linux  (self-contained: bundled CPython + PyQt5)
   - zdm-linux-amd64.tar.gz     Linux  (same bundle, user-level install, no root)
-  - ZDM-PyQt5-Setup-1.13.0.exe Windows (.exe self-extracting installer, no admin)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
-The Windows .exe is assembled on Linux with 7-Zip's SFX module (7zS.sfx):
-    [ 7zS.sfx stub ] + [ installer config ] + [ archive.7z ]
-7zS.sfx extracts the payload to a temp dir and runs setup.cmd, which invokes
-install.ps1. The macOS .dmg itself must be produced on a Mac (hdiutil is
-macOS-only); build_macos_dmg.sh does that in one command.
+Windows 只有原生客户端（C#/WPF），由 .github/workflows/build-windows.yml 出
+ZDM-Setup-*.exe；这里不再构建 PyQt5 版 Windows 安装包 —— 两个安装包并存会让人
+装错，而且 PyQt5 版会覆盖原生版的安装目录。
+
+The macOS .dmg itself must be produced on a Mac (hdiutil is macOS-only);
+build_macos_dmg.sh does that in one command.
 """
 import os
 import shutil
@@ -21,22 +21,12 @@ import sys
 ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
-SFX = os.path.join(ROOT, "7zS.sfx")
-VERSION = "1.13.0"
+VERSION = "1.14.7"
 
 
 def which(cmd):
     from shutil import which as w
     return w(cmd)
-
-
-EXE7Z = None
-for c in ("7z", "7za", "7zr"):
-    if which(c):
-        EXE7Z = c
-        break
-if not EXE7Z:
-    sys.exit("ERROR: 7z not found on PATH")
 
 
 def run(*args, cwd=None):
@@ -57,7 +47,15 @@ def stage_files(dst):
     for item in ("zdm", "web", "extension"):
         shutil.copytree(os.path.join(ZDM, item), os.path.join(dst, item),
                         dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("__pycache__"))
+                        # yt_dlp_pkg 是旧的 pip 包目录（25MB，且要求 Python 3.10+），
+                        # 现在用 bin/yt-dlp 二进制，别把它再拖进安装包。
+                        ignore=shutil.ignore_patterns("__pycache__", "yt_dlp_pkg"))
+    # 随包的 yt-dlp 单文件二进制（YouTube 解析/下载靠它，pip 包在 Python 3.9 上
+    # 直接抛 "unsupported version of Python"）。它跟 zdm/ 平级，不在包目录里，
+    # 上面那个循环带不上来 —— 漏了的话「打包版 YouTube 不能用」而源码跑得好好的。
+    bin_src = os.path.join(ZDM, "bin")
+    if os.path.isdir(bin_src):
+        shutil.copytree(bin_src, os.path.join(dst, "bin"), dirs_exist_ok=True)
     for f in ("zdm.py", "gui.py", "theme.py", "README.md", "install.sh",
               "zdm_native_host.py",
               "install.ps1", "install.bat", "setup.cmd", "build_macos_dmg.sh",
@@ -92,38 +90,6 @@ def build_linux_native():
         for f in glob.glob(os.path.join(out, pat)):
             shutil.copy2(f, os.path.join(DIST, os.path.basename(f)))
             print(f"    -> dist/{os.path.basename(f)}")
-
-
-# ----------------------------------------------------------------- Windows exe
-def build_windows_exe():
-    d = os.path.join(DIST, "zdm-windows")
-    if os.path.exists(d):
-        shutil.rmtree(d)
-    stage_files(d)
-    # Build the 7z payload (relative paths, from inside the staged dir).
-    archive = os.path.join(DIST, "zdm-payload.7z")
-    if os.path.exists(archive):
-        os.remove(archive)
-    run(EXE7Z, "a", "-t7z", "-mx=5", "-y", archive, ".", cwd=d)
-
-    config = (
-        ";!@Install@!UTF-8!\n"
-        'Title="ZDM 下载管理器"\n'
-        'BeginPrompt="安装 ZDM 下载管理器（多线程下载 + 浏览器扩展接管）？"\n'
-        'RunProgram="setup.cmd"\n'
-        ";!@InstallEnd@!\n"
-    )
-    cfg = os.path.join(DIST, "sfx_config.txt")
-    with open(cfg, "w", encoding="utf-8") as fh:
-        fh.write(config)
-
-    out = os.path.join(DIST, f"ZDM-PyQt5-Setup-{VERSION}.exe")
-    with open(out, "wb") as out_fh:
-        for part in (SFX, cfg, archive):
-            with open(part, "rb") as pf:
-                shutil.copyfileobj(pf, out_fh)
-    os.chmod(out, 0o755)
-    print(f"built {out}")
 
 
 # ----------------------------------------------------------------- macOS zip
@@ -198,16 +164,13 @@ def main():
     # sitting next to a freshly built zdm_1.13.0_all.deb makes any downstream
     # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
     import glob
-    for pat in ("dist/zdm_*.deb", "dist/ZDM-PyQt5-Setup-*.exe",
-                "dist/zdm-linux*.tar.gz", "dist/zdm-macos.zip"):
+    for pat in ("dist/zdm_*.deb", "dist/zdm-linux*.tar.gz", "dist/zdm-macos.zip"):
         for stale in glob.glob(os.path.join(ROOT, pat)):
             if os.path.isfile(stale):
                 os.remove(stale)
                 print(f"    (removed stale {os.path.basename(stale)})")
     print("==> Linux native bundle + .deb + portable tarball")
     build_linux_native()
-    print("==> Windows .exe (7z SFX)")
-    build_windows_exe()
     print("==> macOS .zip (ZDM.app + dmg script)")
     build_macos_zip()
     # tidy intermediates
@@ -234,8 +197,9 @@ def main():
             f"       若要 .dmg：在 Mac 上执行包内 build_macos_dmg.sh 一键生成 ZDM-{VERSION}.dmg\n"
             "       （.dmg 需 macOS 的 hdiutil 生成，无法在 Linux 上构建）\n\n"
             "3) Windows\n"
-            f"   - ZDM-PyQt5-Setup-{VERSION}.exe\n"
-            "       双击运行，按提示安装（用户级、无需管理员；自动检测/安装 Python 与 PyQt5）\n\n"
+            "   - ZDM-Setup-x.y.z.exe   （原生 C#/WPF 客户端，由 CI 的 build-windows.yml 产出）\n"
+            "       本脚本不再构建 Windows 的 PyQt5 安装包：原生版功能一致、体积更小，\n"
+            "       两个安装包长期并存只会让人装错（PyQt5 版还会覆盖原生版的安装目录）。\n\n"
             f"本版新增（v{VERSION}）：\n"
             "  · Linux 安装包改为真正的自包含原生版：内嵌 CPython + PyQt5/Qt，"
             "不再依赖系统 python3 / pip（旧包只有 87KB，桌面窗口其实起不来）\n"

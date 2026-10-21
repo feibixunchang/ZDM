@@ -81,7 +81,9 @@ jobs:
     # ubuntu-22.04 (glibc 2.35) is the oldest runner still offered, so the
     # frozen bundle runs on Ubuntu 22.04+/Debian 12+/Mint 21+. Newer runners
     # would raise the glibc floor and break those distros.
-    # Ubuntu also has dpkg-deb, and the Windows .exe is assembled here with 7zS.
+    # Ubuntu also has dpkg-deb. Windows 的安装包不在这里产出 —— 原生客户端是
+    # C#/WPF，由 build-windows.yml 单独构建；PyQt5 版已经下线（两个安装包并存
+    # 会让用户装错，且 PyQt5 版会覆盖原生版的安装目录）。
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +103,21 @@ jobs:
           dpkg-deb --version | head -1
           xvfb-run --help >/dev/null && echo "xvfb ok"
 
-      - name: Build packages (Linux native bundle + .deb + Windows exe)
+      # YouTube 解析/下载靠随包的 yt-dlp 单文件二进制（pip 包要求 Python 3.10+，
+      # 内嵌解释器是 3.9 时 import 会直接失败）。仓库不存这个 30MB 的二进制，
+      # 构建时按固定版本取，避免「源码跑得好、装完 YouTube 不能用」。
+      # 版本要和本地部署的那份一致，别用 latest —— 否则同一个 tag 两次构建结果不同。
+      - name: Fetch bundled yt-dlp (Linux)
+        run: |
+          set -euo pipefail
+          V=2026.08.19
+          mkdir -p zdm/bin
+          curl -fsSL --retry 3 -o zdm/bin/yt-dlp \
+            "https://github.com/yt-dlp/yt-dlp/releases/download/${V}/yt-dlp_linux"
+          chmod +x zdm/bin/yt-dlp
+          zdm/bin/yt-dlp --version
+
+      - name: Build packages (Linux native bundle + .deb)
         run: python3 build_dist.py
 
       - name: List artifacts
@@ -189,7 +205,6 @@ jobs:
           path: |
             dist/zdm_*.deb
             dist/zdm-linux-*.tar.gz
-            dist/ZDM-PyQt5-Setup-*.exe
             dist/README.txt
           if-no-files-found: error
 
@@ -201,7 +216,6 @@ jobs:
           files: |
             dist/zdm_*.deb
             dist/zdm-linux-*.tar.gz
-            dist/ZDM-PyQt5-Setup-*.exe
           fail_on_unmatched_files: false
 
   macos:
@@ -231,6 +245,18 @@ jobs:
           fi
           echo "building version ${{ steps.ver.outputs.version }}"
 
+      # 同 Linux：YouTube 走随包的单文件 yt-dlp，pip 包在 3.9 上 import 会抛
+      # "unsupported version of Python"。固定版本，别用 latest。
+      - name: Fetch bundled yt-dlp (macOS)
+        run: |
+          set -euo pipefail
+          V=2026.08.19
+          mkdir -p zdm/bin
+          curl -fsSL --retry 3 -o zdm/bin/yt-dlp \
+            "https://github.com/yt-dlp/yt-dlp/releases/download/${V}/yt-dlp_macos"
+          chmod +x zdm/bin/yt-dlp
+          zdm/bin/yt-dlp --version
+
       - name: Build ZDM.app and .dmg (with launch smoke test)
         run: |
           bash zdm/build_macos_app.sh "$RUNNER_TEMP/zdm-macos" "${{ steps.ver.outputs.version }}"
@@ -243,6 +269,9 @@ jobs:
           test -f "$RES/theme.py"
           test -f "$RES/zdm/update.py"
           test -f "$RES/zdm/desktop.py"
+          # 随包的 yt-dlp 二进制：漏了就只剩「源码能用、装完不能用」
+          test -x "$RES/bin/yt-dlp" || { echo "ERROR: 随包 yt-dlp 缺失或不可执行"; exit 1; }
+          "$RES/bin/yt-dlp" --version
           PLIST_V=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
           SRC_V=$(grep -E '^__version__' zdm/zdm/__init__.py | head -1 | cut -d'"' -f2)
           echo "plist=$PLIST_V source=$SRC_V"

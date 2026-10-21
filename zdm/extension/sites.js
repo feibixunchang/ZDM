@@ -71,6 +71,208 @@
      （url 字段直接可用），也不用做 n 参数变换。MAIN world 里 fetch 是
      同源请求，没有 CORS 问题。 */
   let ytApiCache = null; // { videoId, at, formats }
+
+  /* YouTube 播放器自己知道「这个视频有哪些档位」—— getAvailableQualityLevels()
+     返回的就是真实阶梯。它不依赖任何接口/登录态/PO token，永远可用。
+     所以 yt-dlp 被拦时，用这个给用户一份真实的清晰度列表。 */
+  const YT_LEVEL_HEIGHT = {
+    highres: 4320,
+    hd2880: 2880,
+    hd2160: 2160,
+    hd1440: 1440,
+    hd1080: 1080,
+    hd720: 720,
+    large: 480,
+    medium: 360,
+    small: 240,
+    tiny: 144,
+  };
+
+  function ytPlayerEl() {
+    try {
+      return (
+        document.getElementById("movie_player") ||
+        document.querySelector("#movie_player, .html5-video-player")
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ytQualityLevels() {
+    const p = ytPlayerEl();
+    if (!p || typeof p.getAvailableQualityLevels !== "function") return [];
+    let levels = [];
+    try {
+      levels = p.getAvailableQualityLevels() || [];
+    } catch (_) {
+      return [];
+    }
+    const seen = new Set();
+    const out = [];
+    for (const q of levels) {
+      const h = YT_LEVEL_HEIGHT[String(q)] || 0;
+      if (!h || seen.has(h)) continue;
+      seen.add(h);
+      out.push({ q: String(q), height: h });
+    }
+    out.sort((a, b) => b.height - a.height);
+    return out;
+  }
+
+  /* 让播放器切到某一档：切了之后浏览器会真的去拉那一路视频的分段，
+     我们靠 webRequest 把它抓下来（就是「嗅探」那条链路）。 */
+  function ytSetQuality(q) {
+    const p = ytPlayerEl();
+    if (!p) return false;
+    try {
+      if (typeof p.setPlaybackQualityRange === "function") p.setPlaybackQualityRange(q, q);
+      if (typeof p.setPlaybackQuality === "function") p.setPlaybackQuality(q);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /* 让播放器「重新拉一次流」。
+     setPlaybackQualityRange 只是把上限调高，如果当前档位的 buffer 还够，
+     YouTube 根本不会发新请求 —— 我们等 9 秒也抓不到那一档的直链，
+     菜单就一直停在「切换清晰度中…」。同位置 seek 一小步会强制它重新
+     解析 manifest 并按新档位取流。 */
+  function ytNudge() {
+    const p = ytPlayerEl();
+    if (!p) return false;
+    try {
+      const t = typeof p.getCurrentTime === "function" ? p.getCurrentTime() : 0;
+      if (typeof p.seekTo === "function") p.seekTo(Math.max(0, t + 0.4), true);
+      if (typeof p.playVideo === "function") p.playVideo();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /* 统一拿到 streamingData。
+
+     **坑（曾经让「大小未知」修了好几轮都没修好）**：ytPlayerResponse()
+     返回的已经是 `streamingData` 本身，不是整个 playerResponse。之前这里写成
+     `pr = ytPlayerResponse(); const sd = pr && pr.streamingData`，等于取
+     `streamingData.streamingData` → undefined，于是阶梯和 itag 表**永远是空的**，
+     面板就一直是「大小未知」，而且一点报错都没有。
+     这里做一层归一化，两种形态（整包 / 只给 streamingData）都吃得下。
+
+     **顺序也很重要**：先问播放器实例（getPlayerResponse），再退回页面变量。
+     YouTube 是软导航 —— 点右侧推荐换视频不会重载页面，window.ytInitialPlayerResponse
+     还停在上一个视频上；用它就会把上一部的字节数报给这一部（比「未知」更糟）。 */
+  function ytStreaming() {
+    const unwrap = (o) => {
+      if (!o) return null;
+      // 整包 → 取 streamingData；已经是 streamingData 就直接用
+      if (!o.formats && !o.adaptiveFormats && o.streamingData) return o.streamingData;
+      if (o.formats || o.adaptiveFormats || o.serverAbrStreamingUrl) return o;
+      return null;
+    };
+    // 1) 播放器实例：永远跟着当前视频走
+    try {
+      const p = document.getElementById("movie_player");
+      if (p && typeof p.getPlayerResponse === "function") {
+        const sd = unwrap(p.getPlayerResponse());
+        if (sd) return sd;
+      }
+    } catch (_) {
+      /* 播放器还没准备好 */
+    }
+    // 2) ytPlayerResponse()（内部依次探 ytInitialPlayerResponse / ytplayer.config /
+    //    movie_player，返回的已经是 streamingData）
+    try {
+      const sd = unwrap(ytPlayerResponse());
+      if (sd) return sd;
+    } catch (_) {
+      /* ignore */
+    }
+    // 3) 兜底：页面变量（首屏时 getPlayerResponse 可能还没有）
+    try {
+      return unwrap(window.ytInitialPlayerResponse);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /* itag → 字节数。
+
+     关键点：adaptiveFormats 里的 contentLength **即使 URL 被 signatureCipher
+     加密也照样存在**（加密的只是直链，不是元数据）。所以「嗅探到大小」根本
+     不需要发 Range 请求去问服务端 —— 那张表页面里就有，直接读。 */
+  function ytContentLens() {
+    const sd = ytStreaming();
+    const out = {};
+    const add = (list) => {
+      for (const f of list || []) {
+        const it = num(f && f.itag);
+        const len = num(f && f.contentLength);
+        if (it && len) out[it] = len;
+      }
+    };
+    if (sd) {
+      add(sd.formats);
+      add(sd.adaptiveFormats);
+    }
+    return out;
+  }
+
+  /* 「清晰度 → 大小」阶梯（给嗅探面板用）。
+
+     为什么需要它：YouTube 现在大量走 SABR，播放器对 /videoplayback 发的
+     是一条 POST 流式请求 —— 响应是 chunked，既没有 Content-Length 也没有
+     Content-Range，URL 里也没有 itag/clen。所以「按这条直链报大小」这条路
+     对这个请求本身是**不可能**走通的（那条流根本没有"文件大小"这个概念）。
+     能准确说出「1080P 有多大」的地方只有一个：playerResponse 的
+     adaptiveFormats[].contentLength。这里把它整理成阶梯交给面板。 */
+  function ytLadder() {
+    const sd = ytStreaming();
+    if (!sd) return { rows: [], title: "" };
+    // 标题优先用 document.title：软导航后它立刻是新的，
+    // 而 ytInitialPlayerResponse.videoDetails 还停在上一个视频。
+    let title = (document.title || "").replace(/\s*[-–]\s*YouTube\s*$/i, "").trim();
+    if (!title) {
+      try {
+        const pr = window.ytInitialPlayerResponse;
+        title = (pr && pr.videoDetails && pr.videoDetails.title) || "";
+      } catch (_) {
+        title = "";
+      }
+    }
+    const best = new Map(); // height -> row
+    const add = (f) => {
+      const m = (f && f.mimeType) || "";
+      if (!m.startsWith("video/")) return;
+      const h = num(f.height);
+      const len = num(f.contentLength);
+      if (!h || !len) return;
+      const codec = /avc1/.test(m)
+        ? "H.264"
+        : /vp0?9/.test(m)
+        ? "VP9"
+        : /av01/.test(m)
+        ? "AV1"
+        : "";
+      const cur = best.get(h);
+      // 同一高度优先 H.264（兼容性最好），其次保留最先出现的
+      if (!cur || (codec === "H.264" && cur.codec !== "H.264")) {
+        best.set(h, {
+          height: h,
+          size: len,
+          codec: codec,
+          label: h + "P" + (codec ? " · " + codec : ""),
+        });
+      }
+    };
+    (sd.formats || []).forEach(add);
+    (sd.adaptiveFormats || []).forEach(add);
+    const rows = [...best.values()].sort((a, b) => b.height - a.height);
+    return { rows, title };
+  }
+
   function ytVideoId() {
     try {
       const p = document.getElementById("movie_player");
@@ -108,6 +310,9 @@
           clientName: "ANDROID",
           clientVersion: "19.09.37",
           androidSdkVersion: 30,
+          // 不带这个 UA，YouTube 会拒绝 ANDROID 客户端或退回成加密直链
+          userAgent:
+            "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
           hl: "en",
           gl: "US",
         },
@@ -118,7 +323,15 @@
         "/youtubei/v1/player" + (key ? "?key=" + encodeURIComponent(key) + "&prettyPrint=false" : "?prettyPrint=false"),
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            // 这两个头是 ANDROID innertube 返回明文直链的关键
+            "User-Agent":
+              "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+            "X-Goog-Api-Format-Version": "2",
+            Accept: "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
           body: JSON.stringify(body),
         }
       );
@@ -344,18 +557,190 @@
     return parts.join(" · ");
   }
 
-  function biliFormats() {
-    const dash = biliDashInfo();
+  /* ---- 认出「这个是哪个视频」 ----------------------------------------
+
+     B站新版播放页是软导航（点右侧推荐视频不重载页面），而 window.__playinfo__
+     是**首次加载**时写进去的，切视频后不会更新。所以只要沿用页面里的
+     __playinfo__，就会出现「标题是新的、内容是上一个视频」——
+     必须按当前 bvid/cid 重新取一次数据。 */
+
+  const BILI_API = "https://api.bilibili.com";
+  const BILI_FNVAL = 4048; // dash + 4K + HDR + 杜比 + AV1
+
+  function biliPageNo(url) {
+    try {
+      const p = num(new URL(url, location.href).searchParams.get("p"));
+      return p > 0 ? p : 1;
+    } catch (_) {
+      return 1;
+    }
+  }
+
+  function biliKey(pageUrl) {
+    const u = String(pageUrl || location.href);
+    const bv = /\/video\/(BV[0-9A-Za-z]+)/.exec(u);
+    if (bv) return { bvid: bv[1], p: biliPageNo(u) };
+    const av = /\/video\/av(\d+)/i.exec(u);
+    if (av) return { avid: av[1], p: biliPageNo(u) };
+    return null;
+  }
+
+  function biliGetJson(url) {
+    return fetch(url, {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    }).then((r) => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    });
+  }
+
+  // cid 缓存：key = bvid/avid#p
+  const biliCidCache = {};
+  async function biliCidFor(key) {
+    const ck = (key.bvid || "av" + key.avid) + "#" + key.p;
+    if (biliCidCache[ck]) return biliCidCache[ck];
+    // 页面状态只有在「当前页面就是这个视频」时才可信
+    try {
+      const st = window.__INITIAL_STATE__;
+      const sameBv =
+        st && key.bvid && (st.bvid === key.bvid || (st.videoData && st.videoData.bvid === key.bvid));
+      if (sameBv) {
+        const sameP = !st.p || num(st.p) === key.p;
+        const cid = (st.videoData && st.videoData.cid) || st.cid;
+        if (cid && sameP) {
+          biliCidCache[ck] = cid;
+          return cid;
+        }
+      }
+    } catch (_) {
+      /* 没有页面状态就查接口 */
+    }
+    const q = key.bvid ? "bvid=" + encodeURIComponent(key.bvid) : "aid=" + key.avid;
+    const j = await biliGetJson(BILI_API + "/x/player/pagelist?" + q);
+    const pages = j && j.data;
+    if (Array.isArray(pages) && pages.length) {
+      const pg = pages[Math.min(key.p, pages.length) - 1];
+      if (pg && pg.cid) {
+        biliCidCache[ck] = pg.cid;
+        return pg.cid;
+      }
+    }
+    return 0;
+  }
+
+  // playurl 结果缓存：cid -> {at, data}
+  const biliPlayCache = {};
+  async function biliPlayData(key, cid) {
+    const hit = biliPlayCache[cid];
+    if (hit && Date.now() - hit.at < 300000) return hit.data;
+    const q = key.bvid ? "bvid=" + encodeURIComponent(key.bvid) : "aid=" + key.avid;
+    const url =
+      BILI_API + "/x/player/playurl?fnval=" + BILI_FNVAL + "&fnver=0&fourk=1&qn=127&" + q + "&cid=" + cid;
+    const j = await biliGetJson(url);
+    if (j && j.code === 0 && j.data && (j.data.dash || j.data.durl)) {
+      biliPlayCache[cid] = { at: Date.now(), data: j.data };
+      return j.data;
+    }
+    throw new Error("playurl code=" + ((j && j.code) || "?") + " " + ((j && j.message) || ""));
+  }
+
+  /* 直链 URL 一定带着 cid（/upgcxcode/xx/xx/<cid>/<cid>-1-...m4s），
+     用它判断「这份数据是不是当前视频的」。 */
+  function biliDataIsForCid(data, cid) {
+    if (!data || !cid) return false;
+    const lists = [];
+    if (data.dash) lists.push(data.dash.video || [], data.dash.audio || []);
+    if (data.video) lists.push(data.video, data.audio || []);
+    if (data.durl) lists.push(data.durl);
+    for (const list of lists) {
+      for (const it of list) {
+        const u = it && (it.baseUrl || it.base_url || it.url);
+        if (u && (u.indexOf("/" + cid + "/") >= 0 || u.indexOf("/" + cid + "-") >= 0)) return true;
+      }
+    }
+    return false;
+  }
+
+  function biliPickDash(data) {
+    if (!data) return null;
+    if (data.dash) return data.dash;
+    if (data.video || data.durl) return data;
+    return null;
+  }
+
+  async function biliResolve(pageUrl) {
+    const key = biliKey(pageUrl);
+    if (!key) return null;
+    let cid = 0;
+    try {
+      cid = await biliCidFor(key);
+    } catch (_) {
+      cid = 0;
+    }
+
+    // 1) 页面自带的 __playinfo__：最快，但必须按 cid 校验（软导航后是旧的）
+    const inline = biliPickDash(biliDashInfo());
+    if (inline && (!cid || biliDataIsForCid(inline, cid))) return inline;
+
+    // 2) 直接问接口（最准）
+    if (cid) {
+      try {
+        const fresh = biliPickDash(await biliPlayData(key, cid));
+        if (fresh) return fresh;
+      } catch (_) {
+        /* 接口失败再退回页面数据 */
+      }
+    }
+
+    // 3) 都拿不到才用页面数据（可能不准，但好过空列表）
+    return inline || null;
+  }
+
+  async function biliFormats(pageUrl) {
+    const dash = await biliResolve(pageUrl);
     if (!dash) return [];
     const out = [];
 
     if (Array.isArray(dash.video)) {
+      /* 一条清晰度 B站会同时给 avc / hevc / av1 三条轨。全列出来就是菜单里
+         连续三条一模一样的「1080P」—— 用户看到的困惑正是这个。按高度去重，
+         优先 avc（h264）：兼容性最好，macOS/Windows 自带播放器和剪辑软件都认。 */
+      const score = (codecs) => {
+        const c = String(codecs || "").toLowerCase();
+        if (/avc|h264/.test(c)) return 3;
+        if (/hev|hvc|h265/.test(c)) return 2;
+        return 1; // av01 / vp9
+      };
+      const byHeight = new Map();
       for (const v of dash.video) {
         const url = v && v.baseUrl;
         if (!url) continue;
+        const h = num(v.height);
+        const prev = byHeight.get(h);
+        if (!prev || score(v.codecs) > score(prev.codecs)) byHeight.set(h, v);
+      }
+
+      /* 音频轨：同一次 playurl 响应里一定有，直接挑码率最高的一条配给
+         每条视频轨。以前是靠 videobtn 从**可见列表**里 pickAudio —— 一旦
+         那条音频条目没进列表（或列表被过滤），后端就拿不到 audio_url，
+         于是「视频下完了但没声音」，而且后端还静默当成功。
+         这样配对不再依赖列表内容。 */
+      let bestAudio = null;
+      for (const a of dash.audio || []) {
+        const au = a && a.baseUrl;
+        if (!au) continue;
+        if (!bestAudio || num(a.bandwidth) > num(bestAudio.bandwidth)) bestAudio = a;
+      }
+      const audioUrl = bestAudio ? bestAudio.baseUrl : "";
+
+      const tracks = [...byHeight.values()].sort(
+        (a, b) => num(b.height) - num(a.height)
+      );
+      for (const v of tracks) {
         out.push({
           label: biliLabel(num(v.id), "视频+音频"),
-          url,
+          url: v.baseUrl,
           kind: "video",
           size: 0,
           mime: v.mimeType || "video/mp4",
@@ -363,21 +748,21 @@
           height: num(v.height),
           quality: num(v.id),
           codec: (v.codecs || "").split(".")[0] || "",
+          // 后端下完视频后再下这条音频并用 ffmpeg 合流
+          audio_url: audioUrl || undefined,
         });
       }
-      for (const a of dash.audio || []) {
-        const url = a && a.baseUrl;
-        if (!url) continue;
+      if (bestAudio) {
         out.push({
-          label: biliAudioLabel(a),
-          url,
+          label: biliAudioLabel(bestAudio),
+          url: bestAudio.baseUrl,
           kind: "audio",
           size: 0,
-          mime: a.mimeType || "audio/mp4",
+          mime: bestAudio.mimeType || "audio/mp4",
           width: 0,
           height: 0,
-          quality: num(a.id),
-          codec: (a.codecs || "").split(".")[0] || "",
+          quality: num(bestAudio.id),
+          codec: (bestAudio.codecs || "").split(".")[0] || "",
         });
       }
     }
@@ -478,6 +863,9 @@
       cards: BILI_CARDS,
       cardInfo: biliCardInfo,
       formats: biliFormats,
+      // 卡片必须按**它自己的** URL 取清晰度：页面里的 __playinfo__ 是当前
+      // 播放视频的，拿它给卡片用就会「标题是新的、内容是上一个视频」。
+      formatsFor: biliFormats,
       player: BILI_PLAYER,
       playerInfo: () => {
         const t = document.querySelector("h1.video-title, h1[class*='title'], .video-title");
@@ -548,7 +936,9 @@
     if (!site) return null;
     const info = S.SITES[site].cardInfo(card);
     if (!info) return null;
-    const fmts = await S.currentFormats();
+    // 有 formatsFor 就按卡片自己的 URL 取；没有才退回「当前页面」的格式。
+    const cfg = S.SITES[site];
+    const fmts = cfg.formatsFor ? await cfg.formatsFor(info.pageUrl) : await S.currentFormats();
     return {
       site,
       title: info.title,
@@ -622,6 +1012,11 @@
       }
       else if (d.what === "currentFormats") out = await S.currentFormats();
       else if (d.what === "playerFormats") out = await S.playerFormats();
+      else if (d.what === "qualityLevels") out = ytQualityLevels();
+      else if (d.what === "setQuality") out = { ok: ytSetQuality(d.sel) };
+      else if (d.what === "nudge") out = { ok: ytNudge() };
+      else if (d.what === "contentLengths") out = ytContentLens();
+      else if (d.what === "videoLadder") out = ytLadder();
       else if (d.what === "playerElement") {
         const el = S.playerElement();
         // 元素本身留在 MAIN world，只回传它的标识

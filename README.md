@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.13.0**（PyQt5 三端 + Windows 原生客户端同版本）
+当前版本：**v1.14.7**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -25,12 +25,11 @@
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
 | Linux | `zdm_1.13.0_amd64.deb` | `sudo apt install ./zdm_1.13.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.13.0.exe` | 双击运行，用户级安装、无需管理员；**联网安装器**，会自行装 Python 3.12 与 PyQt5（体积小是因为不含运行时） |
-| Windows（原生） | `ZDM-Setup-1.13.0.exe` | C#/WPF 客户端，双击安装，见下方专节 |
+| Windows | `ZDM-Setup-1.13.0.exe` | C#/WPF 原生客户端，双击安装（用户级、无需管理员、不依赖 Python）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | 装好后从 `~/Library/Application Support/ZDM/extension`（macOS）加载已解压的扩展程序 |
 
-> **完全自动构建**：`.deb` / `zdm-linux.tar.gz` / `ZDM-PyQt5-Setup-*.exe` 在 `ubuntu-latest`
-> 上构建，`ZDM-<version>.dmg` 在 `macos-latest` 上构建（由
+> **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
+> `ZDM-<version>.dmg` 在 `macos-latest` 上构建，`ZDM-Setup-*.exe` 在 `windows-latest` 上构建（由
 > `.github/workflows/build-packages.yml` 驱动），push main 即构建，推 tag 时产物自动挂到对应 Release。
 >
 > macOS 的 `.dmg` 与 Linux 的 `.deb` 都是**自包含**的：Python 运行时、PyQt5/Qt 与资源全部
@@ -48,22 +47,20 @@
 ## 构建
 
 ```bash
-python3 build_dist.py   # 在 dist/ 重新生成安装包（.deb 需 dpkg-deb，.exe 需 7z）
+python3 build_dist.py   # Linux .deb / tar.gz + macOS zip（Windows 安装包由 CI 的 build-windows.yml 产出）
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.13.0
+bash zdm/build_linux_app.sh ./linux-build 1.14.7
 ```
 
-> **Windows 有两个包，用途不同**：
-> `ZDM-PyQt5-Setup-*.exe` 是**联网安装器**（约 150 KB），运行时会在你机器上装 Python 3.12 + PyQt5，
-> 适合「想用同一套 PyQt5 界面」的场景；`ZDM-Setup-*.exe` 是 **C#/WPF 原生客户端**（约 70 MB），
-> 自带运行时，装完即用，无需管理员，也不依赖 Python。
-> 想要开箱即用、不想装 Python，选后者。
+> Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（C#/WPF 原生客户端，约 70 MB，自带运行时）。
+> 旧的 `ZDM-PyQt5-Setup-*.exe` 已下线 —— 两个包并存时用户经常装错，
+> 而且 PyQt5 版会覆盖原生版的安装目录（同一个 `%LOCALAPPDATA%\Programs\ZDM`）。
 
-## Windows 原生客户端（v1.11.0）
+## Windows 原生客户端
 
-Windows 上除 PyQt5 版之外，还提供一套 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`。
-安装包 `ZDM-Setup-1.11.0.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
+Windows 端是 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`。
+安装包 `ZDM-Setup-*.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
 
 - 注册 `zdm://` 协议，浏览器里点链接可直接把下载任务交给 ZDM；
 - 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`），

@@ -430,7 +430,17 @@ def _handle_protocol_url(target: str) -> int:
         port = int(load_config().get("port") or 9000)
         body = {"url": url}
         headers = {}
-        for key in ("filename", "referer", "source", "kind", "cookie", "audio_url"):
+        for key in (
+            "filename",
+            "referer",
+            "source",
+            "kind",
+            "cookie",
+            "audio_url",
+            # YouTube：页面地址 + 目标高度，后端据此走 yt-dlp 通道
+            "yt_page",
+            "yt_height",
+        ):
             v = (q.get(key) or [""])[0].strip()
             if not v:
                 continue
