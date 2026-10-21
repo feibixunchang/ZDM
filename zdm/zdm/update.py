@@ -11,6 +11,7 @@ raising, so the GUI never breaks because GitHub is down.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -163,7 +164,12 @@ def latest_release(timeout: float = 8.0, proxy: str = "") -> Optional[dict]:
         name = str(a.get("name") or "")
         url = str(a.get("browser_download_url") or "")
         if name and url:
-            assets.append({"name": name, "url": url, "size": int(a.get("size") or 0)})
+            assets.append({
+                "name": name,
+                "url": url,
+                "size": int(a.get("size") or 0),
+                "digest": str(a.get("digest") or ""),
+            })
     return {
         "version": version,
         "tag": tag,
@@ -265,6 +271,7 @@ def download(
     timeout: float = 30.0,
     proxy: str = "",
     expected_size: int = 0,
+    expected_sha256: str = "",
     progress=None,
 ) -> Optional[str]:
     """Stream ``url`` into ``dest`` (atomically). Returns the path or None.
@@ -283,6 +290,7 @@ def download(
         tmp = dest + ".part"
         try:
             os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+            digest = hashlib.sha256()
             with _open(candidate, timeout, proxy) as r, open(tmp, "wb") as f:
                 total = expected_size or 0
                 try:
@@ -297,6 +305,7 @@ def download(
                     if not chunk:
                         break
                     f.write(chunk)
+                    digest.update(chunk)
                     done += len(chunk)
                     if progress:
                         try:
@@ -307,6 +316,12 @@ def download(
                 raise IOError(
                     f"size mismatch: got {os.path.getsize(tmp)}, expected {expected_size}"
                 )
+            # 镜像只是加速通道，内容必须和 GitHub 公布的 sha256 一致；
+            # 否则第三方代理返回同尺寸的篡改安装包就会被执行。
+            if expected_sha256:
+                want = expected_sha256.lower().removeprefix("sha256:")
+                if digest.hexdigest() != want:
+                    raise IOError("sha256 mismatch")
             os.replace(tmp, dest)
             return dest
         except Exception:  # noqa: BLE001
