@@ -2352,17 +2352,30 @@ class MainWindow(QMainWindow):
                 label += " · AV1"
             labels.append(label)
 
+        # 默认 1080P：最高档经常是 4K，文件大、很多机器解码也吃力。
+        # 选不高于 1080 的最高档；全都高于 1080 时再退回最高档。
+        default = 0
+        best_h = -1
+        for i, f in enumerate(formats):
+            try:
+                h = int(f.get("height") or 0)
+            except (TypeError, ValueError):
+                h = 0
+            if 0 < h <= 1080 and h > best_h:
+                best_h, default = h, i
+
         pick, ok = QInputDialog.getItem(
-            self, "选择清晰度", f"{title}\n\n下载哪个清晰度？", labels, 0, False
+            self, "选择清晰度", f"{title}\n\n下载哪个清晰度？", labels, default, False
         )
         if not ok or not pick:
             return
         f = formats[labels.index(pick)]
+        height = int(f.get("height") or 0)
         payload = {
             "url": url,
             "yt_page": url,
-            "yt_height": int(f.get("height") or 0),
-            "filename": title + ".mp4",
+            "yt_height": height,
+            "filename": (f"{title} ({height}P).mp4" if height else title + ".mp4"),
         }
         payload.update(extra)  # 用户手填的文件名/目录优先
         self._run(self.api.add, payload)

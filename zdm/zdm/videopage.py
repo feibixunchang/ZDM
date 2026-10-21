@@ -18,7 +18,9 @@ server and the CLI, including from the frozen bundles.
 """
 from __future__ import annotations
 
+import hashlib
 import re
+from urllib.parse import parse_qs, urlparse
 
 # YouTube 的几种页面形态：watch / shorts / live / embed / youtu.be 短链。
 _YT = re.compile(
@@ -54,3 +56,46 @@ def video_page_url(url: str) -> str:
     """普通链接返回空串，视频页面链接返回它自己（便于直接塞进 payload）。"""
     u = (url or "").strip()
     return u if is_video_page(u) else ""
+
+
+def _youtube_id(url: str) -> str:
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        if host == "youtu.be":
+            return p.path.strip("/").split("/")[0]
+        if p.path == "/watch":
+            return (parse_qs(p.query).get("v") or [""])[0]
+        for prefix in ("/shorts/", "/live/", "/embed/"):
+            if p.path.startswith(prefix):
+                return p.path[len(prefix):].split("/")[0]
+    except Exception:
+        pass
+    return ""
+
+
+def video_page_filename(url: str) -> str:
+    """A readable fallback filename for a video-page task.
+
+    The GUI resolves the real title and sends it explicitly; this is for the
+    web UI and ``zdm add``, where nobody resolved the title. Without it the
+    yt-dlp channel renames the finished file to ``download`` (the Download
+    default) and the user gets an extension-less file.
+    """
+    u = (url or "").strip()
+    if is_youtube(u):
+        vid = _youtube_id(u)
+        return f"YouTube-{vid}.mp4" if vid else "YouTube.mp4"
+    try:
+        p = urlparse(u)
+        m = (
+            re.search(r"/video/([A-Za-z0-9_-]+)", p.path)
+            or re.search(r"/status/(\d+)", p.path)
+            or re.search(r"/(\d{5,})(?:/|$)", p.path)
+        )
+        if m:
+            return f"Video-{m.group(1)}.mp4"
+    except Exception:
+        pass
+    digest = hashlib.sha1(u.encode("utf-8", "replace")).hexdigest()[:8]
+    return f"Video-{digest}.mp4"

@@ -58,6 +58,8 @@ def _selfcheck() -> int:
         # 在这里检查，构建期就能挡住，而不是等用户听不见声音。
         "ytdlp": "",
         "ffmpeg": "",
+        # YouTube 的签名/n 参数需要 JS 运行时；现在随包带 deno。
+        "deno": "",
     }
     try:
         import theme  # noqa: F401  (sits next to gui.py, not in the package)
@@ -80,6 +82,12 @@ def _selfcheck() -> int:
         report["ytdlp"] = ytdlp_bin.binary_path() or ""
     except Exception as e:  # noqa: BLE001
         report["ytdlp_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from zdm import ytdlp_bin as _yb
+
+        report["deno"] = _yb.find_js_runtime() or ""
+    except Exception as e:  # noqa: BLE001
+        report["deno_error"] = f"{type(e).__name__}: {e}"
     try:
         from zdm.core import _find_ffmpeg
 

@@ -29,6 +29,10 @@ datas = [
     (os.path.join(SRC, "web"), "web"),
     (os.path.join(SRC, "extension"), "extension"),
 ]
+# Deno is MIT-licensed; ship its notice next to the binary in every package.
+_deno_lic = os.path.join(SRC, "bin", "DENO-LICENSE.md")
+if os.path.isfile(_deno_lic):
+    datas.append((_deno_lic, "bin"))
 
 # Qt 内置文案（QDialogButtonBox 的 Save/Cancel/OK、QMessageBox 的 Yes/No、
 # QFileDialog 的按钮）都来自 Qt 自己的翻译文件。不收集的话，冻结包里
@@ -71,7 +75,13 @@ except Exception:
 WIN = sys.platform.startswith("win")
 
 binaries = []
-for _name in ("yt-dlp", "yt-dlp.exe", "ffmpeg", "ffmpeg.exe"):
+for _name in ("yt-dlp", "yt-dlp.exe", "ffmpeg", "ffmpeg.exe", "deno", "deno.exe"):
+    # 一个 Linux 构建目录里可能同时放着给 Windows 安装包准备的 .exe；不要把
+    # 别的平台的二进制塞进当前 bundle（会白胖几十 MB，而且跑不起来）。
+    if WIN and not _name.endswith(".exe"):
+        continue
+    if (not WIN) and _name.endswith(".exe"):
+        continue
     _p = os.path.join(SRC, "bin", _name)
     if os.path.isfile(_p):
         binaries.append((_p, "bin"))
@@ -83,6 +93,8 @@ if not (_found & {"yt-dlp", "yt-dlp.exe"}):
     print("WARNING: zdm/bin/yt-dlp missing — 打包版将无法解析/下载 YouTube")
 if not (_found & {"ffmpeg", "ffmpeg.exe"}):
     print("WARNING: zdm/bin/ffmpeg missing — 打包版合并 DASH 音轨会退回系统 ffmpeg")
+if not (_found & {"deno", "deno.exe"}):
+    print("WARNING: zdm/bin/deno missing — YouTube 的 JS 挑战无法求解")
 
 block_cipher = None
 

@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.15.16**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.15.17**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -21,11 +21,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.15.16.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.15.17.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.15.16_amd64.deb` | `sudo apt install ./zdm_1.15.16_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.15.17_amd64.deb` | `sudo apt install ./zdm_1.15.17_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.15.16.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.15.17.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.15.16
+bash zdm/build_linux_app.sh ./linux-build 1.15.17
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -120,15 +120,16 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 
 1. **缺少 JS 运行时**。2026 年起 yt-dlp 要跑 YouTube 播放器里的 JS 解签名和
    n 参数；没有 deno 时 YouTube 只回故事板，yt-dlp 的报错却是毫不相干的
-   "The page needs to be reloaded"。ZDM 会按顺序在 PATH、`~/.deno/bin`、
-   `~/.local/bin`、`/usr/local/bin`、`%USERPROFILE%\.deno\bin`、
-   `%APPDATA%\npm` 等目录里找 deno / node，并用 `--js-runtimes` 显式传给
-   yt-dlp。都找不到时会在任务报错里直接写「缺少 JS 运行时」，不再让你去猜
-   Cookie 问题。装 deno：<https://deno.com>（一行安装脚本，默认进 `~/.deno/bin`）。
+   "The page needs to be reloaded"。**v1.15.17 起 Linux / macOS 安装包已内置
+   deno 2.9.8**（`_internal/bin/deno`，优先于系统版本），装完即可用，不需要
+   用户自己安装。源码运行时仍会按 PATH、`~/.deno/bin`、`~/.local/bin`、
+   `/usr/local/bin`、`%USERPROFILE%\.deno\bin`、`%APPDATA%\npm` 等目录查找；
+   都找不到时会在任务报错里直接写「缺少 JS 运行时」，不再让你去猜 Cookie。
 2. **升级后旧服务进程还在跑旧代码**。后台 `serve` 是独立进程，覆盖安装只换了
    磁盘文件；界面是新版、下载引擎还是旧版，于是 "更新了还是老毛病"。
    v1.15.16 起 GUI 启动时会对比 `/api` 报告的版本，不一致就请旧服务退出并
-   拉起当前版本；Linux 的 .deb/tar.gz 和 Windows 安装包也会在安装前结束旧进程。
+   拉起当前版本；Linux 的 .deb/tar.gz 现在会同时结束 `/opt/zdm/ZDM` 与
+   `/usr/bin/zdm-desktop`（旧界面），Windows 安装包也会在安装前结束旧进程。
 3. **重试客户端与兜底**（v1.15.15）：`android_vr` 已失效，换成 `tv_embedded`；
    yt-dlp 通道全灭时不再被 403 挡住，直接切到解析出的直链用内置引擎下载。
 
@@ -144,6 +145,10 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 下载了（下完是一个 HTML）。v1.15.16 起，YouTube / B站 / 抖音等**页面链接**
 在桌面端、网页版、命令行都会被自动识别成「页面任务」，交给 yt-dlp 解析成
 真正的视频；YouTube 还会先让你选清晰度。媒体直链不受影响。
+
+**v1.15.17 补充**：网页版 / `zdm add` 粘贴视频页面时也会得到带扩展名的
+文件名（以前可能是一个没有后缀的 `download`）；YouTube 清晰度默认选
+1080P（不再默认最高档，避免误下 4K）；JS 运行时探测补上 `~/.local/bin`。
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。

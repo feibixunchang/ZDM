@@ -1120,7 +1120,13 @@ class Download:
             return
 
         # 换成用户看得懂的文件名（扩展已经按标题算好了）
-        final = _unique_name(self.directory, self.filename or os.path.basename(path))
+        want = str(self.filename or "").strip()
+        if want.lower() in ("", "download"):
+            # The Download default. Without this a CLI/web video-page task was
+            # renamed to a file literally called "download" (no .mp4), which
+            # players cannot open by double-click.
+            want = os.path.basename(path)
+        final = _unique_name(self.directory, want)
         target = os.path.join(self.directory, final)
         moved = None
         last: Optional[Exception] = None

@@ -161,6 +161,20 @@ if [ -x "$FFMPEG_SRC" ]; then
 else
     echo "WARNING: 没有随包 ffmpeg，B站/YouTube 下载将只有画面没有声音" >&2
 fi
+
+# deno：yt-dlp 2026 起解 YouTube 签名/n 参数必须有 JS 运行时。随包带上，
+# 安装后无需用户自己装 deno（版本固定在 fetch_bin.py）。
+DENO_SRC="$SRC/bin/deno"
+if [ ! -x "$DENO_SRC" ]; then
+    echo "==> deno binary missing, downloading"
+    python3 "$SRC/fetch_bin.py" --dest "$SRC/bin" --os darwin || {
+        echo "ERROR: 下载 deno 失败（YouTube 解析将不可用）" >&2; exit 1; }
+fi
+cp "$DENO_SRC" "$RES/bin/deno"
+chmod +x "$RES/bin/deno"
+"$RES/bin/deno" --version >/dev/null || {
+    echo "ERROR: 随包 deno 无法执行（架构不匹配或文件损坏）" >&2; exit 1; }
+cp "$SRC/bin/DENO-LICENSE.md" "$RES/" 2>/dev/null || true
 find "$APP" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Fail fast if a module gui.py imports at top level is missing.

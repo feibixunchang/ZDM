@@ -61,6 +61,18 @@ def binary_path() -> Optional[str]:
     return shutil.which("yt-dlp")
 
 
+def bundle_bin_dir() -> str:
+    """Directory holding the binaries shipped inside the app (yt-dlp/ffmpeg/deno).
+
+    PyInstaller puts them in ``_internal/bin``; a source checkout has them in
+    ``zdm/bin``. Both are one ``bin`` below the bundle root / package parent.
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "bin")
+
+
 def _extra_bin_dirs() -> List[str]:
     """「工具装在 PATH 之外」的常见目录（deno / node 安装器默认落点）。
 
@@ -70,11 +82,13 @@ def _extra_bin_dirs() -> List[str]:
     甚至直链 403，表现就是「只有 Mac 能下」。
     """
     home = os.path.expanduser("~")
+    # The bundled deno comes first: it is the exact runtime the build tested.
+    own = [bundle_bin_dir()]
     if os.name == "nt":
         local = os.environ.get("LOCALAPPDATA", "")
         roaming = os.environ.get("APPDATA", "")
         user = os.environ.get("USERPROFILE") or home
-        return [
+        return own + [
             os.path.join(user, ".deno", "bin"),
             os.path.join(local, "Programs", "deno"),
             os.path.join(user, ".bun", "bin"),
@@ -85,13 +99,13 @@ def _extra_bin_dirs() -> List[str]:
             os.path.join(local, "Microsoft", "WinGet", "Links"),
         ]
     if sys.platform == "darwin":
-        return [
+        return own + [
             "/opt/homebrew/bin",
             "/usr/local/bin",
             os.path.join(home, ".deno", "bin"),
             os.path.join(home, ".bun", "bin"),
         ]
-    return [
+    return own + [
         os.path.join(home, ".deno", "bin"),
         os.path.join(home, ".bun", "bin"),
         os.path.join(home, ".local", "bin"),
@@ -115,8 +129,10 @@ def child_env() -> Dict[str, str]:
         "/usr/sbin",
         "/sbin",
     ]
-    parts = [p for p in (env.get("PATH") or "").split(os.pathsep) if p]
-    for p in extra:
+    # Bundled bin first: the shipped deno/yt-dlp/ffmpeg is the exact version
+    # the release was tested with. System copies remain as a fallback.
+    parts = [p for p in extra if p]
+    for p in (env.get("PATH") or "").split(os.pathsep):
         if p and p not in parts:
             parts.append(p)
     env["PATH"] = os.pathsep.join(parts)
@@ -148,6 +164,16 @@ def _supports_js_flag(binp: str) -> bool:
         ok = False
     _JS_FLAG_SUPPORT[binp] = ok
     return ok
+
+
+def find_js_runtime(env: Optional[Dict[str, str]] = None) -> str:
+    """Path of the first usable JS runtime (deno/node/bun/quickjs), or ""."""
+    env = env or child_env()
+    for name in _JS_RUNTIMES:
+        cand = shutil.which(name, path=env.get("PATH"))
+        if cand and os.path.isfile(cand):
+            return cand
+    return ""
 
 
 def js_runtime_args(binp: str, env: Optional[Dict[str, str]] = None) -> List[str]:
