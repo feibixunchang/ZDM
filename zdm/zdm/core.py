@@ -22,6 +22,22 @@ def _no_window() -> dict:
     """Windows 上 ffmpeg 等控制台子进程不弹黑窗（见 runtime.silent_proc_kwargs）。"""
     return silent_proc_kwargs()
 
+
+def _yt_should_swap_client(err: str) -> bool:
+    """下载失败的报错是否值得换 player_client 再试一次。
+
+    只认实测特征：SABR 拦截（"page needs to be reloaded"）与人机验证
+    （"Sign in to confirm" / "not a bot"）。其它错误（403 音轨 CDN、
+    磁盘满等）换客户端没用，不重试。"""
+    if not err:
+        return False
+    e = err.lower()
+    return (
+        "page needs to be reloaded" in e
+        or "sign in to confirm" in e
+        or "not a bot" in e
+    )
+
 MIN_SPLIT = 1 << 20  # 1 MiB: minimum remaining size to justify splitting
 HAS_PWRITE = hasattr(os, "pwrite")
 O_BINARY = getattr(os, "O_BINARY", 0)  # Windows: without it files open in text mode
@@ -831,22 +847,41 @@ class Download:
             k: v for k, v in (self.headers or {}).items() if k.lower() != "cookie"
         }
 
+        common = dict(
+            fmt=yt_resolve.format_selector(self.yt_height),
+            outtmpl=os.path.join(self.directory, stem + ".%(ext)s"),
+            ffmpeg=_find_ffmpeg(),
+            cookie_path=cookie_path,
+            proxy=self.proxy,
+            headers=headers,
+            ratelimit=self.speed_limit,
+            timeout=self.timeout,
+            on_progress=self._yt_progress,
+            should_stop=self._stop.is_set,
+            on_proc=self._yt_take_proc,
+        )
+        # 客户端重试链：默认客户端在部分网络环境下会被 YouTube 的 SABR
+        # 挡住（实测报「The page needs to be reloaded」/「not a bot」），
+        # 而 android_vr 是 2026-10 实测唯一能完整下载的客户端（见
+        # yt_resolve._STRATEGIES 注释）。第一次仍用默认（带 Cookie 的
+        # 登录环境它最快），命中特征错误才换 android_vr 重试一次。
+        attempts = [
+            None,
+            ("--extractor-args", "youtube:player_client=android_vr"),
+        ]
+        rc, err = 1, ""
         try:
-            rc, err = ytdlp_bin.download(
-                binp,
-                self.yt_page,
-                fmt=yt_resolve.format_selector(self.yt_height),
-                outtmpl=os.path.join(self.directory, stem + ".%(ext)s"),
-                ffmpeg=_find_ffmpeg(),
-                cookie_path=cookie_path,
-                proxy=self.proxy,
-                headers=headers,
-                ratelimit=self.speed_limit,
-                timeout=self.timeout,
-                on_progress=self._yt_progress,
-                should_stop=self._stop.is_set,
-                on_proc=self._yt_take_proc,
-            )
+            for extra_args in attempts:
+                if self._stop.is_set():
+                    break
+                rc, err = ytdlp_bin.download(
+                    binp, self.yt_page, extra=list(extra_args) if extra_args else None,
+                    **common,
+                )
+                if rc == 0 and not err:
+                    break
+                if not _yt_should_swap_client(err):
+                    break
         finally:
             self._yt_proc = None
             if cookie_path:
