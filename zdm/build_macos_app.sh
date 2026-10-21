@@ -165,9 +165,15 @@ from zdm import update, desktop
 assert update.is_newer('1.11.1', '1.9.1')
 assert callable(desktop.ensure_desktop)
 # 三端都必须能在这里过：YouTube 桌面解析 = yt_resolve + 随包 yt-dlp。
-from zdm import yt_resolve
-yt_resolve._import_yt_dlp()
+# 注意这里校验的是**二进制**能不能找到，而不是 `import yt_dlp` ——
+# 2026 年起 pip 包要求 Python 3.10+，而 bundle 内嵌 3.9，import 必然失败。
+# 这个自检以前写的是 yt_resolve._import_yt_dlp()，于是每次打 dmg 都会挂。
+from zdm import yt_resolve, ytdlp_bin
 assert callable(yt_resolve.resolve)
+_bin = ytdlp_bin.binary_path()
+if not _bin:
+    print('missing bundled yt-dlp binary'); sys.exit(1)
+print('    yt-dlp ->', _bin)
 from zdm.core import _find_ffmpeg
 print('    ffmpeg ->', _find_ffmpeg() or '(not found, 合并音轨会不可用)')
 print('    theme + gui + update + desktop + yt_resolve importable, both palettes render')
