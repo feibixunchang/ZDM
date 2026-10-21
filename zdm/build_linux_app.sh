@@ -291,11 +291,24 @@ fi
 # 升级后旧版 serve 进程还握着 9000 端口跑旧代码：新界面 ping 得到它就
 # 不会重启，表现成「装了新版还是旧行为/下不动」。先杀掉旧进程，再以
 # 触发安装的桌面用户身份把新 serve 拉起来 —— 用户不用再开终端敲
-# `zdm start --daemon`（实测升级路径）。纯 root 环境（无 SUDO_USER，
-# 如容器/CI）不启动：serve 以 root 跑会写坏下载目录属主。
+# `zdm start --daemon`（实测升级路径）。纯 root 环境（容器/CI）不启动：
+# serve 以 root 跑会写坏下载目录属主。
 pkill -f "/opt/zdm/ZDM" >/dev/null 2>&1 || true
-if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -x "/opt/zdm/ZDM" ]; then
-    su -s /bin/sh -c "nohup /opt/zdm/ZDM start --daemon >/dev/null 2>&1" "$SUDO_USER" || true
+TU=""
+for v in "${SUDO_USER:-}" "${PKEXEC_USER:-}"; do
+    if [ -n "$v" ] && [ "$v" != "root" ]; then TU="$v"; fi
+done
+# 双击 deb 常由 pkexec/图形包管理器装：SUDO_USER/PKEXEC_USER 都可能
+# 没有 —— 兜底扫 /run/user/<uid>，第一个非 root 的图形会话就是目标用户。
+if [ -z "$TU" ]; then
+    for d in /run/user/*/; do
+        [ -d "$d" ] || continue
+        u=$(stat -c %U "$d" 2>/dev/null || true)
+        if [ -n "$u" ] && [ "$u" != "root" ] && [ "$u" != "UNKNOWN" ]; then TU="$u"; break; fi
+    done
+fi
+if [ -n "$TU" ] && [ -x "/opt/zdm/ZDM" ]; then
+    su -s /bin/sh -c "nohup /opt/zdm/ZDM start --daemon >/dev/null 2>&1" "$TU" || true
 fi
 exit 0
 POSTINST
