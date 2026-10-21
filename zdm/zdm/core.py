@@ -15,6 +15,12 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from . import transport as transport_mod
 from .http import HttpError, filename_from_headers
+from .runtime import silent_proc_kwargs
+
+
+def _no_window() -> dict:
+    """Windows 上 ffmpeg 等控制台子进程不弹黑窗（见 runtime.silent_proc_kwargs）。"""
+    return silent_proc_kwargs()
 
 MIN_SPLIT = 1 << 20  # 1 MiB: minimum remaining size to justify splitting
 HAS_PWRITE = hasattr(os, "pwrite")
@@ -120,6 +126,7 @@ def _probe_has_audio(path: str) -> Optional[bool]:
             [ffmpeg, "-hide_banner", "-i", path],
             capture_output=True,
             timeout=30,
+            **_no_window(),
         )
     except Exception:
         return None
@@ -1281,6 +1288,7 @@ class Download:
                 proc = subprocess.run(
                     cmd, capture_output=True, timeout=600,
                     env={**os.environ, "PATH": os.environ.get("PATH", "")},
+                    **_no_window(),
                 )
             except Exception as e:
                 self.mux_error = f"ffmpeg 执行失败：{e}"

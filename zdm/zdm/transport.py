@@ -15,6 +15,7 @@ from typing import Dict, Iterator, Optional, Tuple
 
 from . import http as httpmod
 from .http import HttpError, request
+from .runtime import silent_proc_kwargs
 
 CURL = shutil.which("curl")
 
@@ -148,7 +149,8 @@ class CurlTransport(Transport):
             cmd += ["-H", f"{k}: {v}"]
         cmd.append(url)
         out = subprocess.run(
-            cmd, capture_output=True, timeout=timeout + 15, env=_curl_env()
+            cmd, capture_output=True, timeout=timeout + 15, env=_curl_env(),
+            **silent_proc_kwargs(),
         )
         text = out.stdout.decode("utf-8", "replace")
         if marker not in text:
@@ -178,7 +180,7 @@ class CurlTransport(Transport):
         cmd.append(url)
         p = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
-            env=_curl_env(),
+            env=_curl_env(), **silent_proc_kwargs(),
         )
         try:
             assert p.stdout is not None
