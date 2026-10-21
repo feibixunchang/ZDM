@@ -53,6 +53,11 @@ def _selfcheck() -> int:
         "theme_module": False,
         "pyqt5": "",
         "qt": "",
+        # 这两个二进制是「装完才暴露」的重灾区：少了 yt-dlp，YouTube 直接不能用；
+        # 少了 ffmpeg，B站/YouTube 下完是一个只有画面的文件。
+        # 在这里检查，构建期就能挡住，而不是等用户听不见声音。
+        "ytdlp": "",
+        "ffmpeg": "",
     }
     try:
         import theme  # noqa: F401  (sits next to gui.py, not in the package)
@@ -69,6 +74,27 @@ def _selfcheck() -> int:
         report["pyqt5_path"] = os.path.dirname(PyQt5.__file__)
     except Exception as e:  # noqa: BLE001
         report["pyqt5_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from zdm import ytdlp_bin
+
+        report["ytdlp"] = ytdlp_bin.binary_path() or ""
+    except Exception as e:  # noqa: BLE001
+        report["ytdlp_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from zdm.core import _find_ffmpeg
+
+        report["ffmpeg"] = _find_ffmpeg() or ""
+    except Exception as e:  # noqa: BLE001
+        report["ffmpeg_error"] = f"{type(e).__name__}: {e}"
+    # Windows 上的 exe 是 GUI 程序（console=False），没有可写的 stdout，CI 读不到
+    # 下面这行 print。所以额外支持落文件；退出码仍然是唯一的通过/失败信号。
+    out = os.environ.get("ZDM_SELFCHECK_OUT")
+    if out:
+        try:
+            with open(out, "w", encoding="utf-8") as fh:
+                json.dump(report, fh, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
     print(json.dumps(report, ensure_ascii=False, indent=2))
     ok = bool(
         report["web_index"]
@@ -76,6 +102,8 @@ def _selfcheck() -> int:
         and report["extension_sniffer"]
         and report["theme_module"]
         and report["pyqt5"]
+        and report["ytdlp"]
+        and report["ffmpeg"]
     )
     return 0 if ok else 1
 

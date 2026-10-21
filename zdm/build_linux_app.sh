@@ -29,7 +29,10 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"       # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                             # repo root
 BUILD_DIR="${1:-$(pwd)/linux-build}"
-VERSION="${2:-1.14.7}"
+# 版本号默认读 zdm/zdm/__init__.py（唯一真源）。写死在这里会漂：
+# v1.14.7 就出现过 build_dist.py=1.13.0 / 后端=1.14.0，包名和 /api 报的版本对不上。
+VERSION="${2:-$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SRC/zdm/__init__.py" 2>/dev/null | head -1)}"
+VERSION="${VERSION:-0.0.0}"
 
 DIST="$BUILD_DIR/dist"
 PYBUILD="$BUILD_DIR/pybuild"
@@ -131,6 +134,11 @@ if not r.get("extension_manifest"): bad.append("extension/manifest.json missing"
 if not r.get("extension_sniffer"): bad.append("extension/sniffer.js missing (media sniffer)")
 if not r.get("theme_module"): bad.append("theme.py not importable")
 if not r.get("pyqt5"): bad.append("PyQt5 not importable")
+# 这两个是「装完在用户机器上才发现」的典型：YouTube 全靠随包 yt-dlp，
+# B站 DASH 靠随包 ffmpeg 合音轨。构建期少一个，用户那边就是
+# 「YouTube 不能下」或「下载成功但没声音」。
+if not r.get("ytdlp"): bad.append("bundled yt-dlp binary missing")
+if not r.get("ffmpeg"): bad.append("bundled ffmpeg missing (DASH 音轨无法合流)")
 if r.get("version") != want:
     bad.append(f"version mismatch: bundle {r.get('version')} != build {want}")
 if bad:

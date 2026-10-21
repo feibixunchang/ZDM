@@ -117,6 +117,23 @@ jobs:
           chmod +x zdm/bin/yt-dlp
           zdm/bin/yt-dlp --version
 
+      # B站/YouTube 的 DASH 视频轨本身没有声音，合流靠 ffmpeg。
+      # 不随包的话，用户没装 ffmpeg 就会得到「下载成功但打开是无声视频」——
+      # 看起来像下载坏了，其实是缺一个合并器。构建期缺这个文件直接让构建失败，
+      # 别等到用户听不见声音才回滚。
+      - name: Fetch bundled ffmpeg (Linux)
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) A=ffmpeg-linux-arm64 ;;
+            *)             A=ffmpeg-linux-x64 ;;
+          esac
+          mkdir -p zdm/bin
+          curl -fsSL --retry 3 -o zdm/bin/ffmpeg \
+            "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/${A}"
+          chmod +x zdm/bin/ffmpeg
+          zdm/bin/ffmpeg -version | head -1
+
       - name: Build packages (Linux native bundle + .deb)
         run: python3 build_dist.py
 
@@ -256,6 +273,20 @@ jobs:
             "https://github.com/yt-dlp/yt-dlp/releases/download/${V}/yt-dlp_macos"
           chmod +x zdm/bin/yt-dlp
           zdm/bin/yt-dlp --version
+
+      # 同 Linux：DASH 音轨合流需要 ffmpeg，构建期缺了直接失败。
+      - name: Fetch bundled ffmpeg (macOS)
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) A=ffmpeg-darwin-arm64 ;;
+            *)     A=ffmpeg-darwin-x64 ;;
+          esac
+          mkdir -p zdm/bin
+          curl -fsSL --retry 3 -o zdm/bin/ffmpeg \
+            "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/${A}"
+          chmod +x zdm/bin/ffmpeg
+          zdm/bin/ffmpeg -version | head -1
 
       - name: Build ZDM.app and .dmg (with launch smoke test)
         run: |

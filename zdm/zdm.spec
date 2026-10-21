@@ -50,12 +50,24 @@ except Exception:
 # 随包的 yt-dlp 二进制。**必须走 binaries 而不是 datas**：datas 有时会丢掉
 # 可执行位，装到用户机器上就变成「文件在、但执行不了」。落点在 _internal/bin/，
 # 正好被 ytdlp_bin.binary_path() 的 dirname(here)/bin 探到。
+#
+# Windows 上文件名带 .exe（CI 下载的是 yt-dlp.exe / ffmpeg.exe），Linux/macOS
+# 不带 —— 两边都探一遍，免得某一端构建时静默少一个文件。
+WIN = sys.platform.startswith("win")
+
 binaries = []
-_ytdlp = os.path.join(SRC, "bin", "yt-dlp")
-if os.path.isfile(_ytdlp):
-    binaries.append((_ytdlp, "bin"))
-else:
+for _name in ("yt-dlp", "yt-dlp.exe", "ffmpeg", "ffmpeg.exe"):
+    _p = os.path.join(SRC, "bin", _name)
+    if os.path.isfile(_p):
+        binaries.append((_p, "bin"))
+
+# 按「有没有那一类文件」判断，不要按具体文件名 —— macOS/Linux 是 yt-dlp，
+# Windows 是 yt-dlp.exe，写死哪个都会在另一条流水线上误报。
+_found = {os.path.basename(_p) for _p, _ in binaries}
+if not (_found & {"yt-dlp", "yt-dlp.exe"}):
     print("WARNING: zdm/bin/yt-dlp missing — 打包版将无法解析/下载 YouTube")
+if not (_found & {"ffmpeg", "ffmpeg.exe"}):
+    print("WARNING: zdm/bin/ffmpeg missing — 打包版合并 DASH 音轨会退回系统 ffmpeg")
 
 block_cipher = None
 
@@ -76,6 +88,8 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+_icon = os.path.join(SRC, "extension", "icons", "icon.ico")
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -86,12 +100,51 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    # Windows 上是 GUI 程序：console=True 会额外挂一个黑色控制台窗口。
+    # 代价是 --version / --selfcheck 的输出也一并被吞掉，所以 CI 校验只能
+    # 用 exit code（见 build_windows_app.ps1）。
+    console=not WIN,
+    icon=_icon if (WIN and os.path.isfile(_icon)) else None,
     disable_windowed_traceback=False,
 )
 
+extra_exes = []
+if WIN:
+    # Chrome/Edge 的原生消息主机必须是可执行文件，且只能由 manifest 的
+    # "path" 启动（不能带命令行参数），所以单独出一个 console 版小 exe。
+    # 窗口版的 ZDM.exe 没有 stdio，拿它当主机会被 Chrome 判定为「主机退出」。
+    host_a = Analysis(
+        [os.path.join(SRC, "zdm_native_host.py")],
+        pathex=[SRC],
+        binaries=[],
+        datas=[],
+        hiddenimports=[],
+        hookspath=[],
+        hooksconfig={},
+        runtime_hooks=[],
+        excludes=["tkinter", "unittest", "pydoc_data", "test", "PyQt5"],
+        noarchive=False,
+        cipher=block_cipher,
+    )
+    host_pyz = PYZ(host_a.pure, host_a.zipped_data, cipher=block_cipher)
+    extra_exes.append(
+        EXE(
+            host_pyz,
+            host_a.scripts,
+            [],
+            exclude_binaries=True,
+            name="ZDM-NativeHost",
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=False,
+            console=True,
+        )
+    )
+
 coll = COLLECT(
     exe,
+    *extra_exes,
     a.binaries,
     a.zipfiles,
     a.datas,
