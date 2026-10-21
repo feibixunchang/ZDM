@@ -30,6 +30,21 @@ datas = [
     (os.path.join(SRC, "extension"), "extension"),
 ]
 
+# Qt 内置文案（QDialogButtonBox 的 Save/Cancel/OK、QMessageBox 的 Yes/No、
+# QFileDialog 的按钮）都来自 Qt 自己的翻译文件。不收集的话，冻结包里
+# _install_translations() 无翻译可加载，中文界面上全是英文按钮
+# （Windows 实测：设置页底部是 "Save"）。只收中文，控制体积。
+try:
+    from PyQt5.QtCore import QLibraryInfo as _QLI
+
+    _qtdir = _QLI.location(_QLI.TranslationsPath)
+    if os.path.isdir(_qtdir):
+        for _f in sorted(os.listdir(_qtdir)):
+            if _f.endswith(".qm") and ("zh_CN" in _f or "zh_TW" in _f):
+                datas.append((os.path.join(_qtdir, _f), "i18n"))
+except Exception as _e:  # pragma: no cover
+    print(f"WARNING: 无法收集 Qt 中文翻译：{_e} —— 冻结包的内置按钮将是英文")
+
 hiddenimports = [
     "PyQt5.QtNetwork",   # single-instance guard (QLocalServer)
     "PyQt5.QtSvg",       # icon rendering fallbacks
