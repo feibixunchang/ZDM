@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.15.2**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.15.3**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -21,11 +21,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.15.2.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.15.3.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.15.2_amd64.deb` | `sudo apt install ./zdm_1.15.2_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.15.3_amd64.deb` | `sudo apt install ./zdm_1.15.3_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.15.2.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.15.3.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.15.2
+bash zdm/build_linux_app.sh ./linux-build 1.15.3
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -103,7 +103,7 @@ LoadLibrary: 内存资源不足」** —— 这**不是真的内存不足**（�
 总是意味着 `python312.dll` 本身坏了，两大常见原因：
 
 1. **杀毒软件在安装过程中隔离/篡改了 DLL**（最常见）：打开杀毒软件的隔离区还原文件，
-   并把 ZDM 安装目录加入信任/排除列表。v1.15.2 起安装器在装完时会自动跑一次
+   并把 ZDM 安装目录加入信任/排除列表。v1.15.3 起安装器在装完时会自动跑一次
    `--selfcheck` 自检，失败当场弹出带处理指引的对话框，不用等第一次双击才发现。
 2. **系统页面文件（虚拟内存）被关闭**：在「系统属性 → 高级 → 性能设置 → 虚拟内存」
    恢复为自动管理后重启。

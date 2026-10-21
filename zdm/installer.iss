@@ -1,7 +1,7 @@
 ; ZDM 下载管理器 - Windows 安装脚本（PyQt5 三端统一版）
 ;
 ; 由 zdm/build_windows_app.ps1 调用：
-;   iscc /DAppVersion=1.15.2 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
+;   iscc /DAppVersion=1.15.3 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
 ;
 ; SourceDir 是 PyInstaller 产出的 onedir（ZDM.exe + _internal\ 整个运行时，
 ; 内含 CPython 与 PyQt5）。用户机器上不需要装 Python、不需要 pip、不需要 VC 运行库。
@@ -131,7 +131,6 @@ Type: files; Name: "{app}\com.zdm.launcher.json"
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Line: string;
-  SelfCheckOut: string;
   Rc: Integer;
 begin
   if CurStep = ssPostInstall then
@@ -162,9 +161,8 @@ begin
     // CI 的教训就在眼前。
     if not WizardSilent() then
     begin
-      SelfCheckOut := ExpandConstant('{tmp}\zdm-selfcheck.json');
-      // 窗口版 exe 没有 stdout，JSON 报告靠这个环境变量落到临时文件
-      SetEnvironmentVariable('ZDM_SELFCHECK_OUT', SelfCheckOut);
+      // 窗口版 exe 是 GUI 子系统，没有可写 stdout；--selfcheck 的 JSON 报告
+      // 既会打印也会被 CI 忽略，这里只看退出码（0=通过）。
       if not Exec(
            ExpandConstant('{app}\ZDM.exe'), '--selfcheck',
            ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Rc)
@@ -184,8 +182,6 @@ begin
           '3. 处理完成后重新运行本安装包覆盖安装一遍。',
           mbCriticalError, MB_OK);
       end;
-      DeleteFile(SelfCheckOut);
-      SetEnvironmentVariable('ZDM_SELFCHECK_OUT', '');
     end;
   end;
 end;
