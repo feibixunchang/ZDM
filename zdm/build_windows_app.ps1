@@ -155,6 +155,20 @@ if (-not (Test-Path $FfmpegExe)) {
 }
 Write-Step "ffmpeg: $((Get-Item $FfmpegExe).Length / 1MB) MB"
 
+# deno.exe: yt-dlp 2026 起解 YouTube 签名/n 参数必须有 JS 运行时。Windows
+# 安装包同样内置，用户装完即用（fetch_bin.py 固定版本，跨平台）。
+$DenoExe = Join-Path $Bin "deno.exe"
+if (-not (Test-Path $DenoExe)) {
+    Write-Step "downloading deno.exe"
+    & $VenvPy (Join-Path $Src "fetch_bin.py") --dest $Bin --os windows
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $DenoExe)) {
+        Fail "下载 deno 失败（YouTube 解析将不可用）"
+    }
+}
+& $DenoExe --version *> $null
+if ($LASTEXITCODE -ne 0) { Fail "随包 deno.exe 无法执行（文件损坏或被安全软件拦截）" }
+Write-Step "deno: $(& $DenoExe --version)"
+
 # ------------------------------------------------------------------ freeze
 # build/ and dist/ZDM are disposable; leaving a stale tree behind is how a
 # "new" build ends up shipping last week's gui.py.
@@ -187,7 +201,7 @@ if (Test-Path $report) { Get-Content $report }
 if ($p.ExitCode -ne 0) { Fail "self-check 失败（exit $($p.ExitCode)）—— 缺 PyQt5 / web / extension 或 theme.py" }
 
 $internal = Join-Path $AppDir "_internal"
-foreach ($need in @("bin\yt-dlp.exe", "bin\ffmpeg.exe")) {
+foreach ($need in @("bin\yt-dlp.exe", "bin\ffmpeg.exe", "bin\deno.exe")) {
     if (-not (Test-Path (Join-Path $internal $need))) { Fail "打包结果缺少 _internal\$need" }
 }
 $hostExe = Join-Path $AppDir "ZDM-NativeHost.exe"
