@@ -1988,16 +1988,44 @@ class MainWindow(QMainWindow):
         dest = os.path.join(os.path.expanduser("~/Downloads"), asset["name"])
         proxy = str((self.config or {}).get("proxy") or "")
         self.update_download_btn.setEnabled(False)
-        self.update_download_btn.setText("下载中…")
+        self.update_download_btn.setText("下载中… 0%")
         self._status(f"正在下载更新 {asset['name']} …", hold=60)
+        # 进度：update.download 在工作线程回调，这里只记数字；
+        # 定时器在主线程轮询刷 UI（跨线程直接碰控件会崩）。
+        self._dl_progress = {"done": 0, "total": asset.get("size") or 0}
+        self._dl_timer = QTimer(self)
+        self._dl_timer.setInterval(400)
+        self._dl_timer.timeout.connect(self._tick_update_progress)
+        self._dl_timer.start()
         self._background(
             lambda: update.download(
-                asset["url"], dest, proxy=proxy, expected_size=asset.get("size") or 0
+                asset["url"], dest, proxy=proxy,
+                expected_size=asset.get("size") or 0,
+                progress=self._on_dl_chunk,
             ),
             lambda path: self._on_update_downloaded(path, info),
         )
 
+    def _on_dl_chunk(self, done: int, total: int):
+        p = getattr(self, "_dl_progress", None)
+        if p is not None:
+            p["done"], p["total"] = done, total
+
+    def _tick_update_progress(self):
+        p = getattr(self, "_dl_progress", None) or {}
+        done, total = p.get("done", 0), p.get("total", 0)
+        if total > 0:
+            pct = min(100, int(done * 100 / total))
+            self.update_download_btn.setText(f"下载中… {pct}%")
+            self._status(
+                f"正在下载更新… {pct}%（{done // 1048576}/{total // 1048576} MB）",
+                hold=60,
+            )
+
     def _on_update_downloaded(self, path, info):
+        t = getattr(self, "_dl_timer", None)
+        if t is not None:
+            t.stop()
         self.update_download_btn.setEnabled(True)
         self.update_download_btn.setText("下载并安装")
         if not path:
@@ -2378,12 +2406,31 @@ class MainWindow(QMainWindow):
     def _open_web(self):
         """Open the local web UI (http://127.0.0.1:<port>/) in the default browser."""
         port = int((self.config or {}).get("port") or self.port or 9000)
+        url = f"http://127.0.0.1:{port}/"
+        ok = False
         try:
             import webbrowser
-            webbrowser.open(f"http://127.0.0.1:{port}/")
-            self._status(f"已在浏览器打开网页版：http://127.0.0.1:{port}/")
-        except Exception as e:
-            self._status(f"打开网页版失败：{e}")
+
+            ok = bool(webbrowser.open(url))
+        except Exception:
+            ok = False
+        if not ok and os.name == "posix":
+            # webbrowser 模块在部分 Linux 发行版上找不到浏览器（没有
+            # $BROWSER、注册表为空）会静默返回 False —— 兜底直接调
+            # xdg-open，再不行就把原因告诉用户，而不是「点了没反应」。
+            try:
+                subprocess.Popen(
+                    ["xdg-open", url],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    **runtime.silent_proc_kwargs(),
+                )
+                ok = True
+            except Exception:
+                ok = False
+        if ok:
+            self._status(f"已在浏览器打开网页版：{url}")
+        else:
+            self._status("打开网页版失败：系统里没有可用的浏览器（需要 xdg-open 或已安装的浏览器）")
 
     def _extensions(self):
         """「浏览器扩展」引导对话框（单例：避免重复弹出堆叠）。"""
