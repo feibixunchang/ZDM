@@ -80,9 +80,10 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\c
 ; 这样即使用户装完没立刻打开程序，浏览器那边也能正常唤醒。
 Filename: "{app}\{#AppExeName}"; Parameters: "--register"; Flags: runhidden nowait
 Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
-; 应用内「一键更新」跑的是 /VERYSILENT：装完要把 ZDM 重新拉起来。
-; 否则用户升级完只会看到一个已经退出的窗口，还以为程序坏了或被卸载了。
-Filename: "{app}\{#AppExeName}"; Flags: nowait postinstall; Check: WizardSilent
+; 注意：应用内「一键更新」升级完的重启**不在这里做**。
+; 放在这里需要 `Check: WizardSilent`，而静默安装（CI 的 Install and verify 也是
+; /VERYSILENT）会真的把 ZDM 拉起来，把自检卡死。改由 UpdateInstaller.RunInstaller
+; 起一个游离进程等安装器退出后再启动，见 windows-native/Update.cs。
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\web"

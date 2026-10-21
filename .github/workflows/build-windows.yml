@@ -22,6 +22,10 @@ jobs:
   build:
     name: Windows native client
     runs-on: windows-latest
+    # 正常 2 分钟出头。留 20 分钟余量：万一「Install and verify」里的静默安装
+    # 卡住（比如安装脚本又加了会自动拉起程序的 [Run] 项），要尽快失败，
+    # 而不是把 runner 占满 6 小时。
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
