@@ -213,8 +213,24 @@ if ($SkipInstaller) {
         Write-Host "         装一个再跑，或从 CI 的 artifact 里取已签好的安装包。" -ForegroundColor Yellow
     } else {
         Write-Step "packing installer (Inno Setup)"
+        # 扩展 ID 由 manifest.json 的 "key" 推导（sha256 前 32 位映射到 a-p），
+        # 和 install.sh 用的是同一个算法。这里现算而不是在 .iss 里写死：
+        # key 一改而 .iss 没跟着改，原生消息会被 Chrome 拒绝，而且是静默失败。
+        # 注意：不能改用 here-string（@" ... "@）—— 它的结束符必须顶格，
+        # 在缩进块里写会直接语法错误。
+        $extId = ""
+        $pyExtId = "import base64,hashlib,json,sys;m=json.load(open(sys.argv[1],encoding='utf-8'));h=hashlib.sha256(base64.b64decode(m['key'])).hexdigest()[:32];print(''.join(chr(ord('a')+int(c,16)) for c in h))"
+        try {
+            $extId = "$(& $VenvPy -c $pyExtId (Join-Path $Src 'extension\manifest.json'))".Trim()
+        } catch {
+            Write-Host "WARNING: 推导扩展 ID 失败，installer.iss 用内置值" -ForegroundColor Yellow
+        }
+        if ($extId) { Write-Step "extension id: $extId" }
+
         $iss = Join-Path $Src "installer.iss"
-        & $iscc "/DAppVersion=$Version" "/DSourceDir=$AppDir" "/DOutDir=$OutDir" $iss
+        $defs = @("/DAppVersion=$Version", "/DSourceDir=$AppDir", "/DOutDir=$OutDir")
+        if ($extId) { $defs += "/DExtId=$extId" }
+        & $iscc @defs $iss
         if ($LASTEXITCODE -ne 0) { Fail "Inno Setup 失败" }
         $setup = Join-Path $OutDir "ZDM-Setup-$Version.exe"
         if (-not (Test-Path $setup)) { Fail "没有产出 $setup" }
