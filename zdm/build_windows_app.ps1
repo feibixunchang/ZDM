@@ -50,15 +50,19 @@ if (-not $Version) { $Version = "0.0.0" }
 Write-Step "version $Version"
 
 # ------------------------------------------------------------------- python
-# `py -3` is the Windows launcher and always exists when Python is installed
-# properly; the bare names are the fallback for scoop/conda setups.
+# 顺序很重要：先 `python`（CI 的 setup-python 会把它排到 PATH 最前，版本可控），
+# 再 `py -3`（Windows 官方安装器的启动器，取最高的 3.x —— 开发机往往只有它）。
+# 反过来的话 CI 会用 runner 上那个没被固定的解释器，构建结果不可复现。
+# $env:ZDM_PYTHON 可强制指定（例如 `ZDM_PYTHON=C:\Python312\python.exe`）。
 function Find-Python {
-    $tries = @(
-        @{ Exe = "py";      Args = @("-3") },
+    $cands = @()
+    if ($env:ZDM_PYTHON) { $cands += @{ Exe = $env:ZDM_PYTHON; Args = @() } }
+    $cands += @(
         @{ Exe = "python";  Args = @() },
-        @{ Exe = "python3"; Args = @() }
+        @{ Exe = "python3"; Args = @() },
+        @{ Exe = "py";      Args = @("-3") }
     )
-    foreach ($t in $tries) {
+    foreach ($t in $cands) {
         if (-not (Get-Command $t.Exe -ErrorAction SilentlyContinue)) { continue }
         try {
             $ver = & $t.Exe @($t.Args) -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
@@ -125,8 +129,9 @@ if (-not (Test-Path $FfmpegExe)) {
     Write-Step "downloading ffmpeg.exe"
     $zip = Join-Path $OutDir "ffmpeg-win64.zip"
     $tmp = Join-Path $OutDir "ffmpeg-extract"
-    # BtbN first (stable "latest" asset URL), gyan.dev as fallback: one of them
-    # being slow/blocked from CI should not fail the whole release.
+    # BtbN 优先：它的 "latest" 资产地址稳定，实测 CI 下载约 3 秒（161 MB 的
+    # gpl 版，打出来的安装包 91.6 MB）。gyan.dev 的 essentials 版更小，但它在
+    # GitHub runner 上的速度不稳，所以只作兜底 —— 体积差十几 MB，比构建失败划算。
     $urls = @(
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
