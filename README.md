@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.15.17**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.15.18**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -21,11 +21,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.15.17.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.15.18.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.15.17_amd64.deb` | `sudo apt install ./zdm_1.15.17_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.15.18_amd64.deb` | `sudo apt install ./zdm_1.15.18_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.15.17.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.15.18.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.15.17
+bash zdm/build_linux_app.sh ./linux-build 1.15.18
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -149,6 +149,17 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 **v1.15.17 补充**：网页版 / `zdm add` 粘贴视频页面时也会得到带扩展名的
 文件名（以前可能是一个没有后缀的 `download`）；YouTube 清晰度默认选
 1080P（不再默认最高档，避免误下 4K）；JS 运行时探测补上 `~/.local/bin`。
+
+**v1.15.18 补充**：
+- 更新下载前并行测速 GitHub / 公共镜像，自动选最快线路（国内直连常只有
+  几百 KB/s）；更新横幅新增「打开发布页」，可交给其它下载工具。
+- 下载完直接拉起系统安装器：Linux 打开系统包安装器，Windows 显示安装进度，
+  不再二次确认，也不会「下载完什么都没发生」。
+- 主界面常驻「扩展已连接」状态；扩展心跳改为 1 分钟，桌面端升级后自动
+  reload 扩展，不需要重开浏览器。
+- 工具栏「＋下载」在有链接时直接进清晰度选择，只弹一次窗。
+- Linux「打开 / 目录」改用 GUI 会话唤起，修复后台服务没有 DISPLAY 导致
+  按钮点了没反应；Windows 正文字体统一雅黑 10pt + 整数缩放，减少发虚。
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。

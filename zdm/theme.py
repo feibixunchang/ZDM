@@ -131,9 +131,17 @@ PALETTES = {"light": LIGHT, "dark": DARK}
 # --------------------------------------------------------------------------- stylesheet
 def build_stylesheet(p: Palette) -> str:
     """Render the QSS for a palette. Every colour comes from `p` - no literals."""
+    # Windows 上 px 字号在 125%/150% 缩放下会被 Qt 舍入成难看的位图感；
+    # 统一用 pt + 雅黑，和按钮（font-weight:600）保持同一套字体度量。
+    base_font = (
+        'font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; '
+        "font-size: 10pt;"
+        if sys.platform == "win32"
+        else "font-size: 13px;"
+    )
     return f"""
 QMainWindow, QDialog {{ background: {p.window}; }}
-QWidget {{ font-size: 13px; color: {p.text}; }}
+QWidget {{ {base_font} color: {p.text}; }}
 QToolBar {{ background: {p.surface}; border: none; border-bottom: 1px solid {p.border};
     padding: 8px 10px; spacing: 6px; }}
 QToolBar QLabel {{ color: {p.text_muted}; }}

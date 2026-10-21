@@ -16,14 +16,26 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
-from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional, Tuple
 
 REPO = "feibixunchang/ZDM"
 PROJECT_URL = f"https://github.com/{REPO}"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 USER_AGENT = f"ZDM-Updater (+{PROJECT_URL})"
+
+# GitHub 的 release 资产会 302 到 objects.githubusercontent.com，国内经常只有
+# 几百 KB/s。桌面端更新动辄 100 MB+，用户看到的就是「下载并安装」卡住。
+# 这些公共加速前缀直接代理同一个 URL；下载前先并行测速，选最快的一条。
+# 设 ZDM_UPDATE_NO_MIRROR=1 可强制直连（企业代理/镜像不可达时）。
+UPDATE_MIRRORS = (
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+    "https://ghfast.top/",
+)
 
 
 # --------------------------------------------------------------------------- versions
@@ -203,6 +215,50 @@ def pick_asset(assets, platform: str = "") -> Optional[dict]:
     )
 
 
+def _asset_urls(url: str) -> List[str]:
+    """直接地址 + 各加速镜像；顺序固定，测速后再挑。"""
+    out = [url]
+    for m in UPDATE_MIRRORS:
+        cand = m + url
+        if cand not in out:
+            out.append(cand)
+    return out
+
+
+def _probe_speed(url: str, proxy: str, timeout: float = 5.0) -> float:
+    """读 512 KB 估算 B/s；失败返回 0。"""
+    t0 = time.monotonic()
+    try:
+        with _open(url, timeout, proxy, {"Range": "bytes=0-524287"}) as r:
+            data = r.read(524288)
+        dt = max(0.05, time.monotonic() - t0)
+        return len(data) / dt
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def fastest_asset_url(url: str, proxy: str = "") -> str:
+    """并行测直连/镜像，返回最快的一条；全失败时退回原始地址。"""
+    if os.environ.get("ZDM_UPDATE_NO_MIRROR"):
+        return url
+    candidates = _asset_urls(url)
+    if len(candidates) == 1:
+        return url
+    best_url, best_speed = url, 0.0
+    with ThreadPoolExecutor(max_workers=len(candidates)) as ex:
+        futs = {ex.submit(_probe_speed, c, proxy): c for c in candidates}
+        try:
+            for fut in as_completed(futs, timeout=8.0):
+                speed = fut.result()
+                if speed > best_speed:
+                    best_speed, best_url = speed, futs[fut]
+        except Exception:  # noqa: BLE001
+            pass
+        for f in futs:
+            f.cancel()
+    return best_url
+
+
 def download(
     url: str,
     dest: str,
@@ -213,65 +269,85 @@ def download(
 ) -> Optional[str]:
     """Stream ``url`` into ``dest`` (atomically). Returns the path or None.
 
-    ``expected_size`` (the size GitHub reported for the asset) is checked after
-    the transfer: a truncated installer used to be opened as if it were fine.
-    ``progress(done, total)`` 在工作线程里按块回调，给界面画进度条用；
-    total 来自 expected_size 或 Content-Length，拿不到就是 0。
+    Before the real transfer it probes GitHub and the public mirrors in
+    parallel and keeps the fastest one. The old behaviour (direct GitHub only)
+    was routinely 200-300 KB/s in mainland China: a 127 MB .deb took 8+
+    minutes and looked like the updater had hung.
     """
-    tmp = dest + ".part"
-    try:
-        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-        with _open(url, timeout, proxy) as r, open(tmp, "wb") as f:
-            total = expected_size or 0
+    order = [fastest_asset_url(url, proxy)]
+    for cand in _asset_urls(url):
+        if cand not in order:
+            order.append(cand)
+
+    for candidate in order:
+        tmp = dest + ".part"
+        try:
+            os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+            with _open(candidate, timeout, proxy) as r, open(tmp, "wb") as f:
+                total = expected_size or 0
+                try:
+                    cl = r.headers.get("Content-Length")
+                    if cl and not total:
+                        total = int(cl)
+                except Exception:  # noqa: BLE001
+                    pass
+                done = 0
+                while True:
+                    chunk = r.read(262144)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        try:
+                            progress(done, total)
+                        except Exception:  # noqa: BLE001
+                            pass
+            if expected_size and os.path.getsize(tmp) != expected_size:
+                raise IOError(
+                    f"size mismatch: got {os.path.getsize(tmp)}, expected {expected_size}"
+                )
+            os.replace(tmp, dest)
+            return dest
+        except Exception:  # noqa: BLE001
             try:
-                cl = r.headers.get("Content-Length")
-                if cl and not total:
-                    total = int(cl)
+                os.remove(tmp)
             except Exception:  # noqa: BLE001
                 pass
-            done = 0
-            while True:
-                chunk = r.read(262144)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                if progress:
-                    try:
-                        progress(done, total)
-                    except Exception:  # noqa: BLE001
-                        pass
-        if expected_size and os.path.getsize(tmp) != expected_size:
-            raise IOError(
-                f"size mismatch: got {os.path.getsize(tmp)}, expected {expected_size}"
-            )
-        os.replace(tmp, dest)
-        return dest
-    except Exception:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-        return None
+            continue
+    return None
 
 
 # --------------------------------------------------------------------------- install
 def install_linux(deb_path: str) -> Tuple[bool, str]:
-    """Linux：pkexec + dpkg 一键安装下载好的 .deb。返回 (成功, 错误信息)。
+    """Linux：优先弹出系统包安装器（有真实安装界面），再退回 pkexec+dpkg。
 
-    pkexec 会弹系统授权框（用户输登录密码），无需开终端。装完后
-    postinst 自动重启 serve；界面层提示用户重启一次 ZDM 加载新版。
+    以前直接 ``pkexec dpkg -i``：从桌面会话启动时它会弹授权框，但从后台服务
+    或没有 polkit agent 的环境启动时只会返回 "Not authorized"，用户看到的
+    就是「下载完了，什么都没发生」。图形安装器（Deepin 的
+    deepin-deb-installer、gdebi）跑在 GUI 自己的会话里，稳定得多，而且用户
+    能看到安装进度。
     """
     import shutil
 
     if not sys.platform.startswith("linux") or not deb_path:
         return False, "仅在 Linux 上可用"
+    if not os.path.isfile(deb_path):
+        return False, "安装包不存在"
+    for exe in ("deepin-deb-installer", "gdebi-gtk", "gdebi", "xdg-open"):
+        path = shutil.which(exe)
+        if not path:
+            continue
+        try:
+            subprocess.Popen([path, deb_path], close_fds=True)
+            return True, ""
+        except Exception:  # noqa: BLE001
+            continue
+    # 没有图形安装器：最后再试一次 pkexec（有授权框的环境仍可一键装完）。
     pkexec = shutil.which("pkexec")
-    dpkg = shutil.which("dpkg")
+    dpkg = shutil.which("dpkg") or "/usr/bin/dpkg"
     if not pkexec:
-        return False, "系统里没有 pkexec（无法弹出授权窗口）"
-    if not dpkg:
-        dpkg = "/usr/bin/dpkg"
+        return False, "系统里没有图形安装器，也没有 pkexec"
     try:
         p = subprocess.run(
             [pkexec, dpkg, "-i", deb_path],
@@ -319,7 +395,7 @@ def install_windows(setup_path: str, relaunch_exe: str = "") -> bool:
         # 管理器手动结束（Windows 实测）。本 GUI 即将退出，再杀一次无妨。
         "taskkill /F /IM ZDM.exe /T >$null 2>&1; Start-Sleep -Seconds 1; "
         f"$p = Start-Process -FilePath {q(setup_path)} -ArgumentList "
-        "'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -PassThru;"
+        "'/SILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -PassThru;"
         " Wait-Process -Id $p.Id -ErrorAction SilentlyContinue;"
         " Start-Sleep -Seconds 2;"
         f" Start-Process -FilePath {q(exe)}"

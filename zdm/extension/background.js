@@ -906,17 +906,33 @@ async function api(path, body, method = "POST") {
 async function pingPresence() {
   try {
     const cfg = await getCfg();
-    await fetch(baseUrl(cfg) + "/api/extension/ping", {
+    const r = await fetch(baseUrl(cfg) + "/api/extension/ping", {
       method: "GET",
       headers: { "X-ZDM-Extension": chrome.runtime.id },
     });
+    const j = await r.json().catch(() => null);
+    if (j && j.version) {
+      // 桌面端升级后自动 reload 扩展，从磁盘加载新的 background/content
+      // scripts；不用用户关闭并重开浏览器。
+      const key = "zdmAppVersion";
+      const prev = (await chrome.storage.local.get(key))[key] || "";
+      if (prev && prev !== j.version) {
+        await chrome.storage.local.set({ [key]: j.version });
+        chrome.runtime.reload();
+        return;
+      }
+      if (!prev) await chrome.storage.local.set({ [key]: j.version });
+    }
   } catch (_) {
     /* 服务没开：静默。桌面端自然显示「未检测到」。 */
+    // 升级/重启服务后的那几十秒里 ping 会失败；10 秒后再试一次，主界面的
+    // 「扩展已连接」就能很快变绿，不需要用户重开浏览器。
+    setTimeout(pingPresence, 10000);
   }
 }
 
 try {
-  chrome.alarms.create("zdm-presence", { periodInMinutes: 30 });
+  chrome.alarms.create("zdm-presence", { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((a) => {
     if (a && a.name === "zdm-presence") pingPresence();
   });

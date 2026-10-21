@@ -1,3 +1,3 @@
 """ZDM - a self-contained multi-connection download manager."""
 
-__version__ = "1.15.17"
+__version__ = "1.15.18"
