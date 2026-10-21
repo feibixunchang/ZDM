@@ -1292,6 +1292,7 @@ class MainWindow(QMainWindow):
         self.url_edit.setPlaceholderText("粘贴下载链接后回车，或把链接拖进窗口…")
         self.url_edit.setMinimumWidth(430)
         self.url_edit.returnPressed.connect(self._quick_add)
+        _zh_standard_menu(self.url_edit)
         tb.addWidget(self.url_edit)
 
         btn_add = QPushButton("＋ 下载")
@@ -2300,10 +2301,12 @@ class MainWindow(QMainWindow):
         yt_cookie.setPlaceholderText("从浏览器 F12 → Application → Cookies 复制，或用扩展自动带")
         yt_cookie.setMaximumHeight(72)
         yt_cookie.setTabChangesFocus(True)
+        _zh_standard_menu(yt_cookie)
         bili_cookie = QPlainTextEdit(str(site_cookies.get("bilibili") or ""))
         bili_cookie.setPlaceholderText("B站的 SESSDATA（登录后可下 1080P+ / 会员内容）")
         bili_cookie.setMaximumHeight(72)
         bili_cookie.setTabChangesFocus(True)
+        _zh_standard_menu(bili_cookie)
         cf.addRow("YouTube", yt_cookie)
         cf.addRow("B站", bili_cookie)
         clear_btn = QPushButton("清空两个站点的 Cookie")
@@ -2586,6 +2589,42 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             self._status(f"开机自启设置失败：{e}")
+
+
+def _zh_standard_menu(edit) -> None:
+    """把文本框的 Qt 标准右键菜单（撤销/剪切/复制/粘贴/删除/全选）换成中文。
+
+    冻结包里 Qt 的翻译文件不可靠（Windows 实测 Save/Cancel 全英文），
+    这些标准菜单项同样会出英文。做法：事件过滤器拦下 ContextMenu，
+    取 Qt 原生菜单（保留自带的置灰/可用逻辑），再把六个固定文案改成
+    中文——不自己拼菜单，避免各平台行为差异。
+    """
+    from PyQt5.QtCore import QEvent, QObject
+
+    # 键是小写、去 & 的基础词（"Cu&t"→"cut"，"Select &All"→"select all"）。
+    # 菜单项文本可能带 "\t快捷键" 后缀（如 "&Undo\tCtrl+Z"），改名时要保留。
+    zh = {
+        "undo": "撤销", "redo": "重做", "cut": "剪切", "copy": "复制",
+        "paste": "粘贴", "delete": "删除", "select all": "全选",
+    }
+
+    class _Filter(QObject):
+        def eventFilter(self, obj, ev):
+            if ev.type() == QEvent.ContextMenu:
+                menu = obj.createStandardContextMenu()
+                for a in menu.actions():
+                    t = a.text()
+                    if not t:
+                        continue
+                    base, _, hotkey = t.partition("\t")
+                    renamed = zh.get(base.replace("&", "").strip().lower())
+                    if renamed:
+                        a.setText(renamed + (("\t" + hotkey) if hotkey else ""))
+                menu.exec_(ev.globalPos())
+                return True
+            return False
+
+    edit.installEventFilter(_Filter(edit))
 
 
 def _install_translations(app) -> None:
