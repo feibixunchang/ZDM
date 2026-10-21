@@ -361,21 +361,63 @@ public static class UpdateInstaller
     /// <summary>
     /// 启动安装器后调用方应立即退出：/CLOSEAPPLICATIONS 让 Inno 能覆盖正在运行的 exe，
     /// /VERYSILENT 不弹向导（下载都做完了，再点一遍「下一步」没有意义）。
+    ///
+    /// 装完必须把 ZDM 重新拉起来 —— 调用方在这一步之后就 Shutdown 了，没人替用户
+    /// 点「完成」。这件事**不放在 installer.iss 的 [Run] 里**：Inno 的静默语义
+    /// 会让 CI 的 `Install and verify`（/VERYSILENT + /NORUN）实际启动应用并卡住，
+    /// 而且它只管「装完启动」，不关心是不是升级。这里改成自己起一个游离的
+    /// powershell 等安装器退出后再拉起，与应用自身的生命周期完全解耦。
     /// </summary>
     public static bool RunInstaller(string path)
     {
         try
         {
-            Process.Start(new ProcessStartInfo(path)
+            var setup = Process.Start(new ProcessStartInfo(path)
             {
                 UseShellExecute = true,
                 Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS",
             });
+            // UseShellExecute 时 Process.Start 不保证能拿到句柄，取 Id 可能抛异常
+            var pid = 0;
+            try { pid = setup?.Id ?? 0; } catch { pid = 0; }
+            ScheduleRelaunch(pid);
             return true;
         }
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>等安装器退出后把 ZDM 再拉起来（脱离本进程，进程退出也不影响）。</summary>
+    private static void ScheduleRelaunch(int setupPid)
+    {
+        try
+        {
+            var running = Process.GetCurrentProcess().MainModule?.FileName;
+            if (string.IsNullOrEmpty(running)) return;
+            // 安装目录不会变（同一个 %LOCALAPPDATA%\Programs\ZDM），优先用安装目录里的 exe
+            var target = Path.Combine(AppContext.BaseDirectory, Path.GetFileName(running));
+            if (!File.Exists(target)) target = running;
+
+            var quoted = "'" + target.Replace("'", "''") + "'";
+            var script = setupPid > 0
+                // 安装器 Pid 已知：等它真正退出，再留 2 秒给文件落地
+                ? $"Wait-Process -Id {setupPid} -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; Start-Process -FilePath {quoted}"
+                // 拿不到 Pid 就按经验等一会儿，总比永远不启动好
+                : $"Start-Sleep -Seconds 10; Start-Process -FilePath {quoted}";
+
+            Process.Start(new ProcessStartInfo(
+                "powershell.exe",
+                "-NoProfile -NonInteractive -WindowStyle Hidden -Command \"" + script + "\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+        }
+        catch
+        {
+            // 拉起失败不影响安装本身，用户手动打开一次即可
         }
     }
 }
