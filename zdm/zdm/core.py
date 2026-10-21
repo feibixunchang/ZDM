@@ -864,20 +864,26 @@ class Download:
             should_stop=self._stop.is_set,
             on_proc=self._yt_take_proc,
         )
-        # 客户端重试链：默认客户端在部分网络环境下会被 YouTube 的 SABR
-        # 挡住（实测报「The page needs to be reloaded」/「not a bot」），
-        # 而 android_vr 是 2026-10 实测唯一能完整下载的客户端（见
-        # yt_resolve._STRATEGIES 注释）。第一次仍用默认（带 Cookie 的
-        # 登录环境它最快），命中特征错误才换 android_vr 重试一次。
+        # 客户端重试链：YouTube 的 SABR 拦截/空格式列表是**按请求**随机判的
+        # （同一台机器同一视频，解析能过、下载被拦，隔几分钟又自愈）。
+        # 所以默认与 android_vr 各试两次、中间隔 3 秒 —— android_vr 是
+        # 2026-10 实测能完整下载的客户端（见 yt_resolve._STRATEGIES 注释）。
+        # 命中特征错误才继续换；其它错误（403 音轨 CDN、磁盘满等）立即放弃。
         attempts = [
-            None,
-            ("--extractor-args", "youtube:player_client=android_vr"),
+            (None, 0.0),
+            (("--extractor-args", "youtube:player_client=android_vr"), 0.0),
+            (None, 3.0),
+            (("--extractor-args", "youtube:player_client=android_vr"), 3.0),
         ]
         rc, err = 1, ""
         try:
-            for extra_args in attempts:
+            for extra_args, delay in attempts:
                 if self._stop.is_set():
                     break
+                if delay:
+                    time.sleep(delay)
+                    if self._stop.is_set():
+                        break
                 rc, err = ytdlp_bin.download(
                     binp, self.yt_page, extra=list(extra_args) if extra_args else None,
                     **common,
@@ -886,6 +892,8 @@ class Download:
                     break
                 if not _yt_should_swap_client(err):
                     break
+            if rc != 0 and err and _yt_should_swap_client(err):
+                err += "（已自动用 android_vr 客户端重试仍未成功；建议在浏览器登录 YouTube、或在扩展设置里填写 Cookie 后重试）"
         finally:
             self._yt_proc = None
             if cookie_path:

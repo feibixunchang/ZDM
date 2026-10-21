@@ -209,21 +209,38 @@ def download(
     timeout: float = 30.0,
     proxy: str = "",
     expected_size: int = 0,
+    progress=None,
 ) -> Optional[str]:
     """Stream ``url`` into ``dest`` (atomically). Returns the path or None.
 
     ``expected_size`` (the size GitHub reported for the asset) is checked after
     the transfer: a truncated installer used to be opened as if it were fine.
+    ``progress(done, total)`` 在工作线程里按块回调，给界面画进度条用；
+    total 来自 expected_size 或 Content-Length，拿不到就是 0。
     """
     tmp = dest + ".part"
     try:
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
         with _open(url, timeout, proxy) as r, open(tmp, "wb") as f:
+            total = expected_size or 0
+            try:
+                cl = r.headers.get("Content-Length")
+                if cl and not total:
+                    total = int(cl)
+            except Exception:  # noqa: BLE001
+                pass
+            done = 0
             while True:
                 chunk = r.read(262144)
                 if not chunk:
                     break
                 f.write(chunk)
+                done += len(chunk)
+                if progress:
+                    try:
+                        progress(done, total)
+                    except Exception:  # noqa: BLE001
+                        pass
         if expected_size and os.path.getsize(tmp) != expected_size:
             raise IOError(
                 f"size mismatch: got {os.path.getsize(tmp)}, expected {expected_size}"
@@ -260,6 +277,10 @@ def install_windows(setup_path: str, relaunch_exe: str = "") -> bool:
         return "'" + str(p).replace("'", "''") + "'"
 
     script = (
+        # 先杀掉残留进程（serve 是独立的 ZDM.exe，GUI 退出后它还活着）：
+        # 不杀的话 Inno 的 /CLOSEAPPLICATIONS 关不掉它们，用户就得开任务
+        # 管理器手动结束（Windows 实测）。本 GUI 即将退出，再杀一次无妨。
+        "taskkill /F /IM ZDM.exe /T >$null 2>&1; Start-Sleep -Seconds 1; "
         f"$p = Start-Process -FilePath {q(setup_path)} -ArgumentList "
         "'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -PassThru;"
         " Wait-Process -Id $p.Id -ErrorAction SilentlyContinue;"

@@ -287,6 +287,16 @@ fi
 if command -v xdg-desktop-menu >/dev/null 2>&1; then
     xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
 fi
+
+# 升级后旧版 serve 进程还握着 9000 端口跑旧代码：新界面 ping 得到它就
+# 不会重启，表现成「装了新版还是旧行为/下不动」。先杀掉旧进程，再以
+# 触发安装的桌面用户身份把新 serve 拉起来 —— 用户不用再开终端敲
+# `zdm start --daemon`（实测升级路径）。纯 root 环境（无 SUDO_USER，
+# 如容器/CI）不启动：serve 以 root 跑会写坏下载目录属主。
+pkill -f "/opt/zdm/ZDM" >/dev/null 2>&1 || true
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -x "/opt/zdm/ZDM" ]; then
+    su -s /bin/sh -c "nohup /opt/zdm/ZDM start --daemon >/dev/null 2>&1" "$SUDO_USER" || true
+fi
 exit 0
 POSTINST
 chmod 0755 "$STAGE/DEBIAN/postinst"
