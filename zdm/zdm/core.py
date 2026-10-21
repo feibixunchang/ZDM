@@ -775,6 +775,94 @@ class Download:
             time.sleep(0.2)
 
     # ---------- YouTube：交给 yt-dlp（见 _run_ytdlp 的说明） ----------
+    def _yt_fallback_direct(self) -> bool:
+        """SABR 把 yt-dlp 下载通道拦死时的最后兜底。返回是否接管了任务。
+
+        yt-dlp 按请求随机被拦（格式列表为空/page needs to be reloaded），
+        重试链全灭后，解析通道（yt_resolve，带 5 分钟缓存）往往还拿得到
+        可用直链 —— 把任务原地切换成内置引擎的**顺序**直链下载
+        （googlevideo 只认从头的连续段，并发分片必 403，见 needs_sequential），
+        音轨用 format 自带的 audio_url 在 _finish 里 ffmpeg 合流。
+        """
+        try:
+            from . import yt_resolve
+
+            cookie = (self.headers or {}).get("Cookie") or ""
+            res = yt_resolve.resolve(self.yt_page, cookie=cookie, proxy=self.proxy or "")
+        except Exception:
+            return False
+        if not (res and res.get("ok")):
+            return False
+        want = int(self.yt_height or 0)
+        best = None
+        for f in res.get("formats") or []:
+            if not f or f.get("kind") != "video" or not f.get("url"):
+                continue
+            h = int(f.get("height") or 0)
+            if want and h > want:
+                continue
+            if best is None or h >= int(best.get("height") or 0):
+                best = f
+        if best is None:
+            return False
+
+        # 原地切换成普通下载通道。meta 里存着旧的 yt_page，先删掉，
+        # 否则 _prepare 的 load_meta 会把 yt_page 还原回来。
+        try:
+            if os.path.exists(self.meta_path):
+                os.remove(self.meta_path)
+        except OSError:
+            pass
+        self.yt_page = ""
+        self.url = best["url"]
+        self.final_url = best["url"]
+        if best.get("audio_url"):
+            self.audio_url = best["audio_url"]
+        if needs_sequential(self.url):
+            self.connections = 1
+        try:
+            self._prepare()
+        except Exception:
+            return False
+        self.status = "downloading"
+        self._stop.clear()
+        self._pause.clear()
+        self.meter.reset()
+        self._emit("started")
+        if self.size and self.supports_range:
+            self._run_segmented()
+        else:
+            self._run_single()
+        # 与 start() 的普通通道相同的收尾循环：跟进分块线程并回报终态。
+        while True:
+            if self._stop.is_set():
+                self._close_fd()
+                self._save_meta()
+                if self.status == "downloading":
+                    self.status = "paused"
+                self._emit("paused")
+                return True
+            if (
+                self.segmenter
+                and self.segmenter.is_complete()
+                and not any(t.is_alive() for t in self._threads)
+            ):
+                self._finish()
+                return True
+            if self.status == "error":
+                self._close_fd()
+                self._save_meta()
+                self._emit("error")
+                return True
+            if self._threads and all(not t.is_alive() for t in self._threads):
+                self.status = "error"
+                self.error = self.error or "download stalled"
+                self._close_fd()
+                self._save_meta()
+                self._emit("error")
+                return True
+            time.sleep(0.2)
+
     def _start_ytdlp(self) -> None:
         self.status = "downloading"
         if self.started_at is None:
@@ -915,6 +1003,11 @@ class Download:
         path = self._yt_output(stem)
         if (rc != 0 or err) or not path:
             self._yt_cleanup(stem)
+            # 最后兜底：yt-dlp 的下载通道被 SABR 拦死（重试链全灭）时，
+            # 解析通道往往还拿得到可用直链 —— 原地切换成内置引擎顺序
+            # 下载直链（嗅探推送就是这条路，全平台实测可用）。
+            if _yt_should_swap_client(err or "") and self._yt_fallback_direct():
+                return
             self.status = "error"
             msg = (err or f"yt-dlp 退出码 {rc}，没有产出文件").strip()
             # yt-dlp 的原文只有英文和 GitHub 链接，用户看不出该做什么。
