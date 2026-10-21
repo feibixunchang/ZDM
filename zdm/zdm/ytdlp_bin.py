@@ -131,6 +131,7 @@ def download(
     headers: Optional[Dict[str, str]] = None,
     ratelimit: int = 0,
     timeout: float = 30.0,
+    extra: Optional[List[str]] = None,
     on_progress: Optional[Callable[[dict], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     on_proc: Optional[Callable[[object], None]] = None,
@@ -169,6 +170,8 @@ def download(
     for k, v in (headers or {}).items():
         if v:
             args += ["--add-header", f"{k}:{v}"]
+    # 调用方指定的提取器参数（如 player_client 轮换）放在 URL 之前
+    args += extra or []
     args.append(page_url)
 
     errs: List[str] = []
