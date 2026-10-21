@@ -42,6 +42,17 @@ def _yt_should_swap_client(err: str) -> bool:
     )
 
 
+def _yt_login_required(err: str) -> bool:
+    """YouTube 明确要求登录/人机验证（而不是随机限流）。"""
+    e = (err or "").lower()
+    return (
+        "not a bot" in e
+        or "sign in to confirm" in e
+        or "login_required" in e
+        or "please sign in" in e
+    )
+
+
 def _yt_permanent_error(err: str) -> bool:
     """确定性失败：换客户端/换时间都没用，重试链应当立刻收工。
 
@@ -61,6 +72,39 @@ def _yt_permanent_error(err: str) -> bool:
         or "unsupported url" in e
         or "is not a valid url" in e
         or "no space left" in e
+    )
+
+
+def _yt_runtime_hint(binp: str, err: str) -> str:
+    """YouTube 失败时判断是不是「缺 JS 运行时」，并给出能动手的提示。
+
+    2026 起 yt-dlp 要跑 YouTube 的播放器 JS 来解签名 / n 参数；没有 deno
+    或 node 时，YouTube 只回故事板，或者干脆报 "The page needs to be
+    reloaded"。照抄 yt-dlp 原文，用户会以为是 Cookie / 登录问题（实测），
+    所以在错误后面补一句真正的解决办法。
+    """
+    try:
+        from . import ytdlp_bin
+
+        if ytdlp_bin.js_runtime_args(binp):
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+    e = (err or "").lower()
+    looks_like_js = (
+        not e
+        or "page needs to be reloaded" in e
+        or "requested format is not available" in e
+        or "signature solving failed" in e
+        or "n challenge" in e
+        or "javascript runtime" in e
+    )
+    if not looks_like_js:
+        return ""
+    return (
+        "\n\n原因很可能是缺少 JS 运行时：YouTube 的签名/防爬挑战需要 deno（或 node）。"
+        "装一个 deno（https://deno.com，装到 ~/.deno/bin 或 ~/.local/bin 即可，"
+        "ZDM 会自动找到），然后重启 ZDM 再试。验证：终端执行 deno --version。"
     )
 
 
@@ -1003,6 +1047,7 @@ class Download:
         ]
         rc, err = 1, ""
         try:
+            login_blocked = 0
             for extra_args, delay in attempts:
                 if self._stop.is_set():
                     break
@@ -1020,6 +1065,13 @@ class Download:
                 # 这类可能下一次就恢复，必须把整条链走完。
                 if _yt_permanent_error(err):
                     break
+                # 两个不同客户端都被要求「登录确认不是机器人」→ 这是账号/
+                # 网络层面的判定，换客户端不会变好。再跑完剩下的尝试只会让
+                # 用户盯着 0% 干等一分多钟（Mac 实测 81 秒）。
+                if _yt_login_required(err):
+                    login_blocked += 1
+                    if login_blocked >= 2:
+                        break
             if rc != 0 and err and ("403" in err or _yt_should_swap_client(err)):
                 err += "（已自动换 tv_embedded 客户端重试仍未成功；建议在浏览器登录 YouTube、或在扩展设置里填写 Cookie 后重试）"
         finally:
@@ -1062,7 +1114,8 @@ class Download:
                     "请在浏览器里登录 YouTube，用扩展的「下载此视频」重试；"
                     "手填链接的任务不会带浏览器 cookie。"
                 )
-            self.error = msg[:600]
+            msg += _yt_runtime_hint(binp, err or "")
+            self.error = msg[:900]
             self._emit("error")
             return
 

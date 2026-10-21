@@ -21,6 +21,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from zdm import __version__ as VERSION  # noqa: E402
 from zdm import autostart, desktop, runtime, update  # noqa: E402
+from zdm.videopage import is_video_page, is_youtube  # noqa: E402
 import theme as _theme  # noqa: E402
 
 # Global theme manager. Created lazily in main() (it needs the QApplication),
@@ -369,6 +370,12 @@ class Api:
     def extension(self):
         """「浏览器扩展」对话框用：扩展最近有没有心跳。"""
         return self._req("GET", "extension", timeout=3.0)
+
+    def youtube(self, url: str, cookie: str = ""):
+        """解析 YouTube 直链（服务端跑 yt-dlp，可能要几秒）。"""
+        return self._req(
+            "POST", "youtube/resolve", {"url": url, "cookie": cookie}, timeout=120.0
+        )
 
     def add(self, payload=None, **kw):
         """Create a task.
@@ -879,16 +886,42 @@ class ExtensionDialog(QDialog):
         self._timer.start()
         self._refresh()
 
+    # 对话框关掉后别再每 2 秒发一次请求（也少一条崩溃路径）：定时器只在
+    # 可见期间运行，重新打开时 _extensions() 会再 start()。
+    def hideEvent(self, e):  # noqa: N802 - Qt 命名
+        self._timer.stop()
+        super().hideEvent(e)
+
+    def showEvent(self, e):  # noqa: N802 - Qt 命名
+        super().showEvent(e)
+        if not self._timer.isActive():
+            self._timer.start()
+        self._refresh()
+
     # ---- 状态轮询：网络请求走 OpWorker 线程，不卡 UI ----
     def _refresh(self):
         if self._worker is not None:
             return
-        self._worker = OpWorker(self.api.extension)
-        self._worker.done.connect(self._on_status)
-        self._worker.start()
+        w = OpWorker(self.api.extension)
+        self._worker = w
+        w.done.connect(self._on_status)
+        # **必须等线程真正结束再丢引用**。done 是在 run() 里发出的，那一刻
+        # 线程还在跑；以前这里（_on_status 第一行）直接把 self._worker 置 None，
+        # PyQt 随即析构 QThread → Qt 报 "QThread: Destroyed while thread is
+        # still running" 并 abort。macOS 上实测就是这么「意外退出」的
+        # （崩溃报告：QThread::~QThread ← sipQThread::~sipQThread）。
+        w.finished.connect(lambda w=w: self._retire_worker(w))
+        w.start()
+
+    def _retire_worker(self, w):
+        try:
+            w.wait(3000)  # finished 只表示「即将结束」，wait 到完全退出才安全
+        except Exception:  # noqa: BLE001
+            pass
+        if self._worker is w:
+            self._worker = None
 
     def _on_status(self, tag: str, payload):
-        self._worker = None
         if tag != "ok":
             self.status.setText(f"⚠️ 检测失败：{payload}")
             return
@@ -1933,14 +1966,24 @@ class MainWindow(QMainWindow):
         w = OpWorker(fn, *args)
         self._workers.append(w)
         w.done.connect(lambda status, res: self._on_op_done(status, res, w))
+        # 同 ExtensionDialog：done 发出时线程还没结束，必须等到 finished 再
+        # 从列表里移除（移除就是丢掉最后一个引用 → QThread 被析构 → abort）。
+        w.finished.connect(lambda w=w: self._retire_worker(w))
         w.start()
+
+    def _retire_worker(self, worker):
+        """线程真正退出后才丢引用，避免 QThread 在运行中被析构。"""
+        try:
+            worker.wait(5000)
+        except Exception:  # noqa: BLE001
+            pass
+        if worker in self._workers:
+            self._workers.remove(worker)
 
     def _on_op_done(self, status, res, worker):
         if status == "err" or (isinstance(res, dict) and not res.get("ok")):
             msg = str(res) if status == "err" else res.get("error", "操作失败")
             self._status(f"操作失败：{msg}")
-        if worker in self._workers:
-            self._workers.remove(worker)
 
     # ---------------- updates ----------------
     def _background(self, fn, on_done, *args):
@@ -1957,6 +2000,7 @@ class MainWindow(QMainWindow):
             self._on_op_done(status, res, _w)
 
         w.done.connect(_done)
+        w.finished.connect(lambda w=w: self._retire_worker(w))
         w.start()
 
     def _auto_check_update(self):
@@ -2235,14 +2279,105 @@ class MainWindow(QMainWindow):
             self.url_edit.selectAll()
             return
         self.url_edit.clear()
-        self._run(self.api.add, {"url": url})
+        self._add_url(url)
+
+    # ---------------- 统一添加入口 ----------------
+    def _add_url(self, url: str, extra: dict = None) -> None:
+        """把链接变成任务：视频**页面**链接交给 yt-dlp，其它走多线程引擎。
+
+        以前「粘贴链接 → 下载」对 YouTube/B站 的页面链接是当普通文件下的，
+        存下来的就是一个名叫 ``watch`` 的 HTML 页面 —— 用户看到的就是
+        「下载的都是 Watch，不是真正的视频」。这里按链接形态分流：
+        YouTube 先解析清晰度让用户选；其它视频站直接让 yt-dlp 挑最佳。
+        """
+        url = (url or "").strip()
+        extra = dict(extra or {})
+        if not url:
+            return
+        if not url.lower().startswith(("http://", "https://")):
+            self._status("只支持 http/https 链接，例如 https://example.com/file.zip")
+            return
+        if is_youtube(url):
+            self._add_youtube(url, extra)
+            return
+        if is_video_page(url):
+            self._status("这是视频页面链接，交给 yt-dlp 解析并下载最佳画质…")
+            payload = {"url": url, "yt_page": url}
+            payload.update(extra)
+            self._run(self.api.add, payload)
+            return
+        payload = {"url": url}
+        payload.update(extra)
+        self._run(self.api.add, payload)
+
+    def _add_youtube(self, url: str, extra: dict) -> None:
+        self._status("正在解析 YouTube 清晰度（首次可能几秒）…")
+        self._background(
+            self.api.youtube,
+            lambda res, _u=url, _e=extra: self._on_youtube_resolved(_u, _e, res),
+            url,
+        )
+
+    def _on_youtube_resolved(self, url: str, extra: dict, res) -> None:
+        formats = []
+        if isinstance(res, dict) and res.get("ok"):
+            formats = [
+                f for f in (res.get("formats") or [])
+                if f.get("kind") in ("video", "video+muxed") and f.get("url")
+            ]
+        if not formats:
+            err = (res or {}).get("error") if isinstance(res, dict) else ""
+            self._status(
+                "解析失败{}，改为让 yt-dlp 直接下载…".format(f"（{err}）" if err else "")
+            )
+            payload = {"url": url, "yt_page": url}
+            payload.update(extra)
+            self._run(self.api.add, payload)
+            return
+
+        title = (res.get("title") or "YouTube 视频").strip()
+        labels = []
+        for f in formats:
+            try:
+                h = int(f.get("height") or 0)
+            except (TypeError, ValueError):
+                h = 0
+            label = f"{h}P" if h else (f.get("label") or "默认")
+            codec = str(f.get("codec") or "").lower()
+            if codec.startswith(("avc1", "avc3")):
+                label += " · H.264"
+            elif codec.startswith(("vp9", "vp09")):
+                label += " · VP9"
+            elif codec.startswith("av01"):
+                label += " · AV1"
+            labels.append(label)
+
+        pick, ok = QInputDialog.getItem(
+            self, "选择清晰度", f"{title}\n\n下载哪个清晰度？", labels, 0, False
+        )
+        if not ok or not pick:
+            return
+        f = formats[labels.index(pick)]
+        payload = {
+            "url": url,
+            "yt_page": url,
+            "yt_height": int(f.get("height") or 0),
+            "filename": title + ".mp4",
+        }
+        payload.update(extra)  # 用户手填的文件名/目录优先
+        self._run(self.api.add, payload)
+        self._status(f"已加入下载：{title}（{pick}）")
 
     def _new_download(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("新建下载")
         form = QFormLayout(dlg)
         url = QLineEdit()
-        url.setPlaceholderText("https://…")
+        url.setPlaceholderText("https://…（支持 YouTube/B站 视频页面链接）")
+        url.setToolTip(
+            "普通文件直接走多线程下载；粘贴 YouTube / B站 的**视频页面**链接时，\n"
+            "会自动解析清晰度并交给 yt-dlp 下载真正的视频（而不是网页）。"
+        )
         clip = QApplication.clipboard().text()
         if clip and clip.lower().startswith(("http://", "https://")):
             url.setText(clip.strip())
@@ -2251,6 +2386,7 @@ class MainWindow(QMainWindow):
         conns = QSpinBox()
         conns.setRange(1, 32)
         conns.setValue(int(self.config.get("connections") or 8))
+        conns.setToolTip("分块并发连接数。YouTube/B站 视频任务由 yt-dlp 下载，此项不生效。")
         directory = QLineEdit(str(self.config.get("download_dir") or ""))
         btn_dir = QPushButton("选择")
         btn_dir.clicked.connect(lambda: directory.setText(
@@ -2261,12 +2397,19 @@ class MainWindow(QMainWindow):
         rh.addWidget(directory)
         rh.addWidget(btn_dir)
         referer = QLineEdit()
-        referer.setPlaceholderText("可选，部分站点需要")
+        referer.setPlaceholderText("留空即可；只有防盗链站点才需要")
+        referer.setToolTip(
+            "Referer = 「你是从哪个页面点到这个文件的」来源地址。\n"
+            "少数站点（如 B站 视频 CDN）会检查它做防盗链，缺失就直接 403；\n"
+            "普通文件下载、YouTube 视频都不需要填。"
+        )
+        for w in (url, name, directory, referer):
+            _zh_standard_menu(w)
         form.addRow("链接 URL", url)
         form.addRow("保存为", name)
         form.addRow("连接数", conns)
         form.addRow("保存到", row)
-        form.addRow("Referer", referer)
+        form.addRow("Referer（来源页，可选）", referer)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Ok).setText("确定")
         box.button(QDialogButtonBox.Cancel).setText("取消")
@@ -2278,14 +2421,14 @@ class MainWindow(QMainWindow):
         u = url.text().strip()
         if not u:
             return
-        payload = {"url": u, "connections": conns.value()}
+        extra = {"connections": conns.value()}
         if name.text().strip():
-            payload["filename"] = name.text().strip()
+            extra["filename"] = name.text().strip()
         if directory.text().strip():
-            payload["dir"] = directory.text().strip()
+            extra["dir"] = directory.text().strip()
         if referer.text().strip():
-            payload["headers"] = {"Referer": referer.text().strip()}
-        self._run(self.api.add, payload)
+            extra["headers"] = {"Referer": referer.text().strip()}
+        self._add_url(u, extra)
 
     def _settings(self):
         cfg = self.config or {}
@@ -2293,6 +2436,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("设置")
         form = QFormLayout(dlg)
         directory = QLineEdit(str(cfg.get("download_dir") or ""))
+        _zh_standard_menu(directory)
         btn_dir = QPushButton("选择")
         btn_dir.clicked.connect(lambda: directory.setText(
             QFileDialog.getExistingDirectory(dlg, "选择下载目录", directory.text()) or directory.text()))
@@ -2314,6 +2458,7 @@ class MainWindow(QMainWindow):
         limit.setSpecialValueText("不限速")
         proxy = QLineEdit(str(cfg.get("proxy") or ""))
         proxy.setPlaceholderText("留空则使用系统环境变量代理")
+        _zh_standard_menu(proxy)
         port = QSpinBox()
         port.setRange(1024, 65535)
         port.setValue(int(cfg.get("port") or 9000))
@@ -2542,7 +2687,7 @@ class MainWindow(QMainWindow):
         self._show_front()
         for token in (payload or "").split():
             if token.lower().startswith(("http://", "https://")):
-                self._run(self.api.add, {"url": token})
+                self._add_url(token)
 
     def _show_front(self):
         """Show the window and make it the key window of an *active* app."""
@@ -2588,7 +2733,7 @@ class MainWindow(QMainWindow):
             urls = [e.mimeData().text()]
         for u in urls:
             if u.lower().startswith(("http://", "https://")):
-                self._run(self.api.add, {"url": u.strip()})
+                self._add_url(u.strip())
 
     def closeEvent(self, e):
         # 列宽可能在防抖计时器落盘前就被关窗，这里补一次。
@@ -2623,6 +2768,15 @@ class MainWindow(QMainWindow):
             self.poll.wait(2000)
         except Exception:
             pass
+        # 扩展引导对话框的 2 秒轮询也要停（它一旦开过就活得和主窗口一样久）。
+        ext_dlg = getattr(self, "_ext_dlg", None)
+        if ext_dlg is not None:
+            try:
+                ext_dlg._timer.stop()
+                if ext_dlg._worker is not None and ext_dlg._worker.isRunning():
+                    ext_dlg._worker.wait(2000)
+            except Exception:
+                pass
         # In-flight API workers (e.g. a 30s-timeout pause request) must not
         # still be running when the interpreter tears down, or Qt aborts with
         # "QThread: Destroyed while thread is still running".
@@ -2680,8 +2834,12 @@ def _zh_standard_menu(edit) -> None:
                     renamed = zh.get(base.replace("&", "").strip().lower())
                     if renamed:
                         a.setText(renamed + (("\t" + hotkey) if hotkey else ""))
-                # popup 而不是 exec_：非阻塞，事件循环不被菜单卡住
-                menu.popup(ev.globalPos())
+                # 必须用 exec_（阻塞）：popup() 是非阻塞的，函数一返回 menu
+                # 就没有 Python 引用了，PyQt 立刻把 QMenu 析构掉 —— 菜单
+                # 一闪而过/根本不出现。Windows 上实测就是「右键没有任何反应」，
+                # 于是设置里的 Cookie 框没法粘贴。exec_ 自己跑嵌套事件循环，
+                # 菜单关闭后才返回，生命周期没问题。
+                menu.exec_(ev.globalPos())
                 return True
             return False
 
@@ -2738,6 +2896,55 @@ def _install_translations(app) -> None:
         _dlog(f"[i18n] failed: {type(e).__name__}: {e}")
 
 
+def _restart_stale_service(api: "Api") -> None:
+    """让后台 serve 进程和界面跑同一版代码。
+
+    升级（尤其 macOS 的 dmg 覆盖安装、Linux 免 root 包覆盖）只替换磁盘上的
+    文件；后台 serve 进程是升级前启动的，内存里跑的还是旧代码。界面显示新版
+    本号、下载引擎却还是旧的 —— 用户看到的就是「更新到最新了，下载还是老
+    毛病」，实测 macOS 上更新到 1.15.15 后服务还是 1.15.14 的进程。
+
+    这里发现版本不一致就请旧服务退出、再拉起当前版本的服务（launchd/systemd
+    的 KeepAlive 也可能先把它拉起来，两种情况都能收敛到正确版本）。
+    """
+    try:
+        info = api._req("GET", "", timeout=4.0)
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(info, dict) or not info.get("ok"):
+        return
+    running = str(info.get("version") or "")
+    if not running or running == VERSION:
+        return
+    _dlog(f"[service] running v{running} != GUI v{VERSION} -> restart")
+    api._req("POST", "action", {"action": "shutdown"}, timeout=3.0)
+    for _ in range(60):
+        res = api._req("GET", "", timeout=0.5)
+        if not (isinstance(res, dict) and res.get("ok")):
+            break
+        time.sleep(0.1)
+    try:
+        if runtime.is_frozen() and os.path.isfile(sys.executable):
+            cmd = [sys.executable, "start", "--daemon", "--no-open"]
+        else:
+            cmd = runtime.cli_cmd("start", "--daemon", "--no-open")
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            **runtime.silent_proc_kwargs(),
+        )
+    except Exception:  # noqa: BLE001
+        return
+    for _ in range(60):
+        time.sleep(0.25)
+        res = api._req("GET", "", timeout=1.0)
+        if isinstance(res, dict) and res.get("ok") and str(res.get("version")) == VERSION:
+            _dlog("[service] restarted with the new version")
+            return
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     smoke = "--smoke" in argv
@@ -2791,12 +2998,14 @@ def main(argv=None) -> int:
         return 0
 
     api = Api(port)
+    # 升级后旧服务进程可能还跑着上一版代码：先对齐版本，再开窗口。
+    _restart_stale_service(api)
     win = MainWindow(api, port)
     app.set_main_window(win)
     guard.on_message(lambda payload: win.wake(payload))
     for token in rest:
         if token.lower().startswith(("http://", "https://")):
-            win._run(api.add, {"url": token})
+            win._add_url(token)
     win.show()
     if smoke:
         QTimer.singleShot(3500, win._quit)

@@ -258,6 +258,11 @@ def download(
         args += ["--proxy", proxy]
     if ratelimit:
         args += ["--limit-rate", str(int(ratelimit))]
+    else:
+        # 未登录/无 PO token 的 YouTube 直链常被限速到几百 KB/s。yt-dlp 探测到
+        # 这种异常低速会换一个客户端重新取直链，速度通常明显回升。用户自己
+        # 设了限速时不加 —— 否则会把「主动限速」误判成「被限速」而反复重取。
+        args += ["--throttled-rate", "100K"]
     for k, v in (headers or {}).items():
         if v:
             args += ["--add-header", f"{k}:{v}"]

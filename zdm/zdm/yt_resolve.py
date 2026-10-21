@@ -186,6 +186,7 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
             (None, 3.0),
             (["--extractor-args", "youtube:player_client=tv_embedded"], 3.0),
         ]
+        login_blocked = 0
         for extra, delay in attempts:
             if delay:
                 time.sleep(delay)
@@ -196,6 +197,12 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
             last_bin_err = res.get("error") or last_bin_err
             if not _resolve_retryable(last_bin_err):
                 break
+            # 两个不同客户端都要求登录/人机验证：换客户端不会变好，别让扩展
+            # 菜单干等一分多钟。
+            if _is_bot_check(last_bin_err):
+                login_blocked += 1
+                if login_blocked >= 2:
+                    break
     else:
         last_bin_err = ""
 
@@ -262,7 +269,32 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
         merged["client"] = "+".join(used)
         _CACHE[url] = (time.time(), merged)
         return merged
-    return {"ok": False, "formats": [], "title": title, "error": last_err}
+    return {
+        "ok": False,
+        "formats": [],
+        "title": title,
+        "error": last_err + _missing_runtime_hint(),
+    }
+
+
+def _missing_runtime_hint() -> str:
+    """本机没有 deno/node 时，给解析失败补一句真正的原因。
+
+    没有 JS 运行时，YouTube 的签名/n 挑战解不开，表现是「只有故事板」或
+    "The page needs to be reloaded" —— 用户和扩展菜单只会显示一句英文，
+    完全不知道要装什么。
+    """
+    try:
+        mod = _bin_module()
+        binp = mod.binary_path()
+        if not binp or mod.js_runtime_args(binp):
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+    return (
+        "\n\n（本机没找到 deno/node 等 JS 运行时，YouTube 的签名挑战解不开。"
+        "安装 deno 后重启 ZDM 即可；装到 ~/.deno/bin 或 ~/.local/bin 都能被自动找到。）"
+    )
 
 
 def _cookiefile(cookie: Optional[str]) -> Optional[str]:

@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.15.15**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.15.16**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -21,11 +21,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.15.15.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.15.16.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.15.15_amd64.deb` | `sudo apt install ./zdm_1.15.15_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.15.16_amd64.deb` | `sudo apt install ./zdm_1.15.16_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.15.15.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.15.16.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.15.15
+bash zdm/build_linux_app.sh ./linux-build 1.15.16
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -115,17 +115,39 @@ BEX64 / 0xc0000409）。**升级到 v1.15.13 及以上即可根治。**
 
 处理后重新运行安装包覆盖安装一遍即可。
 
-**视频下载失败（YouTube 转圈/报 403/提示人机验证）** —— v1.15.15 修了三处：
-① 下载重试用的 `android_vr` 客户端已经失效（只回 360p，直链必 403），换成
-`tv_embedded`，并且只有「视频本身不可用」才提前放弃重试；
-② yt-dlp 通道全灭时不再被 403 挡住，直接切到解析出的直链用内置引擎下载；
-③ 三端都会在常见安装目录里找 deno / node 给 yt-dlp 解 JS 挑战（以前只找 macOS 的
-`/opt/homebrew/bin`），并把找到的运行时用 `--js-runtimes` 显式传入。
+**视频下载失败（YouTube 转圈/报 403/提示人机验证/"The page needs to be reloaded"）** ——
+v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常见根因**：
+
+1. **缺少 JS 运行时**。2026 年起 yt-dlp 要跑 YouTube 播放器里的 JS 解签名和
+   n 参数；没有 deno 时 YouTube 只回故事板，yt-dlp 的报错却是毫不相干的
+   "The page needs to be reloaded"。ZDM 会按顺序在 PATH、`~/.deno/bin`、
+   `~/.local/bin`、`/usr/local/bin`、`%USERPROFILE%\.deno\bin`、
+   `%APPDATA%\npm` 等目录里找 deno / node，并用 `--js-runtimes` 显式传给
+   yt-dlp。都找不到时会在任务报错里直接写「缺少 JS 运行时」，不再让你去猜
+   Cookie 问题。装 deno：<https://deno.com>（一行安装脚本，默认进 `~/.deno/bin`）。
+2. **升级后旧服务进程还在跑旧代码**。后台 `serve` 是独立进程，覆盖安装只换了
+   磁盘文件；界面是新版、下载引擎还是旧版，于是 "更新了还是老毛病"。
+   v1.15.16 起 GUI 启动时会对比 `/api` 报告的版本，不一致就请旧服务退出并
+   拉起当前版本；Linux 的 .deb/tar.gz 和 Windows 安装包也会在安装前结束旧进程。
+3. **重试客户端与兜底**（v1.15.15）：`android_vr` 已失效，换成 `tv_embedded`；
+   yt-dlp 通道全灭时不再被 403 挡住，直接切到解析出的直链用内置引擎下载。
+
+> 如果报错是 `Sign in to confirm you're not a bot`：这是 YouTube 在要求登录态，
+> 而浏览器导出的 Cookie 已被判定失效（YouTube 会定期轮换 `SID`/`PSIDTS`，甚至
+> 几分钟就换一次）。处理：在 Chrome 里打开并登录 YouTube（把那支视频播几秒），
+> 再用扩展的「下载此视频」重试；或在设置里粘贴**刚导出**的 Cookie。部分视频
+> （年龄限制、会员内容）匿名永远拿不到，必须登录。
+> v1.15.16 起这种情况最多重试两个客户端（约 30 秒）就会给出中文提示，不再让你
+> 盯着 0% 干等一分多钟。
+
+**粘贴视频链接却下到了网页（文件名是 watch）** —— 这是页面链接被当普通文件
+下载了（下完是一个 HTML）。v1.15.16 起，YouTube / B站 / 抖音等**页面链接**
+在桌面端、网页版、命令行都会被自动识别成「页面任务」，交给 yt-dlp 解析成
+真正的视频；YouTube 还会先让你选清晰度。媒体直链不受影响。
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。
-排查时先看这个文件，再对比版本号——旧版本升级失败最常见的原因是旧进程还在跑：
-Linux 免 root 包和 Windows 安装包从 v1.15.15 起都会在安装前先结束旧进程。
+排查时先看这个文件，再对比版本号。
 
 ## macOS：真正的原生 App（v1.11.0 起）
 
