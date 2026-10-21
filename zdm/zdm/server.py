@@ -16,6 +16,7 @@ from . import __version__ as VERSION
 from . import desktop
 from . import presence
 from .manager import Manager
+from .videopage import video_page_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -390,6 +391,17 @@ class Handler(BaseHTTPRequestHandler):
                     # Referer; without it the server answers 403.
                     if not headers.get("Referer"):
                         headers["Referer"] = _site_referer(url)
+            # 视频**页面**链接（YouTube/B站…）不能当普通文件下：那样存下来的
+            # 是一个叫 watch 的 HTML。桌面端、网页版、CLI 都在这里汇合，所以
+            # 在服务端统一转成页面任务交给 yt-dlp；扩展推的媒体直链不会命中。
+            if (
+                not body.get("yt_page")
+                and not body.get("page_url")
+                and not body.get("kind")
+            ):
+                page = video_page_url(url)
+                if page:
+                    body["yt_page"] = page
             try:
                 d = self.manager.add(
                     url=url,
