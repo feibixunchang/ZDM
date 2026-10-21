@@ -203,6 +203,11 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _cors(self) -> None:
+        # 本地 API 不需要 keep-alive：开着它，服务重启（升级后 postinst 会
+        # 杀掉旧 serve）后浏览器连接池里全是死连接，扩展要重启浏览器才
+        # 恢复（实测）。每响应一条就关，客户端下次新建连接，彻底规避。
+        self.close_connection = True
+        self.send_header("Connection", "close")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
         # The browser extension identifies itself with X-ZDM-Extension. It has
