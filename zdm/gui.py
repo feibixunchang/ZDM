@@ -1330,7 +1330,11 @@ class MainWindow(QMainWindow):
 
         btn_add = QPushButton("＋ 下载")
         btn_add.setObjectName("primary")
-        btn_add.clicked.connect(self._new_download)
+        # 工具栏输入框里有链接时直接走「粘贴即下载」：以前这里固定打开
+        # 「新建下载」大对话框，视频页选完链接还要再弹一次清晰度——用户看到
+        # 的就是「粘贴一个链接要关两个窗」。只有输入框和剪贴板都没有链接时
+        # 才打开详细对话框。
+        btn_add.clicked.connect(self._add_clicked)
         tb.addWidget(btn_add)
 
         # Per-task pause / resume live on each row (see _render); the global
@@ -1438,6 +1442,21 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("正在连接本地服务…")
         # Always-visible version number, bottom right.
+        # 扩展连接状态：常驻主界面（以前只在「浏览器扩展」对话框里看得到）。
+        # 点一下打开详情；后台每 5 秒问一次 /api/extension。
+        self.ext_label = QLabel("扩展检测中…")
+        self.ext_label.setObjectName("extStatus")
+        self.ext_label.setCursor(Qt.PointingHandCursor)
+        self.ext_label.setToolTip("浏览器扩展连接状态（点击查看详情）")
+        self.ext_label.mousePressEvent = lambda _e: self._extensions()
+        self.statusBar().addPermanentWidget(self.ext_label)
+        self._ext_worker = None
+        self._ext_timer = QTimer(self)
+        self._ext_timer.setInterval(5000)
+        self._ext_timer.timeout.connect(self._refresh_ext_status)
+        self._ext_timer.start()
+        QTimer.singleShot(2000, self._refresh_ext_status)
+
         self.version_label = QLabel(f"v{VERSION}")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setToolTip(f"ZDM 桌面端 当前版本 v{VERSION}（点击检查更新）")
@@ -1518,6 +1537,11 @@ class MainWindow(QMainWindow):
         self.update_download_btn.setCursor(Qt.PointingHandCursor)
         self.update_download_btn.clicked.connect(self._download_update)
         hl.addWidget(self.update_download_btn)
+        page_btn = QPushButton("打开发布页")
+        page_btn.setCursor(Qt.PointingHandCursor)
+        page_btn.setToolTip("在浏览器打开 GitHub Releases 页面，可用其它下载工具下载安装包")
+        page_btn.clicked.connect(self._open_update_page)
+        hl.addWidget(page_btn)
         notes_btn = QPushButton("更新说明")
         notes_btn.setCursor(Qt.PointingHandCursor)
         notes_btn.clicked.connect(self._show_release_notes)
@@ -1555,6 +1579,7 @@ class MainWindow(QMainWindow):
         self.autostart_action.setChecked(autostart.is_enabled())
         self.autostart_action.triggered.connect(self._toggle_autostart)
         menu.addAction("检查更新", lambda: self._check_update(silent=False))
+        menu.addAction("打开发布页", self._open_update_page)
         menu.addAction(f"关于 ZDM（v{VERSION}）", self._about)
         menu.addSeparator()
         menu.addAction("退出", self._quit)
@@ -1664,7 +1689,7 @@ class MainWindow(QMainWindow):
         running = [t for t in self.tasks if t.get("status") == "downloading"]
         total_speed = sum(_num(t.get("speed")) for t in running)
         self.statusBar().showMessage(
-            f"已连接 · v{VERSION} · 端口 {self.config.get('port', self.port)} · "
+            f"桌面端已连接本机服务 · v{VERSION} · 端口 {self.config.get('port', self.port)} · "
             f"进行中 {len(running)} · 总速度 {fmt_size(total_speed)}/s · 共 {len(self.tasks)} 项"
         )
 
@@ -1878,8 +1903,8 @@ class MainWindow(QMainWindow):
             if status == "completed":
                 # "打开" opens the downloaded file itself (a .dmg starts the
                 # installer); "目录" reveals it in the file manager.
-                self._btn(hl, "打开", lambda _=False, i=t["id"]: self._act(i, "open"))
-                self._btn(hl, "目录", lambda _=False, i=t["id"]: self._act(i, "reveal"))
+                self._btn(hl, "打开", lambda _=False, i=t["id"]: self._open_task(i, False))
+                self._btn(hl, "目录", lambda _=False, i=t["id"]: self._open_task(i, True))
             else:
                 self._btn(hl, "重下", lambda _=False, i=t["id"]: self._act(i, "restart"))
                 # 失败行额外给一个「原因」按钮：点开是二级弹窗，看完整错误
@@ -2060,8 +2085,8 @@ class MainWindow(QMainWindow):
         dest = os.path.join(os.path.expanduser("~/Downloads"), asset["name"])
         proxy = str((self.config or {}).get("proxy") or "")
         self.update_download_btn.setEnabled(False)
-        self.update_download_btn.setText("下载中… 0%")
-        self._status(f"正在下载更新 {asset['name']} …", hold=60)
+        self.update_download_btn.setText("测速中…")
+        self._status("正在选择最快的下载线路…", hold=60)
         # 进度：update.download 在工作线程回调，这里只记数字；
         # 定时器在主线程轮询刷 UI（跨线程直接碰控件会崩）。
         self._dl_progress = {"done": 0, "total": asset.get("size") or 0}
@@ -2107,68 +2132,44 @@ class MainWindow(QMainWindow):
             ):
                 self._open_url((info or {}).get("url") or update.PROJECT_URL)
             return
-        # Windows 的安装包就是静默升级的入口：不再让用户点一遍向导，也不再
-        # 把人送去文件管理器里手动双击。装完由那个游离进程把 ZDM 拉回来。
+        # 点「下载并安装」就是授权：下载完直接交给系统安装器，不再弹第二次确认。
         if sys.platform == "win32" and path.lower().endswith(".exe"):
-            if not self._message_yes_no(
-                "安装更新",
-                f"已下载 {os.path.basename(path)}。\n\n"
-                "现在关闭 ZDM 并安装吗？装完会自动重新打开，"
-                "下载记录、设置和已下载的文件都不受影响。",
-            ):
-                self._status(f"安装包已保存到 {path}，双击即可安装", hold=10)
-                return
             if not update.install_windows(path):
                 self._message(
                     "更新未能启动",
                     "没能启动安装程序，请手动运行：\n" + path,
                 )
                 return
-            self._status("正在关闭并安装更新…", hold=8)
+            self._status("正在安装更新…", hold=10)
             QApplication.quit()
             return
-        # Linux 的安装包是 .deb：pkexec 一键安装（弹系统授权框），
-        # postinst 会自动重启后台服务；不用再让用户开终端 dpkg -i。
         if sys.platform.startswith("linux") and path.lower().endswith(".deb"):
-            if not self._message_yes_no(
-                "安装更新",
-                f"已下载 {os.path.basename(path)}。\n\n"
-                "现在安装吗？接下来会弹出系统授权窗口（输入登录密码）。\n"
-                "装完后 ZDM 会自动关闭，重新打开即是新版。",
-            ):
-                self._status(f"安装包已保存到 {path}，可稍后手动安装", hold=10)
-                return
-            self._status("正在安装更新（请在授权窗口输入密码）…", hold=120)
+            self._status("正在打开系统安装器…", hold=30)
             self._background(
                 lambda: update.install_linux(path),
                 lambda res: self._on_linux_installed(res, path),
             )
             return
         self._status(f"已下载 {os.path.basename(path)}，正在打开安装包…", hold=6)
-        # "打开" = hand the file to the OS: a .dmg mounts and shows the installer,
-        # a .exe starts the setup wizard.
+        # macOS: opening the .dmg mounts it and shows the installer.
         self._run(self.api.open_file, path)
         self._message(
             "更新已就绪",
             f"安装包已保存到：\n{path}\n\n"
-            "已为你打开：按提示完成安装即可。\n"
-            "macOS 把 ZDM 拖进“应用程序”会自动覆盖旧版本；Windows 直接下一步。",
+            "已为你打开：把 ZDM 拖进“应用程序”即可覆盖旧版本。",
         )
 
     def _on_linux_installed(self, res, path):
         ok, err = (res if isinstance(res, tuple) else (bool(res), ""))
         if ok:
-            self._message(
-                "安装完成",
-                "新版本已安装，后台服务也已自动重启。\n\n"
-                "ZDM 现在会关闭——重新打开即是新版。",
-            )
-            QApplication.quit()
+            self._status("安装器已打开，请按提示完成安装；ZDM 即将关闭", hold=15)
+            QTimer.singleShot(1500, QApplication.quit)
         else:
             self._message(
                 "更新未能自动安装",
-                f"自动安装失败：{err or '未知原因'}\n\n"
-                f"可以手动安装：\ndpkg -i {path}",
+                f"没能打开系统安装器：{err or '未知原因'}\n\n"
+                f"安装包已保存到：\n{path}\n"
+                "可手动双击安装，或用“打开发布页”换其它下载工具。",
             )
 
     def _show_release_notes(self):
@@ -2179,6 +2180,10 @@ class MainWindow(QMainWindow):
         box.setText(notes[:3000])
         box.setStandardButtons(QMessageBox.Ok)
         box.exec_()
+
+    def _open_update_page(self):
+        info = self._update_info or {}
+        self._open_url(info.get("url") or update.PROJECT_URL)
 
     def _ignore_update(self):
         info = self._update_info or {}
@@ -2236,6 +2241,31 @@ class MainWindow(QMainWindow):
         elif clicked is home:
             self._open_url(update.PROJECT_URL)
 
+    def _open_task(self, task_id, reveal=False):
+        """「打开 / 目录」用 GUI 自己的会话调用 xdg-open。
+
+        后台服务是独立进程，启动时没有继承 DISPLAY/DBUS_SESSION_BUS_ADDRESS；
+        它调用 xdg-open 只会静默失败（Linux 上「打开」「目录」点了没反应就是
+        这个原因）。GUI 进程本身在图形会话里，QDesktopServices 能正确唤起
+        文件管理器/默认播放器。
+        """
+        t = next((x for x in self.tasks if x["id"] == task_id), None)
+        if not t:
+            return
+        directory = t.get("directory") or ""
+        path = os.path.join(directory, t.get("filename") or "")
+        if reveal or not os.path.exists(path):
+            target = directory if os.path.isdir(directory) else os.path.expanduser("~")
+        else:
+            target = path
+        if not os.path.exists(target):
+            self._status(f"路径不存在：{target}", hold=6)
+            return
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(target)):
+            self._status(f"已打开：{target}", hold=4)
+        else:
+            self._status(f"无法打开：{target}（系统缺少文件管理器/默认程序）", hold=8)
+
     def _act(self, task_id, action):
         self._run(self.api.action, task_id, action)
 
@@ -2269,6 +2299,25 @@ class MainWindow(QMainWindow):
 
     def _bulk(self, action):
         self._run(self.api.bulk, action)
+
+    def _add_clicked(self):
+        """工具栏「＋ 下载」：优先用输入框/剪贴板里的链接，一步进清晰度选择。"""
+        # 某些 Qt 样式/工具栏会把同一次点击派发两次（实测一次点击进来两条），
+        # 结果就是连开两个清晰度框。这里做 900ms 去抖，一次点击只处理一次。
+        if getattr(self, "_add_guard", False):
+            return
+        self._add_guard = True
+        QTimer.singleShot(900, lambda: setattr(self, "_add_guard", False))
+        url = self.url_edit.text().strip()
+        if not url:
+            clip = QApplication.clipboard().text().strip()
+            if clip.lower().startswith(("http://", "https://")):
+                url = clip
+                self.url_edit.setText(url)
+        if url:
+            self._quick_add()
+            return
+        self._new_download()
 
     def _quick_add(self):
         url = self.url_edit.text().strip()
@@ -2653,6 +2702,45 @@ class MainWindow(QMainWindow):
         else:
             self._status("打开网页版失败：系统里没有可用的浏览器（需要 xdg-open 或已安装的浏览器）")
 
+    # ---- 主界面扩展状态（常驻） ----
+    def _refresh_ext_status(self):
+        if self._ext_worker is not None:
+            return
+        w = OpWorker(self.api.extension)
+        self._ext_worker = w
+        w.done.connect(self._on_ext_status_main)
+        w.finished.connect(lambda w=w: self._retire_ext_worker(w))
+        w.start()
+
+    def _retire_ext_worker(self, w):
+        try:
+            w.wait(2000)
+        except Exception:  # noqa: BLE001
+            pass
+        if self._ext_worker is w:
+            self._ext_worker = None
+
+    def _on_ext_status_main(self, tag: str, payload):
+        r = payload if (tag == "ok" and isinstance(payload, dict)) else {}
+        if not r.get("ok"):
+            self.ext_label.setText("扩展状态未知")
+            self.ext_label.setStyleSheet("color: #9ca3af;")
+            return
+        if r.get("seen_recently"):
+            self.ext_label.setText("● 扩展已连接")
+            self.ext_label.setStyleSheet("color: #22c55e; font-weight: 600;")
+            self.ext_label.setToolTip("浏览器扩展工作正常；点击查看详情")
+        elif r.get("last_seen"):
+            self.ext_label.setText("● 扩展已休眠")
+            self.ext_label.setStyleSheet("color: #f59e0b;")
+            self.ext_label.setToolTip(
+                "扩展最近活跃过，但当前没有心跳（浏览器关闭后会休眠）。点击查看详情"
+            )
+        else:
+            self.ext_label.setText("● 扩展未连接")
+            self.ext_label.setStyleSheet("color: #ef4444;")
+            self.ext_label.setToolTip("尚未检测到浏览器扩展；点击查看安装方法")
+
     def _extensions(self):
         """「浏览器扩展」引导对话框（单例：避免重复弹出堆叠）。"""
         dlg = getattr(self, "_ext_dlg", None)
@@ -2685,8 +2773,8 @@ class MainWindow(QMainWindow):
         style_glass_menu(menu)
         menu.addAction("复制链接", lambda: QApplication.clipboard().setText(t.get("url") or ""))
         if t.get("status") == "completed":
-            menu.addAction("打开文件", lambda: self._act(t["id"], "open"))
-            menu.addAction("在文件夹中显示", lambda: self._act(t["id"], "reveal"))
+            menu.addAction("打开文件", lambda: self._open_task(t["id"], False))
+            menu.addAction("在文件夹中显示", lambda: self._open_task(t["id"], True))
         menu.addSeparator()
         menu.addAction("暂停", lambda: self._act(t["id"], "pause"))
         menu.addAction("继续", lambda: self._act(t["id"], "resume"))
@@ -2977,10 +3065,28 @@ def main(argv=None) -> int:
     try:
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        if sys.platform == "win32":
+            # 分数缩放（125%）会让 Qt 用 1.25 倍绘制字体，Windows 上就是发虚；
+            # Round 到 100%/150% 反而清晰。必须在 QApplication 创建前设置。
+            try:
+                QApplication.setHighDpiScaleFactorRoundingPolicy(
+                    Qt.HighDpiScaleFactorRoundingPolicy.Round
+                )
+            except Exception:
+                pass
     except Exception:
         pass
 
     app = ZDMApplication(sys.argv)
+    if sys.platform == "win32":
+        # 与 QSS 一致：雅黑 10pt + 全 hinting，避免正文比按钮“糊”。
+        try:
+            f = QFont("Microsoft YaHei UI", 10)
+            f.setHintingPreference(QFont.PreferFullHinting)
+            f.setStyleStrategy(QFont.PreferAntialias)
+            app.setFont(f)
+        except Exception:
+            pass
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
