@@ -29,6 +29,11 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"       # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                             # repo root
 BUILD_DIR="${1:-$(pwd)/linux-build}"
+# The script cd's into $SRC before invoking PyInstaller, so a *relative* build
+# dir (e.g. ../build-1.15.17) used to make "$BUILD_DIR/pyinstaller.log"
+# disappear after the cd and abort the build. Canonicalize it once, here.
+mkdir -p "$BUILD_DIR"
+BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
 # 版本号默认读 zdm/zdm/__init__.py（唯一真源）。写死在这里会漂：
 # v1.14.7 就出现过 build_dist.py=1.13.0 / 后端=1.14.0，包名和 /api 报的版本对不上。
 VERSION="${2:-$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SRC/zdm/__init__.py" 2>/dev/null | head -1)}"
@@ -100,6 +105,11 @@ print(f"    PyQt5 {PYQT_VERSION_STR} | Qt {QT_VERSION_STR} | PyInstaller {PyInst
 PYEOF
 
 # ---------------------------------------------------------------- freeze
+# YouTube 的签名/n 参数需要 JS 运行时（deno）。随包带上，用户装完即可用；
+# 版本固定在 fetch_bin.py 里，避免上游更新悄悄改变发布内容。
+if [ ! -x "$SRC/bin/deno" ]; then
+    python3 "$SRC/fetch_bin.py" --dest "$SRC/bin" --os linux
+fi
 echo "==> freezing (PyInstaller onedir)"
 cd "$SRC"
 export PYTHONDONTWRITEBYTECODE=1
@@ -139,6 +149,8 @@ if not r.get("pyqt5"): bad.append("PyQt5 not importable")
 # 「YouTube 不能下」或「下载成功但没声音」。
 if not r.get("ytdlp"): bad.append("bundled yt-dlp binary missing")
 if not r.get("ffmpeg"): bad.append("bundled ffmpeg missing (DASH 音轨无法合流)")
+# deno 是 YouTube 的 JS 运行时；没有它 YouTube 只回故事板（"page needs to be reloaded"）。
+if not r.get("deno"): bad.append("bundled deno/JS runtime missing (YouTube 解析会失败)")
 if r.get("version") != want:
     bad.append(f"version mismatch: bundle {r.get('version')} != build {want}")
 if bad:
@@ -251,6 +263,7 @@ MIME
 
 install -m644 "$REPO/LICENSE.txt" "$STAGE/usr/share/doc/zdm/copyright"
 install -m644 "$SRC/README.md" "$STAGE/usr/share/doc/zdm/README.md"
+[ -f "$SRC/bin/DENO-LICENSE.md" ] && install -m644 "$SRC/bin/DENO-LICENSE.md" "$STAGE/usr/share/doc/zdm/DENO-LICENSE.md" || true
 
 INSTALLED_KB="$(du -sk "$STAGE" --exclude=DEBIAN | awk '{print $1}')"
 mkdir -p "$STAGE/DEBIAN"
@@ -319,6 +332,12 @@ cat >"$STAGE/DEBIAN/prerm" <<'PRERM'
 set -e
 # Stop a running desktop client so no file stays mapped from /opt/zdm.
 pkill -f '/opt/zdm/ZDM' >/dev/null 2>&1 || true
+# The desktop entry launches the /usr/bin symlink, so its argv[0] is
+# "/usr/bin/zdm-desktop", not "/opt/zdm/ZDM" — a pattern that only matches the
+# real path leaves the old GUI running after an upgrade (it then talks to the
+# new service with old code). Kill both spellings.
+pkill -f '^/usr/bin/zdm-desktop( |$)' >/dev/null 2>&1 || true
+pkill -f '^/usr/bin/zdm( |$)' >/dev/null 2>&1 || true
 # Drop the browser integration we registered in postinst: a stale host
 # manifest makes Chrome launch a binary that no longer exists.
 rm -f /etc/opt/chrome/native-messaging-hosts/com.zdm.launcher.json \

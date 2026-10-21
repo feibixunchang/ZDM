@@ -516,6 +516,11 @@ def js_runtimes() -> Dict:
             f"/opt/homebrew/bin/{name}",
             f"/usr/local/bin/{name}",
             os.path.expanduser(f"~/.{name}/bin/{name}"),
+            # Deno's official installer uses ~/.deno/bin, but a plain binary
+            # dropped into ~/.local/bin is just as common (and is what the
+            # "install deno" hint suggests on Linux).
+            os.path.expanduser(f"~/.local/bin/{name}"),
+            f"/usr/bin/{name}",
         ):
             if cand and os.path.isfile(cand):
                 return {name: {"path": cand}}

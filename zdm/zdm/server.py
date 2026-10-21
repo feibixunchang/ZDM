@@ -16,7 +16,7 @@ from . import __version__ as VERSION
 from . import desktop
 from . import presence
 from .manager import Manager
-from .videopage import video_page_url
+from .videopage import video_page_filename, video_page_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -402,6 +402,19 @@ class Handler(BaseHTTPRequestHandler):
                 page = video_page_url(url)
                 if page:
                     body["yt_page"] = page
+                    # These tasks now go through yt-dlp. Mark them as video
+                    # (the list shows the right kind/icon) and give them a
+                    # fallback filename: the GUI sends the resolved title, but
+                    # the web UI and `zdm add` do not, and the Download default
+                    # "download" would leave an extension-less file.
+                    body["kind"] = "video"
+                    if not (body.get("filename") or body.get("name")):
+                        body["filename"] = video_page_filename(url)
+            # A caller that resolved the page itself (desktop GUI, browser
+            # extension) sends yt_page but often no kind; mark it here so the
+            # list renders it as a video and not as an ordinary file.
+            if (body.get("yt_page") or body.get("page_url")) and not body.get("kind"):
+                body["kind"] = "video"
             try:
                 d = self.manager.add(
                     url=url,
