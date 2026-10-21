@@ -2011,8 +2011,13 @@ class MainWindow(QMainWindow):
             self._status(f"操作失败：{msg}")
 
     # ---------------- updates ----------------
-    def _background(self, fn, on_done, *args):
-        """Run ``fn(*args)`` off the UI thread and call ``on_done(result)``."""
+    def _background(self, fn, on_done, *args, quiet: bool = False):
+        """Run ``fn(*args)`` off the UI thread and call ``on_done(result)``.
+
+        ``quiet`` suppresses the generic "操作失败" status for background
+        housekeeping (silent update check), where a transient network error
+        must not overwrite the "connected" status the user is watching.
+        """
         w = OpWorker(fn, *args)
         self._workers.append(w)
 
@@ -2022,7 +2027,8 @@ class MainWindow(QMainWindow):
                     on_done(res)
                 except Exception as e:  # noqa: BLE001
                     _dlog(f"[bg] callback failed: {type(e).__name__}: {e}")
-            self._on_op_done(status, res, _w)
+            if not quiet:
+                self._on_op_done(status, res, _w)
 
         w.done.connect(_done)
         w.finished.connect(lambda w=w: self._retire_worker(w))
@@ -2044,6 +2050,7 @@ class MainWindow(QMainWindow):
         self._background(
             lambda: update.latest_release(proxy=proxy),
             lambda info: self._on_update_checked(info, silent),
+            quiet=silent,
         )
 
     def _on_update_checked(self, info, silent: bool):
@@ -2098,6 +2105,7 @@ class MainWindow(QMainWindow):
             lambda: update.download(
                 asset["url"], dest, proxy=proxy,
                 expected_size=asset.get("size") or 0,
+                expected_sha256=asset.get("digest") or "",
                 progress=self._on_dl_chunk,
             ),
             lambda path: self._on_update_downloaded(path, info),
