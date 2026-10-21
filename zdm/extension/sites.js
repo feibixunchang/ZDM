@@ -198,19 +198,48 @@
     }
   }
 
+  /* 一档的 contentLength 到底可不可信。
+
+     SABR 之后 playerResponse 里的 contentLength 有时不是整段视频，而是
+     播放器**刚拉的那一小块**：实测 2160P 报 374 KB、1080P 报 82 KB，
+     按时长折算只有 0.1 秒的码率。直接显示就是「几百 KB 的 4K 视频」，
+     用户当然会说不对。
+
+     判据：用 approxDurationMs 反推隐含码率，低于 20 kbps 一律视为碎片。
+     真实视频轨的最低档（144P）也在 100 kbps 以上，不会误杀。 */
+  function ytPlausibleSize(len, durSec) {
+    if (!len) return 0;
+    if (!durSec) return len; // 没有时长信息时只能信它
+    return (len * 8) / durSec >= 20000 ? len : 0;
+  }
+
+  /* 时长（秒）。优先取这一档自己的 approxDurationMs，其次整段流的。 */
+  function ytDurationOf(f, sd) {
+    const ms = num(f && f.approxDurationMs) || num(sd && sd.approxDurationMs);
+    return ms ? ms / 1000 : 0;
+  }
+
+  /* 用 bitrate × 时长估一个字节数：比「几百 KB」靠谱得多，界面上标「≈」。 */
+  function ytEstimateSize(f, durSec) {
+    const bps = num(f && f.bitrate) || num(f && f.averageBitrate);
+    if (!bps || !durSec) return 0;
+    return Math.round((bps / 8) * durSec);
+  }
+
   /* itag → 字节数。
 
      关键点：adaptiveFormats 里的 contentLength **即使 URL 被 signatureCipher
-     加密也照样存在**（加密的只是直链，不是元数据）。所以「嗅探到大小」根本
-     不需要发 Range 请求去问服务端 —— 那张表页面里就有，直接读。 */
+     加密也照样存在**（加密的只是直链，不是元数据）。但它的值不一定等于
+     整段视频的长度（见 ytPlausibleSize），所以这里同样要先过一遍合理性检查。 */
   function ytContentLens() {
     const sd = ytStreaming();
     const out = {};
     const add = (list) => {
       for (const f of list || []) {
         const it = num(f && f.itag);
-        const len = num(f && f.contentLength);
-        if (it && len) out[it] = len;
+        if (!it) continue;
+        const len = ytPlausibleSize(num(f && f.contentLength), ytDurationOf(f, sd));
+        if (len) out[it] = len;
       }
     };
     if (sd) {
@@ -247,8 +276,14 @@
       const m = (f && f.mimeType) || "";
       if (!m.startsWith("video/")) return;
       const h = num(f.height);
-      const len = num(f.contentLength);
-      if (!h || !len) return;
+      if (!h) return;
+      const dur = ytDurationOf(f, sd);
+      const raw = num(f.contentLength);
+      const exact = ytPlausibleSize(raw, dur);
+      const est = exact ? 0 : ytEstimateSize(f, dur);
+      const size = exact || est;
+      if (!size) return; // 既量不出来也估不出来：不编数字
+      const approx = !exact;
       const codec = /avc1/.test(m)
         ? "H.264"
         : /vp0?9/.test(m)
@@ -257,11 +292,20 @@
         ? "AV1"
         : "";
       const cur = best.get(h);
-      // 同一高度优先 H.264（兼容性最好），其次保留最先出现的
-      if (!cur || (codec === "H.264" && cur.codec !== "H.264")) {
+      // 同一高度：先看谁的字节数更可信（实测 > 估算），再优先 H.264
+      // （兼容性最好）。
+      const trust = (r) => (r.approx ? 1 : 0);
+      if (
+        !cur ||
+        trust({ approx }) < trust(cur) ||
+        (trust({ approx }) === trust(cur) &&
+          codec === "H.264" &&
+          cur.codec !== "H.264")
+      ) {
         best.set(h, {
           height: h,
-          size: len,
+          size,
+          approx,
           codec: codec,
           label: h + "P" + (codec ? " · " + codec : ""),
         });

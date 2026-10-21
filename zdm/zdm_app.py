@@ -129,9 +129,16 @@ def main(argv=None) -> int:
 
         return gui.main(argv)
 
+    # Windows 的窗口版 exe 没有控制台：双击（或开始菜单快捷方式）启动时
+    # argv 是空的，用户要的显然是**界面**。这里以前落到 CLI 的默认动作
+    # （`start`：前台服务 + 浏览器网页版），于是「桌面界面没了，只剩网页版」。
+    # `gui` 子命令会先确保本机服务在跑，再打开窗口（已开着则唤起）。
+    if not argv and os.name == "nt":
+        argv = ["gui"]
+
     from zdm.cli import main as cli_main
 
-    return cli_main()
+    return cli_main(argv)
 
 
 if __name__ == "__main__":

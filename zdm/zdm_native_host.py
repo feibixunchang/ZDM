@@ -30,19 +30,69 @@ DEFAULT_PORT = 9000
 MAX_MESSAGE = 4 * 1024 * 1024
 
 
-def config_port() -> int:
-    """Port from ~/.config/zdm/state.json, falling back to 9000."""
+def hide_own_console() -> None:
+    """Hide the console window Windows gave this process.
+
+    Chrome starts the native-messaging host with CreateProcess and **no**
+    CREATE_NO_WINDOW, so a console-subsystem exe (which this host must be —
+    it needs stdio for the length-prefixed protocol) brings up a black
+    conhost window that stays on screen for as long as the process lives.
+    Users see it as "点下载此视频弹出一个黑窗口", which looks like a crash.
+
+    Hiding it is safe as long as the console was created *for us*: if the
+    host was started from an interactive shell, GetConsoleProcessList reports
+    more than one process and we leave the user's terminal alone.
+    """
+    if os.name != "nt":
+        return
     try:
-        path = os.path.join(
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        hwnd = kernel32.GetConsoleWindow()
+        if not hwnd:
+            return
+        buf = (ctypes.c_uint * 8)()
+        count = kernel32.GetConsoleProcessList(buf, 8)
+        if count == 1 and buf[0] == kernel32.GetCurrentProcessId():
+            user32.ShowWindow(hwnd, 0)  # SW_HIDE
+    except Exception:
+        pass
+
+
+def config_port() -> int:
+    """Port from the client's state.json, falling back to 9000.
+
+    Windows keeps its config under %APPDATA%\\zdm; hardcoding ~/.config there
+    silently produced the default port, which breaks anyone who changed it.
+    """
+    import sys
+
+    candidates = []
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        candidates.append(os.path.join(base, "zdm", "state.json"))
+    candidates.append(
+        os.path.join(
             os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
             "zdm",
             "state.json",
         )
-        with open(path, "r", encoding="utf-8") as fh:
-            port = json.load(fh).get("config", {}).get("port")
-        return int(port or DEFAULT_PORT)
-    except Exception:
-        return DEFAULT_PORT
+    )
+    if sys.platform == "darwin":
+        candidates.append(
+            os.path.expanduser("~/Library/Application Support/zdm/state.json")
+        )
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                port = json.load(fh).get("config", {}).get("port")
+            if port:
+                return int(port)
+        except Exception:
+            continue
+    return DEFAULT_PORT
 
 
 def read_message():
@@ -72,7 +122,10 @@ def api(port: int, path: str, body=None, timeout: float = 5.0):
     req = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
     req.add_header("Content-Type", "application/json")
     req.add_header("X-ZDM-Extension", os.environ.get("ZDM_EXTENSION_ID", ""))
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # 127.0.0.1 绝不能走系统代理：Windows 上设了公司代理时 urlopen 会把它
+    # 当普通 HTTP 请求发出去，等到超时 —— 表现就是「唤醒失败」而服务其实好好的。
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
@@ -83,23 +136,49 @@ def ping(port: int) -> bool:
         return False
 
 
+def launch_command():
+    """argv that brings the desktop client up (service + window).
+
+    Frozen builds have a single exe: ``--gui`` selects the window, ``gui`` as a
+    CLI subcommand first makes sure the local service is running. Bare
+    ``ZDM.exe`` must not be used — that lands on ``start``, i.e. a foreground
+    service plus a browser tab, which is how users ended up with "只有网页版".
+    """
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+        for name in ("ZDM.exe", "ZDM"):
+            exe = os.path.join(base, name)
+            if os.path.isfile(exe):
+                return [exe, "gui"]
+        return []
+    entry = os.path.join(HERE, "zdm.py")
+    if os.path.isfile(entry):
+        return [sys.executable or "python3", entry, "gui"]
+    return []
+
+
 def ensure_service(port: int) -> bool:
     if ping(port):
         return True
-    python = sys.executable or "/usr/bin/python3"
-    entry = os.path.join(HERE, "zdm.py")
+    cmd = launch_command()
+    if not cmd:
+        return False
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
+    else:
+        kwargs["start_new_session"] = True
     try:
         subprocess.Popen(
-            [python, entry, "start", "--daemon", "--no-open"],
-            cwd=HERE,
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
+            **kwargs,
         )
     except Exception:
-        pass
-    for _ in range(80):  # up to 20 s
+        return False
+    for _ in range(60):  # up to 15 s: a cold Qt start is ~1-2 s
         time.sleep(0.25)
         if ping(port):
             return True
@@ -107,6 +186,7 @@ def ensure_service(port: int) -> bool:
 
 
 def main() -> int:
+    hide_own_console()
     msg = read_message()
     if msg is None:
         return 1
@@ -127,9 +207,27 @@ def main() -> int:
         body["connections"] = msg["connections"]
     if msg.get("dir"):
         body["dir"] = msg["dir"]
-    referer = msg.get("referer")
-    if referer:
-        body["headers"] = {"Referer": referer}
+    if msg.get("source"):
+        body["source"] = msg["source"]
+    if msg.get("kind"):
+        body["kind"] = msg["kind"]
+    # YouTube：给了页面地址 + 高度就让后端走 yt-dlp；视频轨还要配套音频轨合流。
+    # 这些字段 background.js 在唤醒时已经算好并随消息传过来，这里原样转发，
+    # 否则服务没在跑、由原生消息拉起的那一次下载会缺 cookie / 缺音频轨。
+    if msg.get("audio_url"):
+        body["audio_url"] = msg["audio_url"]
+    if msg.get("yt_page"):
+        body["yt_page"] = msg["yt_page"]
+    if msg.get("yt_height"):
+        body["yt_height"] = msg["yt_height"]
+    headers = {}
+    if msg.get("referer"):
+        headers["Referer"] = msg["referer"]
+    if msg.get("cookie"):
+        # 已经是 Netscape 文本（background.js 在 service worker 里现取 HttpOnly）。
+        headers["Cookie"] = msg["cookie"]
+    if headers:
+        body["headers"] = headers
     try:
         res = api(port, "tasks", body)
         send({"ok": bool(res.get("ok")), "id": res.get("id"), "error": res.get("error")})

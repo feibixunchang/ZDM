@@ -462,6 +462,7 @@ async function probeSizesViaBackend(tabId) {
    阶梯还空着就直接问桌面端，拿到之后重绘面板。
    有缓存、有并发保护，同一个视频只问一次。 */
 const ladderAsking = new Map(); // tabId -> videoId（正在问）
+const ladderTriedAt = new Map(); // tabId -> { vid, at }：上次问的时间，避免反复打转
 
 async function ensureLadderViaBackend(tabId, pageUrl) {
   if (tabId == null) return 0;
@@ -469,9 +470,17 @@ async function ensureLadderViaBackend(tabId, pageUrl) {
   if (!vid) return 0;
   const cur = ladderByTab.get(tabId);
   if (cur && videoIdOf(cur.pageUrl || "") === vid && cur.rows && cur.rows.length) {
-    return cur.rows.length;
+    // 全是估算值（页面给的 contentLength 不可信）时也要问一次：本机 yt-dlp
+    // 报的是真实字节数，换上去用户才不会再看到「几百 KB 的 4K」。
+    const allApprox = cur.rows.every((r) => r && r.approx);
+    if (!allApprox) return cur.rows.length;
   }
   if (ladderAsking.get(tabId) === vid) return 0; // 已经在问了
+  // 刚问过（含失败）就不要再问一遍：yt-dlp 一次要好几秒，
+  // 每次打开面板都重跑会让面板一直转圈。
+  const tried = ladderTriedAt.get(tabId);
+  if (tried && tried.vid === vid && Date.now() - tried.at < 60000) return 0;
+  ladderTriedAt.set(tabId, { vid, at: Date.now() });
   ladderAsking.set(tabId, vid);
   let r = null;
   try {
@@ -625,6 +634,9 @@ function viewItems(tabId, currentUrl) {
     height: Number(r.height) || 0,
     kind: "video",
     size: Number(r.size) || 0,
+    // 页面给的 contentLength 有时只是播放器刚拉的一小段，这种情况下的数字是
+    // 按时长估算的（面板显示「≈」），随后会被本机解析的真实字节数替换。
+    approx: !!r.approx,
     name: (r.label || r.height + "P") + ".mp4",
     from: "ladder",
   }));
@@ -761,6 +773,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     // 不跟着清掉，新视频的分段就会被套上上一部的长度，显示一个看起来很像真的错数字。
     lensByTab.delete(tabId);
     backendProbing.delete(tabId); // 新页面 = 新直链，旧的不许再拦着
+    ladderTriedAt.delete(tabId); // 换了视频就该重新问一次本机解析
     persist();
     persistLadder();
     persistLens();
@@ -772,9 +785,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   ladderByTab.delete(tabId);
   lensByTab.delete(tabId);
   backendProbing.delete(tabId);
-  persist();
+  ladderTriedAt.delete(tabId);
   persistLadder();
   persistLens();
+  persist();
 });
 
 function getCfg() {
@@ -1057,12 +1071,18 @@ async function handOff(req) {
     });
 
   // 1. 客户端已在运行：直接 POST。
+  let answered = false;
   try {
     const res = await post();
+    answered = true;
     if (res && res.ok) return true;
   } catch (_) {
-    /* 服务没起，走下面的唤醒流程 */
+    /* 连不上：服务没起，走下面的唤醒流程 */
   }
+
+  // 服务**答了**但拒收（链接不认识、参数不合法……）：再唤醒客户端也不会有
+  // 不同结果，只会在 Windows 上无端拉起一次原生消息宿主（一个黑窗口闪过）。
+  if (answered) return false;
 
   // 2. 没在运行：唤醒它。原生消息可能因为「扩展还没重新加载」而失败，
   //    这时立刻降级到协议跳转。唤醒是否成功不在这里判断 —— 以 HTTP
@@ -1287,37 +1307,53 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "sniffer-push") {
     const item = msg.item || {};
     const tabId = sender.tab && sender.tab.id;
-    // 推送的若是视频轨：优先用调用方给的音频，否则在嗅探列表里自动配对。
-    // DASH 音频是另一条请求，不配对就必然「下完没声音」。
-    let audioUrl = item.audio_url || "";
-    let url = item.url;
-    if (YT_MEDIA_HOST.test(hostOf(url))) url = stripRange(url);
-    if (!audioUrl && item.kind !== "audio") {
-      const sib = audioSiblingFor(tabId, item.url);
-      if (sib) {
-        audioUrl = YT_MEDIA_HOST.test(hostOf(sib.url)) ? stripRange(sib.url) : sib.url;
+    (async () => {
+      // 推送的若是视频轨：优先用调用方给的音频，否则在嗅探列表里自动配对。
+      // DASH 音频是另一条请求，不配对就必然「下完没声音」。
+      let audioUrl = item.audio_url || "";
+      let url = item.url;
+      if (YT_MEDIA_HOST.test(hostOf(url))) url = stripRange(url);
+      if (!audioUrl && item.kind !== "audio") {
+        const sib = audioSiblingFor(tabId, item.url);
+        if (sib) {
+          audioUrl = YT_MEDIA_HOST.test(hostOf(sib.url)) ? stripRange(sib.url) : sib.url;
+        }
+      } else if (audioUrl && YT_MEDIA_HOST.test(hostOf(audioUrl))) {
+        audioUrl = stripRange(audioUrl);
       }
-    } else if (audioUrl && YT_MEDIA_HOST.test(hostOf(audioUrl))) {
-      audioUrl = stripRange(audioUrl);
-    }
-    handOff({
-      url,
-      filename: item.filename,
-      referer: item.referer,
-      cookie: item.cookie,
-      source: item.source || "sniffer",
-      kind: item.kind || "video",
-      // DASH 视频轨的配套音频轨，后端下载后用 ffmpeg 合并
-      audio_url: audioUrl || undefined,
-      // YouTube：页面地址 + 高度 → 后端走 yt-dlp 通道
-      yt_page: item.page_url || undefined,
-      yt_height: item.height || undefined,
-    })
-      .then((ok) => {
-        sendResponse({ ok });
-        if (ok) notify("已推送给 ZDM", item.filename || item.url);
-      })
-      .catch(() => sendResponse({ ok: false }));
+
+      /* YouTube 的登录态全是 HttpOnly（SID / HSID / __Secure-1PSID），
+         content script 里的 document.cookie 一个都读不到 —— 它传来的
+         `item.cookie` 对 YouTube 等于空。以前这里就照单全收，于是 yt-dlp
+         永远收到空 cookiejar，只能回「Sign in to confirm you're not a bot」，
+         下载必定失败。必须在这一层（service worker，能读 HttpOnly）现取。 */
+      let cookie = item.cookie || "";
+      const page = item.page_url || item.referer || "";
+      const host = hostOf(page) || hostOf(url);
+      if (!cookie && /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host)) {
+        try {
+          cookie = await youtubeCookieText();
+        } catch (_) {
+          cookie = "";
+        }
+      }
+
+      const ok = await handOff({
+        url,
+        filename: item.filename,
+        referer: item.referer,
+        cookie: cookie || undefined,
+        source: item.source || "sniffer",
+        kind: item.kind || "video",
+        // DASH 视频轨的配套音频轨，后端下载后用 ffmpeg 合并
+        audio_url: audioUrl || undefined,
+        // YouTube：页面地址 + 高度 → 后端走 yt-dlp 通道
+        yt_page: item.page_url || undefined,
+        yt_height: item.height || undefined,
+      });
+      sendResponse({ ok });
+      if (ok) notify("已推送给 ZDM", item.filename || item.url);
+    })().catch(() => sendResponse({ ok: false }));
     return true;
   }
 });

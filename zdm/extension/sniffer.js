@@ -31,14 +31,18 @@
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
     );
 
-  const fmtSize = (n) => {
+  /* approx=true 表示这个字节数是按「码率 × 时长」估出来的 —— YouTube 的
+     SABR 播放器有时只报当前那一小段的长度，量不出整段就只好估。加个 ≈
+     是为了不让人把它当成精确值（以前直接把碎片长度当整段显示）。 */
+  const fmtSize = (n, approx) => {
     n = Number(n) || 0;
     if (!n) return "大小未知";
-    if (n < 1024) return n + " B";
+    const mark = approx ? "≈ " : "";
+    if (n < 1024) return mark + n + " B";
     const u = ["KB", "MB", "GB", "TB"];
     let i = -1;
     do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
-    return n.toFixed(1) + " " + u[i];
+    return mark + n.toFixed(1) + " " + u[i];
   };
 
   const send = (msg) =>
@@ -312,7 +316,7 @@
           <span class="meta">
             <span class="nm">${esc(it.name || guessName(it.url, it.kind))}</span>
             <span class="sub">${esc(it.kind === "audio" ? "音频" : "视频")} · ${esc(
-          fmtSize(it.size)
+          fmtSize(it.size, it.approx)
         )}</span>
           </span>
           <button class="go" type="button" data-i="${i}">推送</button>
