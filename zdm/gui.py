@@ -71,7 +71,16 @@ if not os.path.exists(ICON):
 # choices have nowhere to live there, so they are stored client-side next to
 # the dock log.
 # ---------------------------------------------------------------------------
-_GUI_CFG_PATH = os.path.join(os.path.expanduser("~/.config/zdm"), "gui.json")
+# 三端各有各的「用户配置」位置：Windows 必须落在 %APPDATA%，硬编码
+# ~/.config 会写到 C:\Users\X\.config\zdm\（能用，但不是该放的地方，
+# 备份/清理工具都扫不到）。macOS/Linux 保持 ~/.config 不变，避免已经在
+# 那里存过的列宽设置「莫名丢失」。
+if os.name == "nt":
+    _GUI_CFG_PATH = os.path.join(
+        os.environ.get("APPDATA") or os.path.expanduser("~"), "zdm", "gui.json"
+    )
+else:
+    _GUI_CFG_PATH = os.path.join(os.path.expanduser("~/.config/zdm"), "gui.json")
 
 
 def _gui_cfg_all() -> dict:
@@ -263,6 +272,21 @@ def fmt_size(n) -> str:
     return f"{n:.1f} PB"
 
 
+def fmt_pair(downloaded, total) -> str:
+    """「已下载 / 总大小」，重复的单位只留一份。
+
+    「100.8 / 161.6 MB」比「100.8 MB / 161.6 MB」省 30 多像素 —— 大小列窄了以后
+    这点宽度正好够一行放下，不用折行。
+    """
+    got, ttl = fmt_size(downloaded), fmt_size(total)
+    try:
+        g_val, g_unit = got.split(" ", 1)
+        _t_val, t_unit = ttl.split(" ", 1)
+    except ValueError:
+        return f"{got} / {ttl}"
+    return f"{g_val} / {ttl}" if g_unit == t_unit else f"{got} / {ttl}"
+
+
 def fmt_eta(s) -> str:
     s = _num(s)
     if not s or s <= 0:
@@ -296,6 +320,9 @@ def fmt_clock(ts) -> str:
 SOURCE_BADGES = {
     "browser": ("浏览器", "status_downloading"),
     "sniffer": ("嗅探", "status_merging"),
+    # 播放界面右上角「下载此视频」推来的：和嗅探面板里点的「推送」是两条
+    # 不同的入口，混成一个标签会让人以为是从嗅探推的。
+    "player": ("播放器", "status_downloading"),
     "webui": ("网页版", "status_queued"),
     "protocol": ("协议", "status_queued"),
 }
@@ -303,30 +330,12 @@ SOURCE_BADGES = {
 
 def _esc(s) -> str:
     """HTML 转义。文件名来自远端（可能是网页上的标题），必须转义后才能进
-    QLabel 的富文本，否则尖括号会被当成标签解析。"""
-    return _html_escape(str(s if s is not None else ""), quote=True)
+    QLabel 的富文本，否则尖括号会被当成标签解析。
 
-
-def _name_with_badge(task: dict, pal) -> str:
-    """文件名 + 来源徽标（富文本 HTML）。
-
-    注意：这段 HTML 是给 QLabel 用的，**不能**直接塞进 QTableWidgetItem
-    ——后者不解析 HTML，会把 <font ...> 原样显示出来。
-
-    徽标用 <font> 上色而不是另起一列：文件名列本身是 Stretch，
-    再加一列会把最需要宽度的文件名挤掉。
+    现在文件名走 :class:`ElidedLabel`（纯文本 + 省略号），不再需要富文本，
+    但设置页等处仍在用这个转义，留着。
     """
-    name = str(task.get("filename") or "")
-    src = task.get("source") or ""
-    entry = SOURCE_BADGES.get(src)
-    if not entry:
-        return _esc(name)
-    label, attr = entry
-    color = getattr(pal, attr, pal.text_muted)
-    return (
-        f'<span style="font-weight:600">{_esc(name)}</span>'
-        f'&nbsp;&nbsp;<span style="color:{color};font-size:11px">[{_esc(label)}]</span>'
-    )
+    return _html_escape(str(s if s is not None else ""), quote=True)
 
 
 class Api:
@@ -758,6 +767,76 @@ class OpWorker(QThread):
 STYLE = _theme.build_stylesheet(_theme.LIGHT)
 
 
+class ElidedLabel(QLabel):
+    """单行文本，宽度不够时用「…」省略，而不是硬裁掉半个字。
+
+    QLabel 默认是把超出部分直接裁掉（连省略号都没有），看着就像名字被切断了。
+    这里自己画：``elidedText`` 会保证结尾有省略号，悬停还能看到全名。
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = ""
+        # Ignored 让标签可以被压得很窄 —— 否则 QLabel 的最小宽度等于文本宽度，
+        # 表格列一窄，整列就顶住不让缩，文件名反而更看不全。
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+        self.setText(text)
+
+    def setText(self, text):  # noqa: N802 - Qt 命名
+        self._full = text or ""
+        super().setText(self._full)
+        self.setToolTip(self._full)
+        self.update()
+
+    def fullText(self) -> str:
+        return self._full
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        fm = p.fontMetrics()
+        elided = fm.elidedText(self._full, Qt.ElideRight, max(0, self.width()))
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.drawText(self.rect(), Qt.AlignLeft | Qt.AlignVCenter, elided)
+
+
+class NameCell(QWidget):
+    """文件名 + 来源徽标。
+
+    文件名用 :class:`ElidedLabel`（可省略），徽标单独一个 QLabel 固定在右侧 ——
+    以前整串是富文本塞在一个标签里，列一窄就先被裁掉徽标、名字反而只剩几个字。
+    """
+
+    def __init__(self, task: dict, pal):
+        super().__init__()
+        self.setStyleSheet("background: transparent;")
+        name = str(task.get("filename") or "")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 0, 6, 0)
+        lay.setSpacing(6)
+
+        self.name_label = ElidedLabel(name)
+        f = QFont(self.name_label.font())
+        f.setBold(True)
+        self.name_label.setFont(f)
+        lay.addWidget(self.name_label, 1)
+
+        entry = SOURCE_BADGES.get(task.get("source") or "")
+        if entry:
+            label, attr = entry
+            badge = QLabel(f"[{label}]")
+            bf = QFont(badge.font())
+            bf.setPointSizeF(max(8.0, bf.pointSizeF() - 1.0))
+            badge.setFont(bf)
+            badge.setStyleSheet(
+                f"color: {getattr(pal, attr, pal.text_muted)}; background: transparent;"
+            )
+            lay.addWidget(badge, 0)
+
+        url = task.get("url") or ""
+        self.setToolTip(name + (("\n" + url) if url else ""))
+
+
 class ProgressCell(QWidget):
     """Percent text above a slim rounded bar.
 
@@ -787,7 +866,9 @@ class ProgressCell(QWidget):
         f.setPointSizeF(8.5)
         p.setFont(f)
         p.setPen(QColor(self._palette.text_muted))
-        p.drawText(QRect(r.left(), r.top() + 2, r.width(), 16), Qt.AlignLeft | Qt.AlignVCenter, self.text)
+        # 进度列现在窄了，「100.0% · 剩余 12分3秒」这种长文本要省略而不是硬裁。
+        txt = p.fontMetrics().elidedText(self.text, Qt.ElideRight, r.width())
+        p.drawText(QRect(r.left(), r.top() + 2, r.width(), 16), Qt.AlignLeft | Qt.AlignVCenter, txt)
         bar = QRect(r.left(), r.top() + 21, r.width(), 6)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(self._palette.track))
@@ -1139,15 +1220,41 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(False)
         self.table.setShowGrid(False)
         self.table.setFocusPolicy(Qt.NoFocus)
+        # 换行会让「100.8 MB / 161.6 MB」折成两行，把行撑高又更难读。
+        # 放下不下的交给省略号。
+        self.table.setWordWrap(False)
         hh = self.table.horizontalHeader()
+        # 第 0 列（文件）吃满剩余空间；其余列 Interactive = 可以拖表头边界调整。
+        # 之前 6 个固定列合计 962px，1080 的窗口里「文件」只剩一百来像素，
+        # 长标题必然被截成「在黄河口，我」这样。现在固定列压到 ~790px，
+        # 默认给文件列留出 ~270px，同时每一列都能手动拖宽/拖窄。
         hh.setSectionResizeMode(0, QHeaderView.Stretch)
         hh.setFixedHeight(38)
         hh.setHighlightSections(False)
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        # 不让任何一列被拖到看不见（文件列还有 Stretch 兜底）。
+        hh.setMinimumSectionSize(56)
+        # 先建好字典再设列宽：setColumnWidth 会同步发 sectionResized，
+        # 回调里要往这个字典里写。
+        self._col_widths = {}
+        # 列宽按实测文本宽度定（QFontMetrics 量过）：
+        #   大小 140 ← 「100.8 / 161.6 MB」
+        #   进度 128 ← 「62.4% · 剩 40秒」+ 进度条
+        #   速度 90  ← 「100.0 MB/s」
+        #   状态 76  ← 「已完成」
+        #   时间 172 ← 「14:03 → 预计 14:25」
         # 6 (the action column) must fit the pause glyph plus three text
         # buttons (34 + 50*3 + gaps + margins ~= 210).
-        for col, w in ((1, 150), (2, 240), (3, 100), (4, 84), (5, 172), (6, 216)):
+        for col, w in ((1, 140), (2, 128), (3, 90), (4, 76), (5, 172), (6, 210)):
+            hh.setSectionResizeMode(col, QHeaderView.Interactive)
             self.table.setColumnWidth(col, w)
+        self._col_save_timer = QTimer(self)
+        self._col_save_timer.setSingleShot(True)
+        self._col_save_timer.timeout.connect(self._save_col_widths)
+        hh.sectionResized.connect(self._on_section_resized)
+        hh.setContextMenuPolicy(Qt.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._col_menu)
+        self._restore_col_widths()
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
         self.table.cellDoubleClicked.connect(lambda r, _c: self._open_selected_file(r))
@@ -1172,6 +1279,62 @@ class MainWindow(QMainWindow):
         self.version_label.mousePressEvent = lambda _e: self._check_update(silent=False)
         self.statusBar().addPermanentWidget(self.version_label)
         self.setAcceptDrops(True)
+
+    # ---------- 列宽（可拖动 + 记住用户的选择） ----------
+    #
+    # COL_DEFAULTS 是出厂列宽。第 0 列（文件）是 Stretch，不在这里。
+    COL_DEFAULTS = {1: 140, 2: 128, 3: 90, 4: 76, 5: 172, 6: 210}
+
+    def _restore_col_widths(self):
+        """把上次拖好的列宽还原回来（存在 ~/.config/zdm/gui.json）。"""
+        saved = _gui_cfg("col_widths")
+        if not isinstance(saved, dict):
+            return
+        for key, val in saved.items():
+            try:
+                col, w = int(key), int(val)
+            except (TypeError, ValueError):
+                continue
+            if col in self.COL_DEFAULTS and w >= 56:
+                self.table.setColumnWidth(col, w)
+                self._col_widths[col] = w
+
+    def _on_section_resized(self, col, _old, new):
+        # 文件列是 Stretch，宽度由剩余空间算出来，记下来没意义还会互相打架。
+        # _col_restoring 是「代码自己在设列宽」，不是用户拖的，不该被当成偏好存下来。
+        if col == 0 or getattr(self, "_col_restoring", False):
+            return
+        self._col_widths[col] = new
+        # 拖的时候每帧都会触发，停下来 0.7s 再落盘。
+        self._col_save_timer.start(700)
+
+    def _save_col_widths(self):
+        if not getattr(self, "_col_widths", None):
+            return
+        _gui_cfg_set(col_widths={str(k): int(v) for k, v in self._col_widths.items()})
+
+    def _reset_col_widths(self):
+        """恢复出厂列宽，并把用户之前拖出来的偏好清掉。"""
+        self._col_restoring = True
+        self._col_widths = {}
+        for col, w in self.COL_DEFAULTS.items():
+            self.table.setColumnWidth(col, w)
+        self._col_restoring = False
+        self._col_save_timer.stop()
+        _gui_cfg_set(col_widths={})
+
+    def _col_menu(self, pos):
+        hh = self.table.horizontalHeader()
+        col = hh.logicalIndexAt(pos)
+        menu = make_menu(self)
+        style_glass_menu(menu)
+        if col > 0:
+            menu.addAction(
+                "按内容自适应此列",
+                lambda c=col: self.table.resizeColumnToContents(c),
+            )
+        menu.addAction("重置所有列宽", self._reset_col_widths)
+        menu.exec_(hh.mapToGlobal(pos))
 
     def _build_update_bar(self) -> QFrame:
         """Banner shown when a newer release exists ("下载并安装" / "忽略")."""
@@ -1398,8 +1561,8 @@ class MainWindow(QMainWindow):
         deleteLater() so the C++ object is reaped on the next loop iteration.
         """
         for row in range(self.table.rowCount()):
-            # Column 0 holds the name label (rich text), 2 the progress bar,
-            # 6 the action buttons. All three are replaced on every render.
+            # 第 0 列是文件名 + 来源徽标（NameCell），2 是进度条，6 是操作按钮。
+            # 这三个每次渲染都会换成新控件。
             for col in (0, 2, 6):
                 w = self.table.cellWidget(row, col)
                 if w is not None:
@@ -1434,19 +1597,23 @@ class MainWindow(QMainWindow):
             # The name cell holds a QLabel rather than a QTableWidgetItem
             # because only the label renders the <span> markup that colours
             # the tag; a table item would show the raw tags as text.
-            name_label = QLabel(_name_with_badge(t, pal))
-            name_label.setTextFormat(Qt.RichText)
-            name_label.setToolTip(t.get("url") or "")
-            name_label.setStyleSheet("background: transparent;")
-            self.table.setCellWidget(row, 0, name_label)
+            # The name cell holds a widget rather than a QTableWidgetItem so the
+            # filename can be elided with "…" while the source badge stays
+            # visible, and the tooltip can still show the full name.
+            self.table.setCellWidget(row, 0, NameCell(t, pal))
 
             # Every field is read with .get(): a task that came from an older
             # client (or a half-written state file) may be missing "speed" or
             # "downloaded", and a KeyError here would take down the whole
             # table render instead of just that one row.
             size_item = QTableWidgetItem(
-                f"{fmt_size(t.get('downloaded'))} / "
-                f"{fmt_size(t.get('size')) if t.get('size') else '未知'}"
+                # 已完成就只报最终文件大小：合流后文件比视频轨大，
+                # 「54.5 MB / 57.2 MB」这种写法会让人以为没下完。
+                fmt_size(t.get("size"))
+                if status == "completed" and t.get("size")
+                else fmt_pair(t.get("downloaded"), t.get("size"))
+                if t.get("size")
+                else f"{fmt_size(t.get('downloaded'))} / 未知"
             )
             size_item.setForeground(QColor(pal.text_muted))
             size_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1454,7 +1621,8 @@ class MainWindow(QMainWindow):
 
             label = f"{pct:.1f}%"
             if status == "downloading" and t.get("eta"):
-                label += f"  ·  剩余 {fmt_eta(t['eta'])}"
+                # 「剩余」缩成「剩」：进度列窄了，两个字的差别正好是一行放不放得下。
+                label += f" · 剩 {fmt_eta(t['eta'])}"
             elif status == "error" and t.get("error"):
                 label = str(t["error"])[:46]
             self.table.setCellWidget(row, 2, ProgressCell(pct, label, color))
@@ -1472,22 +1640,28 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 4, st_item)
 
             # 时间列：几点开始下载、预计/实际几点完成。
-            #   进行中  开始 14:03 · 预计 14:25 完成
-            #   合并中  开始 14:03 · 合并音视频…
-            #   已完成  14:03 → 14:25 完成
-            #   失败/暂停/取消  开始 14:03
+            #   进行中  14:03 → 预计 14:25
+            #   合并中  14:03 → 合并中…
+            #   已完成  14:03 → 14:25
+            #   失败/暂停/取消  14:03 开始
+            # 用箭头而不是「开始 … · … 完成」：后者 218px 宽，这一列只有 158px。
             started = t.get("started_at") or t.get("created_at") or 0
-            parts = []
-            if started:
-                parts.append(f"开始 {fmt_clock(started)}")
+            head = fmt_clock(started) if started else ""
+            tail = ""
             if status == "downloading":
                 if t.get("eta"):
-                    parts.append(f"预计 {fmt_clock(time.time() + _num(t['eta']))} 完成")
+                    tail = f"预计 {fmt_clock(time.time() + _num(t['eta']))}"
             elif status == "merging":
-                parts.append("合并音视频…")
+                tail = "合并中…"
             elif status == "completed" and t.get("completed_at"):
-                parts.append(f"{fmt_clock(t['completed_at'])} 完成")
-            time_item = QTableWidgetItem(" · ".join(parts))
+                tail = fmt_clock(t["completed_at"])
+            if head and tail:
+                time_text = f"{head} → {tail}"
+            elif head:
+                time_text = f"{head} 开始"
+            else:
+                time_text = "—"
+            time_item = QTableWidgetItem(time_text)
             time_item.setForeground(QColor(pal.text_muted))
             time_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.table.setItem(row, 5, time_item)
@@ -2139,6 +2313,12 @@ class MainWindow(QMainWindow):
                 self._run(self.api.add, {"url": u.strip()})
 
     def closeEvent(self, e):
+        # 列宽可能在防抖计时器落盘前就被关窗，这里补一次。
+        try:
+            self._col_save_timer.stop()
+            self._save_col_widths()
+        except Exception:
+            pass
         # Closing quits by default. Only fall back to the tray when the user
         # explicitly asked for it in Settings - hiding the window on every
         # close made the title-bar button look broken.
@@ -2154,6 +2334,12 @@ class MainWindow(QMainWindow):
         self._quit()
 
     def _quit(self):
+        # 托盘菜单「退出」不走 closeEvent，这里也存一次列宽。
+        try:
+            self._col_save_timer.stop()
+            self._save_col_widths()
+        except Exception:
+            pass
         try:
             self.poll.stop()
             self.poll.wait(2000)

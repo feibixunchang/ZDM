@@ -137,12 +137,16 @@
     return scanDom();
   }
 
-  /* 已推送过的 URL：推送后条目会从列表里消失，但 background 那边的记录还在，
+  /* 已推送过的条目：推送后条目会从列表里消失，但 background 那边的记录还在，
      下一次刷新又会把它带回来。这里在本地记一笔，让推过的别再冒出来。 */
   const pushed = new Set();
 
+  /* 条目身份。YouTube 的阶梯行每一条都指向同一个页面地址（清晰度在选择器
+     里），只看 url 会把 2160/1080/720 合成一条；带 key 的用 key。 */
+  const keyOf = (it) => (it && (it.key || it.url)) || "";
+
   function merge(network, dom, keepLocal) {
-    const seen = new Map(); // url -> 已收录的那条
+    const seen = new Map(); // key -> 已收录的那条
     const out = [];
     // background 的网络嗅探结果优先（带 Content-Type / 大小），
     // DOM 扫描的结果补充在后面（首屏直链媒体在 webRequest 之前就加载完了）。
@@ -150,19 +154,20 @@
     // 若还把本地旧条目拼回来，新页面会继承上一个页面的媒体。
     const src = keepLocal ? (network || []).concat(dom || []).concat(items) : (network || []).concat(dom || []);
     for (const it of src) {
-      if (!it || !it.url || pushed.has(it.url)) continue;
-      const prev = seen.get(it.url);
+      if (!it || !it.url || pushed.has(keyOf(it))) continue;
+      const k = keyOf(it);
+      const prev = seen.get(k);
       if (prev) {
-        // 同一个 URL 又来了一条（网络嗅探 vs DOM 扫描）。保留信息更全的
+        // 同一条又来了一次（网络嗅探 vs DOM 扫描）。保留信息更全的
         // 那条：有大小 > 没大小。不然先来的 size:0 会把后来的真实大小
         // 挡在门外，列表里就一直显示「大小未知」。
         if (!prev.size && it.size) {
           out[out.indexOf(prev)] = it;
-          seen.set(it.url, it);
+          seen.set(k, it);
         }
         continue;
       }
-      seen.set(it.url, it);
+      seen.set(k, it);
       out.push(it);
       if (out.length >= MAX_ROWS) break;
     }
@@ -327,7 +332,7 @@
       .then((ok) => {
         b.textContent = ok ? "已推送" : "失败";
         if (ok) {
-          pushed.add(it.url); // 别再让下一次刷新把它带回来
+          pushed.add(keyOf(it)); // 别再让下一次刷新把它带回来
           const i = items.indexOf(it);
           if (i >= 0) items.splice(i, 1);
           setTimeout(renderList, 700);
@@ -353,6 +358,10 @@
       cookie: sameSite(it.url, page) ? document.cookie || undefined : undefined,
       source: "sniffer",
       kind: it.kind || "video",
+      // YouTube 阶梯行：真正的下载由后端按「页面地址 + 高度」走 yt-dlp，
+      // 这两个字段不带过去，后端就只能拿到一个页面地址、不知道该下哪一档。
+      page_url: it.page_url || undefined,
+      height: it.height || undefined,
     };
     const r = await send({ type: "sniffer-push", item: body });
     return !!(r && r.ok);

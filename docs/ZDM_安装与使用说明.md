@@ -351,8 +351,7 @@ YouTube 读播放器的 `streamingData`，B站读 `__playinfo__` 里的 `dash`�
 |---|---|
 | macOS | `ZDM-1.13.0.dmg` |
 | Linux | `zdm_1.13.0_amd64.deb` / `zdm-linux-amd64.tar.gz` |
-| Windows（PyQt5） | `ZDM-PyQt5-Setup-1.13.0.exe` |
-| Windows（原生） | `ZDM-Setup-1.13.0.exe` |
+| Windows | `ZDM-Setup-1.13.0.exe`（原生 C#/WPF） |
 
 ## v1.12.0 修复清单与新增（2026-10-20）
 

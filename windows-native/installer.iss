@@ -3,7 +3,7 @@
 
 #define AppName "ZDM 下载管理器"
 #define AppNameEn "ZDM Download Manager"
-#define AppVersion "1.13.0"
+#define AppVersion "1.14.7"
 #define AppPublisher "ZDM"
 #define AppExeName "Zdm.exe"
 #define AppUrl "https://github.com/"
@@ -76,6 +76,9 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\c
 ; 这样即使用户装完没立刻打开程序，浏览器那边也能正常唤醒。
 Filename: "{app}\{#AppExeName}"; Parameters: "--register"; Flags: runhidden nowait
 Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+; 应用内「一键更新」跑的是 /VERYSILENT：装完要把 ZDM 重新拉起来。
+; 否则用户升级完只会看到一个已经退出的窗口，还以为程序坏了或被卸载了。
+Filename: "{app}\{#AppExeName}"; Flags: nowait postinstall; Check: WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\web"

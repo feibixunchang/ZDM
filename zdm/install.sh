@@ -9,6 +9,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 版本号只有一个来源：zdm/__init__.py 的 __version__（/api 报的也是它）。
+# 以前这里写死 1.13.0，发版后就出现「Finder 里显示 1.13.0、程序里 1.14.x」的矛盾。
+VERSION="$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/zdm/__init__.py" 2>/dev/null | head -1)"
+VERSION="${VERSION:-0.0.0}"
 PY="${PYTHON:-}"
 OS="$(uname -s)"
 MODE="autostart"
@@ -374,7 +378,7 @@ EOF
   <key>CFBundleIdentifier</key><string>com.zdm.desktop</string>
   <key>CFBundleExecutable</key><string>ZDM</string>
   <key>CFBundleIconFile</key><string>zdm</string>
-  <key>CFBundleVersion</key><string>1.13.0</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

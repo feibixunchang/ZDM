@@ -31,6 +31,11 @@ dist/*.deb
 dist/*.tar.gz
 dist/*.exe
 
+# 随包的 yt-dlp 单文件二进制（约 35MB）与旧的 pip 包目录：由构建脚本/CI 按
+# 固定版本下载，不入库，避免仓库被二进制撑爆。
+zdm/bin/
+zdm/zdm/yt_dlp_pkg/
+
 # 系统
 .DS_Store
 Thumbs.db

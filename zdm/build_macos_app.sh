@@ -19,7 +19,7 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                         # repo root
 BUILD_DIR="${1:-$(pwd)/macos-build}"
-VERSION="${2:-1.13.0}"
+VERSION="${2:-1.14.7}"
 APP="$BUILD_DIR/ZDM.app"
 STAGE="$BUILD_DIR/dmg-root"
 
@@ -107,6 +107,29 @@ done
 cp "$SRC/zdm.py" "$SRC/gui.py" "$SRC/theme.py" "$RES/"
 cp "$SRC/README.md" "$RES/" 2>/dev/null || true
 cp "$SRC/LICENSE.txt" "$RES/" 2>/dev/null || true
+# YouTube 的解析/下载依赖随包的 **单文件 yt-dlp 二进制**（zdm/bin/yt-dlp）。
+#
+# 这里以前是 `pip install yt-dlp --target=zdm/yt_dlp_pkg`，2026 年起行不通了：
+# yt-dlp 2026.x 要求 Python 3.10+，而 ZDM.app 内嵌的是 3.9，一 import 就抛
+# "You are using an unsupported version of Python."。官方单文件二进制自带解释器，
+# 绕开这个限制。落点必须是 $RES/bin/（ytdlp_bin.binary_path() 会探 dirname(pkg)/bin）。
+YTDLP_VERSION="${YTDLP_VERSION:-2026.08.19}"
+YTDLP_SRC="$SRC/bin/yt-dlp"
+if [ ! -x "$YTDLP_SRC" ]; then
+    echo "==> yt-dlp binary missing, downloading $YTDLP_VERSION"
+    mkdir -p "$SRC/bin"
+    curl -fL --retry 3 -o "$YTDLP_SRC" \
+        "https://github.com/yt-dlp/yt-dlp/releases/download/$YTDLP_VERSION/yt-dlp_macos" || {
+        echo "ERROR: 下载 yt-dlp 失败（YouTube 解析/下载将不可用）" >&2; exit 1; }
+    chmod +x "$YTDLP_SRC"
+fi
+# 旧的 pip 包目录（25MB）不再使用：二进制已经覆盖解析+下载，留着只会变大
+rm -rf "$RES/zdm/yt_dlp_pkg"
+mkdir -p "$RES/bin"
+cp "$YTDLP_SRC" "$RES/bin/yt-dlp"
+chmod +x "$RES/bin/yt-dlp"
+"$RES/bin/yt-dlp" --version >/dev/null || {
+    echo "ERROR: 随包 yt-dlp 无法执行（架构不匹配或文件损坏）" >&2; exit 1; }
 find "$APP" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Fail fast if a module gui.py imports at top level is missing.
@@ -141,7 +164,13 @@ assert theme.build_stylesheet(theme.DARK)
 from zdm import update, desktop
 assert update.is_newer('1.11.1', '1.9.1')
 assert callable(desktop.ensure_desktop)
-print('    theme + gui + update + desktop importable, both palettes render')
+# 三端都必须能在这里过：YouTube 桌面解析 = yt_resolve + 随包 yt-dlp。
+from zdm import yt_resolve
+yt_resolve._import_yt_dlp()
+assert callable(yt_resolve.resolve)
+from zdm.core import _find_ffmpeg
+print('    ffmpeg ->', _find_ffmpeg() or '(not found, 合并音轨会不可用)')
+print('    theme + gui + update + desktop + yt_resolve importable, both palettes render')
 " ) || { echo "ERROR: runtime module import check failed"; exit 1; }
 
 echo "==> embedding Python framework (for the native launcher to link against)"

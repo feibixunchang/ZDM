@@ -148,6 +148,8 @@ class Manager:
         source: Optional[str] = None,
         kind: Optional[str] = None,
         audio_url: Optional[str] = None,
+        yt_page: Optional[str] = None,
+        yt_height: Optional[int] = None,
     ) -> Download:
         if not url or not str(url).startswith(("http://", "https://")):
             raise ValueError("只支持 http/https 链接")
@@ -170,6 +172,9 @@ class Manager:
             source=source or "manual",
             kind=kind or "",
             audio_url=audio_url or "",
+            # 有页面地址就走 yt-dlp 通道（YouTube 直链不能分块下载）
+            yt_page=(yt_page or "") if str(yt_page or "").startswith("http") else "",
+            yt_height=int(yt_height or 0),
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter

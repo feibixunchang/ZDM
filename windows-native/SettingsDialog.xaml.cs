@@ -163,8 +163,45 @@ public partial class SettingsDialog : Window
                 return;
             }
 
+            // 有直链就在设置里直接下、直接装，不再把用户赶去浏览器
+            if (info.CanInstall)
+            {
+                var go = MessageBox.Show(this,
+                    $"发现新版本 {info.Tag}（当前 {AppVersion.Display}）。\n\n" +
+                    "是否现在下载并安装？下载完成后 ZDM 会自动退出并静默安装。",
+                    "检查更新", MessageBoxButton.YesNo, MessageBoxImage.Information);
+                if (go != MessageBoxResult.Yes) return;
+
+                var progress = new Progress<(long Got, long Total)>(p =>
+                {
+                    UpdateLink.Content = p.Total > 0
+                        ? $"下载 {Math.Clamp(p.Got * 100 / p.Total, 0, 100)}%"
+                        : "下载中…";
+                });
+                try
+                {
+                    var path = await UpdateInstaller.DownloadAsync(info, progress);
+                    UpdateLink.Content = "正在安装…";
+                    if (!UpdateInstaller.RunInstaller(path))
+                    {
+                        MessageBox.Show(this,
+                            $"安装包已下载到：\n{path}\n\n自动安装没能启动，请手动打开它。",
+                            "更新", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    Application.Current.Shutdown();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"下载更新失败：{ex.Message}", "更新失败",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                return;
+            }
+
             var answer = MessageBox.Show(this,
-                $"发现新版本 {info.Tag}（当前 {AppVersion.Display}）。\n\n是否打开下载页面？",
+                $"发现新版本 {info.Tag}（当前 {AppVersion.Display}）。\n\n" +
+                "这个版本没有提供可直接下载的安装包，是否打开下载页面？",
                 "检查更新", MessageBoxButton.YesNo, MessageBoxImage.Information);
 
             if (answer == MessageBoxResult.Yes && !string.IsNullOrEmpty(info.Url))

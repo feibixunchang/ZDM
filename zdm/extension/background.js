@@ -36,9 +36,80 @@ const MEDIA_AUDIO_EXT = /\.(mp3|m4a|aac|flac|wav|ogg|oga|opus|wma)(?:$|[?#])/i;
      音频轨  ".../62131_da3-1-30216.m4s"   —— 302xx 系列（30216/30232/30250/30251/30257/30259/30280）
    所以「≥30000 就是音频」是错的：那会把所有视频轨误判成音频。
    Content-Type 两者都是 application/octet-stream，只能从编号认。 */
-const BILI_AUDIO_ID = /-(\d{5})\.m4s(?:$|[?#])/;
+// 5~6 位都可能有：视频轨 100026 / 100110（6 位），音频轨 30216 / 30280（5 位）。
+// 只写 \d{5} 会让 6 位的高码率视频轨完全匹配不上。
+const BILI_AUDIO_ID = /-(\d{5,6})\.m4s(?:$|[?#])/;
 function isBiliAudioId(id) {
   return id >= 30200 && id < 30300;
+}
+/* YouTube 音频 itag。有些 videoplayback 请求的 URL 不带 mime= 参数，
+   只看 mime 会把音频轨当成「一条 0P 视频」塞进列表 —— 于是推送时永远
+   配不到音频，下下来只有画面。itag 是可靠的第二判据。 */
+const YT_AUDIO_ITAG = new Set([139, 140, 141, 249, 250, 251, 256, 258, 325, 328]);
+const BILI_MEDIA_HOST = /(^|\.)bilivideo\.(com|cn)$/;
+const YT_MEDIA_HOST = /(^|\.)googlevideo\.com$/;
+
+/** B站 DASH 直链里的 cid（/upgcxcode/99/91/137649199/xxx-1-30280.m4s）。 */
+function biliCidOf(url) {
+  const m = /\/upgcxcode\/\d+\/\d+\/(\d+)\//.exec(url || "");
+  return m ? m[1] : "";
+}
+function biliAudioCode(url) {
+  const m = /-(\d{5,6})\.m4s(?:$|[?#])/.exec(url || "");
+  return m ? Number(m[1]) : 0;
+}
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch (_) {
+    return "";
+  }
+}
+
+/** 去掉分段请求的 range 参数。
+    YouTube 的 videoplayback 是按 Range 分片拉的，URL 里带着 range=0-1234567
+    和 rn=8。后端拿着这种地址用普通 GET 下载，只会拿到那一小段 ——
+    表现为「下完只有几十 KB / 22.7 KB」。整段下载必须去掉这两个参数。 */
+function stripRange(u) {
+  try {
+    const p = new URL(u);
+    p.searchParams.delete("range");
+    p.searchParams.delete("rn");
+    return p.toString();
+  } catch (_) {
+    return u;
+  }
+}
+
+/** 在同一个标签页的嗅探结果里替一条视频轨找配套音频轨。
+ *
+ *  DASH 把画面和声音拆成两次请求：嗅探面板里能点「推送」的只有视频轨，
+ *  音频轨是另一条（B站 -1-30280.m4s / YouTube mime=audio）。如果你从
+ *  嗅探面板推送，以前后端收到的 audio_url 是空的，于是下下来只有画面。
+ *
+ *  B站按 cid 配对（URL 路径里的 /99/91/<cid>/），码率高的优先；
+ *  YouTube 没有 cid，取同批里体积最大的一条音频轨。
+ */
+function audioSiblingFor(tabId, url) {
+  if (tabId == null || !url) return null;
+  const list = snifferByTab.get(tabId) || [];
+  const audios = list.filter(
+    (it) => it && it.kind === "audio" && it.url && it.url !== url
+  );
+  if (!audios.length) return null;
+  const cid = biliCidOf(url);
+  if (cid) {
+    const same = audios.filter((a) => biliCidOf(a.url) === cid);
+    if (!same.length) return null;
+    // 30280(192k) > 30232(132k) > 30216(64k)
+    same.sort((a, b) => biliAudioCode(b.url) - biliAudioCode(a.url));
+    return same[0];
+  }
+  if (YT_MEDIA_HOST.test(hostOf(url))) {
+    audios.sort((a, b) => (b.size || 0) - (a.size || 0));
+    return audios[0];
+  }
+  return null;
 }
 const MIN_MEDIA_BYTES = 64 * 1024; // 小于这个的多半是图标、埋点、预告片
 const MAX_PER_TAB = 60;
@@ -46,6 +117,9 @@ const MAX_TABS = 30; // storage.session 只有 10MB，别把页签全存爆
 
 /** tabId -> [{url, kind, size, name, from}]（内存态，SW 被回收就重来） */
 const snifferByTab = new Map();
+/* tabId → { itag: 字节数 }。页面把 adaptiveFormats 的长度表交过来后存在这里，
+   之后新抓到的条目一进来就能补上大小（嗅探面板才不会一直写「大小未知」）。 */
+const lensByTab = new Map();
 
 /* MV3 的 service worker 空闲 30 秒就被回收，内存态全丢。存进
    chrome.storage.session（SW 重启仍在，关浏览器才清）之后：
@@ -53,18 +127,48 @@ const snifferByTab = new Map();
    - SW 重启后 webRequest 监听器会随顶层代码重新注册，内容脚本的定时
      轮询负责把它唤醒（否则休眠期间漏掉整个播放过程）。 */
 const STORE_KEY = "snifferByTab";
+/* itag 表也要落盘。MV3 的 SW 空闲 30 秒就被回收：snifferByTab 会恢复，
+   而 lensByTab 只在内存里 —— 用户下完两个视频（几分钟）再打开嗅探面板时，
+   条目是从存储里恢复出来的、长度表却早没了，于是永远显示「大小未知」。
+   这正是「扩展改了还是未知」的一个真实原因。 */
+const LENS_KEY = "lensByTab";
+/* tabId → {pageUrl, title, rows:[{height,size,label}]}
+   YouTube 专用：SABR 之后播放器对 /videoplayback 发的是 POST 流式请求，
+   响应 chunked、没有长度、URL 里也没有 itag/clen —— 那种「条目」本身没有
+   文件大小可言。能说清「1080P 有多大」的只有 adaptiveFormats 那张表，
+   所以面板在 YouTube 上展示这份阶梯，而不是那几条裸直链。 */
+const ladderByTab = new Map();
+const LADDER_KEY = "ladderByTab";
 let restored = null;
 
 function ensureRestored() {
   if (restored) return restored;
   restored = chrome.storage.session
-    .get(STORE_KEY)
+    .get([STORE_KEY, LENS_KEY, LADDER_KEY])
     .then((d) => {
       const m = d && d[STORE_KEY];
       if (m && typeof m === "object") {
         for (const [k, v] of Object.entries(m)) {
           const id = Number(k);
           if (Number.isFinite(id) && Array.isArray(v)) snifferByTab.set(id, v);
+        }
+      }
+      const l = d && d[LENS_KEY];
+      if (l && typeof l === "object") {
+        for (const [k, v] of Object.entries(l)) {
+          const id = Number(k);
+          if (Number.isFinite(id) && v && typeof v === "object") {
+            lensByTab.set(id, v);
+          }
+        }
+      }
+      const g = d && d[LADDER_KEY];
+      if (g && typeof g === "object") {
+        for (const [k, v] of Object.entries(g)) {
+          const id = Number(k);
+          if (Number.isFinite(id) && v && typeof v === "object") {
+            ladderByTab.set(id, v);
+          }
         }
       }
     })
@@ -84,6 +188,34 @@ function persist() {
   }
   try {
     chrome.storage.session.set({ [STORE_KEY]: obj }).catch(() => {});
+  } catch (_) {
+    /* 忽略 */
+  }
+}
+
+function persistLens() {
+  const obj = {};
+  let n = 0;
+  for (const [k, v] of lensByTab) {
+    if (n++ >= MAX_TABS) break;
+    obj[k] = v;
+  }
+  try {
+    chrome.storage.session.set({ [LENS_KEY]: obj }).catch(() => {});
+  } catch (_) {
+    /* 忽略 */
+  }
+}
+
+function persistLadder() {
+  const obj = {};
+  let n = 0;
+  for (const [k, v] of ladderByTab) {
+    if (n++ >= MAX_TABS) break;
+    obj[k] = v;
+  }
+  try {
+    chrome.storage.session.set({ [LADDER_KEY]: obj }).catch(() => {});
   } catch (_) {
     /* 忽略 */
   }
@@ -142,23 +274,39 @@ function classifyResponse(details) {
   // YouTube 的媒体走 *.googlevideo.com/videoplayback：URL 没有 .mp4/.m4s
   // 后缀，Content-Type 也可能是 application/octet-stream。纯靠扩展名/
   // ContentType 会把整个 YouTube 漏掉（嗅探恒为 0）。按 host 直接认定。
-  const KNOWN_MEDIA_HOST = /(^|\.)googlevideo\.com$/;
+  const KNOWN_MEDIA_HOST = YT_MEDIA_HOST;
   let kind = null;
-  if (ct.startsWith("video/")) kind = "video";
-  else if (ct.startsWith("audio/")) kind = "audio";
-  else if (KNOWN_MEDIA_HOST.test(host)) kind = "video"; // YouTube 直链几乎都是视频轨
-  else if (
+  /* 判定顺序：**URL 特征优先于 Content-Type**。
+     B站的音频段 ...-1-30280.m4s 的 Content-Type 常年报 video/mp4，
+     以前先看 Content-Type 就把音频轨当成了视频 → 嗅探列表里没有音频
+     → 推送时配不上 → 下完没声音。这是「B站下载无声」的源头。 */
+  if (KNOWN_MEDIA_HOST.test(host)) {
+    /* YouTube 的音频轨也是 /videoplayback，Content-Type 常被报成
+       video/mp4 或干脆没有。真实类型在 URL 的 mime= 参数里
+       （mime=audio%2Fmp4 / video%2Fmp4），没有 mime 时看 itag。 */
+    let mime = "";
+    let itag = 0;
+    try {
+      const u = new URL(url);
+      mime = u.searchParams.get("mime") || "";
+      itag = Number(u.searchParams.get("itag") || 0);
+    } catch (_) {
+      mime = "";
+    }
+    kind = mime.startsWith("audio/") || YT_AUDIO_ITAG.has(itag) ? "audio" : "video";
+  } else if (/\/upgcxcode\//.test(url) || BILI_MEDIA_HOST.test(host)) {
+    // B站 DASH：视频轨 -1-30080.m4s，音频轨 -1-30280.m4s，只能从编号认。
+    const m = BILI_AUDIO_ID.exec(url);
+    kind = m && isBiliAudioId(Number(m[1])) ? "audio" : "video";
+  } else if (ct.startsWith("video/")) {
+    kind = "video";
+  } else if (ct.startsWith("audio/")) {
+    kind = "audio";
+  } else if (
     (ct === "application/octet-stream" || ct === "binary/octet-stream" || ct === "") &&
     MEDIA_EXT.test(url)
   ) {
-    if (MEDIA_AUDIO_EXT.test(url)) {
-      kind = "audio";
-    } else {
-      // 不用 RegExp.$1：它属于「最后一次 test」，前面几次 test 会把它覆盖掉，
-      // 读出来的是别人的捕获组。用 match 拿到本次的结果。
-      const m = BILI_AUDIO_ID.exec(url);
-      kind = m && isBiliAudioId(Number(m[1])) ? "audio" : "video";
-    }
+    kind = MEDIA_AUDIO_EXT.test(url) ? "audio" : "video";
   }
   if (!kind) return null;
   if (len && len < MIN_MEDIA_BYTES) return null;
@@ -184,6 +332,15 @@ function rememberMedia(tabId, item) {
     list = [];
     snifferByTab.set(tabId, list);
   }
+  // 这张 tab 已经知道「itag → 字节数」的话，新条目一进来就补上大小，
+  // 不要等页面的表格同步（那一步只在 boot 时跑一次，常常赶在条目之前）。
+  if (!item.size) {
+    const n = lensByTab.get(tabId);
+    if (n) {
+      const bytes = n[itagOf(item.url)];
+      if (bytes) item.size = bytes;
+    }
+  }
   const dup = list.find((x) => x.url === item.url);
   if (dup) {
     // 旧版本的条目可能带着 size=0（比如当时的扩展没拿响应头）。同一 URL
@@ -197,11 +354,296 @@ function rememberMedia(tabId, item) {
   list.push(item);
   if (list.length > MAX_PER_TAB) list.shift();
   persist();
+  // 拿不到大小的条目异步补一次。两条路：
+  //  - YouTube（googlevideo）走桌面端问 —— SW 里 fetch 被 CORS 挡住；
+  //  - 其它站点（B站 CDN 等）仍然用 SW 自己的 Range 请求，省一次抖动。
+  if (!item.size && item.from === "net") {
+    if (YT_MEDIA_HOST.test(hostOf(item.url))) {
+      setTimeout(() => probeSizesViaBackend(tabId), 200);
+    } else {
+      setTimeout(() => probeSize(tabId, item), 60);
+    }
+  }
   return true;
 }
 
+/** 从 videoplayback 直链里取 itag。取不到返回 0。 */
+function itagOf(url) {
+  try {
+    return Number(new URL(url).searchParams.get("itag") || 0);
+  } catch (_) {
+    return 0;
+  }
+}
+
+/** 用「itag → 字节数」表补齐某个 tab 里所有还空着大小的条目。 */
+function applyLens(tabId, lens) {
+  const list = (tabId != null && snifferByTab.get(tabId)) || [];
+  let changed = false;
+  for (const it of list) {
+    if (!it || it.size) continue;
+    const n = lens[itagOf(it.url)];
+    if (n > 0) {
+      it.size = n;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/* ------------------------------------------------- 交给桌面端问真实大小
+
+   YouTube 的 videoplayback 现在大量走 SABR（POST 流式）：
+   - 响应既没有 Content-Length 也没有 Content-Range（chunked）；
+   - URL 里常常不带 itag / clen，所以「itag 表」也对不上号。
+   浏览器侧所有办法都堵死：service worker 里 fetch 的 Origin 是
+   chrome-extension://…，googlevideo 的 CORS 只放行 youtube.com，响应头
+   一个都读不到（probeSize 里 catch 掉的正是这个）。
+   桌面端没有同源策略，带同一份 Referer 发 2 字节 Range 就能读到
+   `Content-Range: bytes 0-1/总长度` —— 所以这里把直链丢给后端去问。 */
+const backendProbing = new Map(); // tabId -> Set(url)，同一 SW 生命周期内不重复问
+
+async function probeSizesViaBackend(tabId) {
+  if (tabId == null) return 0;
+  const list = snifferByTab.get(tabId) || [];
+  let seen = backendProbing.get(tabId);
+  if (!seen) {
+    seen = new Set();
+    backendProbing.set(tabId, seen);
+  }
+  const todo = [];
+  for (const it of list) {
+    if (!it || it.size || !it.url || seen.has(it.url)) continue;
+    if (!/^https?:\/\//i.test(it.url)) continue;
+    seen.add(it.url);
+    todo.push(it.url);
+    if (todo.length >= 8) break; // 一次最多问 8 条，不把后端排满
+  }
+  if (!todo.length) return 0;
+  let referer = "";
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    referer = (tab && tab.url) || "";
+  } catch (_) {
+    /* 标签页可能已经关了，没有 Referer 也能问 */
+  }
+  let r = null;
+  try {
+    r = await api("probe-size", { urls: todo, referer });
+  } catch (_) {
+    r = null;
+  }
+  const sizes = (r && r.sizes) || {};
+  let changed = 0;
+  for (const it of list) {
+    if (!it || it.size) continue;
+    const n = sizes[it.url];
+    if (n > 0) {
+      it.size = n;
+      changed++;
+    }
+  }
+  if (changed) {
+    persist();
+    await notifyTab(tabId, false); // 面板开着就立刻刷出大小，不用重开
+  }
+  return changed;
+}
+
+/* ---------------------------------------------------------- 清晰度阶梯兜底
+
+   面板在 YouTube 上展示的是「清晰度 → 真实字节数」，来源本应是页面里的
+   streamingData。但页面这条路有三种常见断法：
+     1) 软导航换视频后，playerResponse 还是上一部的（或已被清空）；
+     2) 有些视频只给 serverAbrStreamingUrl，adaptiveFormats 干脆没有；
+     3) content script 还没来得及把阶梯推上来。
+   而「每一档多大」这件事桌面端本来就答得出来（/api/youtube/resolve 走本机
+   yt-dlp，实测 8 档全都带 size）。所以这里加一条兜底：面板一打开，如果
+   阶梯还空着就直接问桌面端，拿到之后重绘面板。
+   有缓存、有并发保护，同一个视频只问一次。 */
+const ladderAsking = new Map(); // tabId -> videoId（正在问）
+
+async function ensureLadderViaBackend(tabId, pageUrl) {
+  if (tabId == null) return 0;
+  const vid = videoIdOf(pageUrl || "");
+  if (!vid) return 0;
+  const cur = ladderByTab.get(tabId);
+  if (cur && videoIdOf(cur.pageUrl || "") === vid && cur.rows && cur.rows.length) {
+    return cur.rows.length;
+  }
+  if (ladderAsking.get(tabId) === vid) return 0; // 已经在问了
+  ladderAsking.set(tabId, vid);
+  let r = null;
+  try {
+    let cookie = "";
+    try {
+      cookie = await youtubeCookieText();
+    } catch (_) {
+      cookie = "";
+    }
+    r = await api("youtube/resolve", {
+      // 用规范化的 watch 地址：标签页 URL 可能带 list / t 之类的参数
+      url: "https://www.youtube.com/watch?v=" + vid,
+      cookie,
+    });
+  } catch (_) {
+    r = null;
+  } finally {
+    if (ladderAsking.get(tabId) === vid) ladderAsking.delete(tabId);
+  }
+  const formats = (r && r.ok && r.formats) || [];
+  const best = new Map(); // height -> row
+  // 后端给的是原始 codec 串（avc1.640028 / vp9 / av01.0.08M），
+  // 直接拿它和 "H.264" 比是永远不相等的 —— 必须先归一化，否则
+  // 「同高度优先 H.264」这条规则形同虚设。
+  const normCodec = (c) => {
+    const s = String(c || "");
+    if (/avc1|^h\.?26[45]$/i.test(s)) return "H.264";
+    if (/vp0?9/i.test(s)) return "VP9";
+    if (/av01/i.test(s)) return "AV1";
+    return s;
+  };
+  for (const f of formats) {
+    const h = Number(f && f.height) || 0;
+    const size = Number(f && f.size) || 0;
+    if (!h || !size) continue; // 纯音频轨没有 height，跳过
+    const codec = normCodec(f.codec);
+    const prev = best.get(h);
+    // 同高度优先 H.264（浏览器/播放器兼容性最好）
+    if (!prev || (codec === "H.264" && prev.codec !== "H.264")) {
+      best.set(h, {
+        height: h,
+        size,
+        codec,
+        // 后端已经算好 label（「1080P · H.264」），有就直接用
+        label: f.label || h + "P" + (codec ? " · " + codec : ""),
+      });
+    }
+  }
+  const rows = [...best.values()].sort((a, b) => b.height - a.height);
+  if (!rows.length) return 0;
+  // 期间用户可能已经切走：只写回到同一个视频的标签页
+  let nowUrl = "";
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    nowUrl = (tab && tab.url) || "";
+  } catch (_) {
+    nowUrl = "";
+  }
+  if (nowUrl && videoIdOf(nowUrl) !== vid) return 0;
+  ladderByTab.set(tabId, {
+    pageUrl: "https://www.youtube.com/watch?v=" + vid,
+    title: (r && r.title) || "",
+    rows,
+  });
+  persistLadder();
+  await notifyTab(tabId, false);
+  return rows.length;
+}
+
+/* ---------------------------------------------------------------- 大小补全
+
+   用一个只有 2 字节的 Range 请求把资源总量问出来：206 响应的
+   Content-Range 一定是 "bytes 0-1/<总量>"。不去读响应体，所以不会真的
+   把视频拖下来。 */
+const sizeProbing = new Set();
+
+async function probeSize(tabId, item) {
+  if (!item || item.size || !item.url || sizeProbing.has(item.url)) return;
+  // googlevideo 的 CORS 只放行 youtube.com，SW 里这个 fetch 必然读不到
+  // 响应头（要么被拦要么没有 Content-Range），交给桌面端去问。
+  if (YT_MEDIA_HOST.test(hostOf(item.url))) {
+    probeSizesViaBackend(tabId);
+    return;
+  }
+  sizeProbing.add(item.url);
+  try {
+    const r = await fetch(item.url, {
+      headers: { Range: "bytes=0-1" },
+      // googlevideo 的直链和浏览器会话绑定，带上 cookie 才不会被判 403
+      credentials: "include",
+    });
+    let total = 0;
+    const m = /\/(\d+)\s*$/.exec(r.headers.get("content-range") || "");
+    if (m) total = parseInt(m[1], 10) || 0;
+    if (!total && r.status === 200) {
+      const cl = parseInt(r.headers.get("content-length") || "0", 10) || 0;
+      if (cl > 1) total = cl;
+    }
+    // 响应体永远不要读进来（可能是几个 GB）
+    try {
+      if (r.body) r.body.cancel();
+    } catch (_) {
+      /* ignore */
+    }
+    if (total > 0) {
+      item.size = total;
+      persist();
+      notifyTab(tabId, false);
+    }
+  } catch (_) {
+    /* 直链过期或不允许跨域 —— 保持「未知」即可 */
+  } finally {
+    sizeProbing.delete(item.url);
+  }
+}
+
+/** 从 YouTube 地址里取视频 id（watch?v= / youtu.be/ / shorts/）。 */
+function videoIdOf(u) {
+  try {
+    const x = new URL(u);
+    const h = x.hostname.toLowerCase();
+    if (h.endsWith("youtu.be")) return x.pathname.split("/").filter(Boolean)[0] || "";
+    const m = /\/shorts\/([^/?#]+)/.exec(x.pathname);
+    if (m) return m[1];
+    return x.searchParams.get("v") || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+/** 面板要展示的列表：在有「清晰度阶梯」的页面上用它替换裸直链条目。 */
+function viewItems(tabId, currentUrl) {
+  const base = (tabId != null && snifferByTab.get(tabId)) || [];
+  const lad = tabId != null && ladderByTab.get(tabId);
+  if (!lad || !lad.rows || !lad.rows.length) return base;
+  const page = lad.pageUrl || "";
+  if (!page) return base;
+  // YouTube 是软导航（点侧栏推荐不重载页面）：阶梯可能是上一个视频的。
+  // 视频 id 对不上就退回原始条目，宁可显示「大小未知」也不报错数字。
+  if (currentUrl) {
+    const a = videoIdOf(currentUrl);
+    const b = videoIdOf(page);
+    if (a && b && a !== b) return base;
+  }
+  const rows = lad.rows.map((r) => ({
+    // key 而不是 url 作为身份：同一页的每一档都指向同一个页面地址，
+    // 用 url 当键会把它们合成一条（面板里只剩 2160P）。
+    key: "yt:" + r.height,
+    url: page,
+    page_url: page,
+    height: Number(r.height) || 0,
+    kind: "video",
+    size: Number(r.size) || 0,
+    name: (r.label || r.height + "P") + ".mp4",
+    from: "ladder",
+  }));
+  // 同一页里非 YouTube CDN 的媒体（比如站内的 mp4/音频）照样列出来
+  const others = base.filter(
+    (it) => it && it.url && !YT_MEDIA_HOST.test(hostOf(it.url))
+  );
+  return rows.concat(others);
+}
+
 async function notifyTab(tabId, reset) {
-  const items = snifferByTab.get(tabId) || [];
+  let url = "";
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    url = (tab && tab.url) || "";
+  } catch (_) {
+    /* 标签页可能已经关了 */
+  }
+  const items = viewItems(tabId, url);
   try {
     // reset=true 表示「换了页面，旧结果作废」，content script 收到后要
     // 清空而不是合并，否则新页面会继承上一个页面的媒体。
@@ -314,13 +756,25 @@ chrome.webRequest.onResponseStarted.addListener(
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) {
     snifferByTab.delete(tabId);
+    ladderByTab.delete(tabId); // 换视频了，上一部的清晰度/大小不能留着
+    // itag 号码跨视频是复用的（137 永远是 1080P 那类），但**字节数每条视频都不同**。
+    // 不跟着清掉，新视频的分段就会被套上上一部的长度，显示一个看起来很像真的错数字。
+    lensByTab.delete(tabId);
+    backendProbing.delete(tabId); // 新页面 = 新直链，旧的不许再拦着
     persist();
+    persistLadder();
+    persistLens();
     notifyTab(tabId, true);
   }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   snifferByTab.delete(tabId);
+  ladderByTab.delete(tabId);
+  lensByTab.delete(tabId);
+  backendProbing.delete(tabId);
   persist();
+  persistLadder();
+  persistLens();
 });
 
 function getCfg() {
@@ -329,6 +783,70 @@ function getCfg() {
 
 function baseUrl(cfg) {
   return (cfg.serverUrl || DEFAULTS.serverUrl).replace(/\/+$/, "");
+}
+
+/* ---------------------------------------------------------- YouTube cookie
+
+   为什么必须在这里做：chrome.cookies 只对**扩展自身页面 / service worker**
+   开放。content script 跑在 isolated world，`chrome.cookies` 是 undefined，
+   调用会抛 TypeError —— 被 catch 吞掉之后表现就是「永远带着空 cookie 去
+   解析」，于是 YouTube 每次都回「Sign in to confirm you're not a bot」。
+   这个 bug 藏了很久：扩展侧看着逻辑齐全，实际一次都没生效过。 */
+
+/* 单条 cookie → Netscape 一行。
+   第 2 列是「是否指定了域」，http.cookiejar 会断言它 == (域名是否以 '.' 开头)，
+   写错（比如 .youtube.com + FALSE）yt-dlp 直接报 "invalid Netscape format
+   cookies file" 并放弃整次解析 —— 越努力带登录态越必然失败。 */
+function netscapeCookieLine(c) {
+  let dom = c.domain || "";
+  if (!dom) return "";
+  const hostOnly = c.hostOnly !== undefined ? !!c.hostOnly : !dom.startsWith(".");
+  if (hostOnly && dom.startsWith(".")) dom = dom.slice(1);
+  if (!hostOnly && !dom.startsWith(".")) dom = "." + dom;
+  return [
+    // MozillaCookieJar 用 #HttpOnly_ 前缀标记 HttpOnly 项
+    (c.httpOnly ? "#HttpOnly_" : "") + dom,
+    dom.startsWith(".") ? "TRUE" : "FALSE",
+    c.path || "/",
+    c.secure ? "TRUE" : "FALSE",
+    c.expirationDate ? String(Math.floor(c.expirationDate)) : "0",
+    c.name,
+    c.value,
+  ].join("\t");
+}
+
+async function youtubeCookieText() {
+  if (!chrome.cookies || !chrome.cookies.getAll) return "";
+  const getAll = (filter) =>
+    new Promise((res) => {
+      try {
+        chrome.cookies.getAll(filter, (cs) => {
+          void chrome.runtime.lastError;
+          res(cs || []);
+        });
+      } catch (_) {
+        res([]);
+      }
+    });
+  // {url} 过滤最准（返回真正会发给该地址的 cookie，含 .youtube.com）；
+  // YouTube 的 SSO 票据有一部分落在 google.com 域下，两个域都要。
+  const [byUrl, byDomain, google] = await Promise.all([
+    getAll({ url: "https://www.youtube.com/" }),
+    getAll({ domain: "youtube.com" }),
+    getAll({ url: "https://www.google.com/" }),
+  ]);
+  const seen = new Set();
+  const lines = [];
+  for (const c of byUrl.concat(byDomain, google)) {
+    if (!c || !c.name) continue;
+    const line = netscapeCookieLine(c);
+    if (!line) continue;
+    const key = line.split("\t").slice(0, 3).join("|") + "|" + c.name;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(line);
+  }
+  return lines.length ? "# Netscape HTTP Cookie File\n" + lines.join("\n") + "\n" : "";
 }
 
 async function api(path, body, method = "POST") {
@@ -418,6 +936,8 @@ function launchViaNative(req) {
         source: req.source || undefined,
         kind: req.kind || undefined,
         audio_url: req.audio_url || undefined,
+        yt_page: req.yt_page || undefined,
+        yt_height: req.yt_height || undefined,
       });
     } catch (e) {
       finish(false);
@@ -443,6 +963,8 @@ function buildProtocolUrl(req) {
   if (req.source) q.set("source", req.source);
   if (req.kind) q.set("kind", req.kind);
   if (req.audio_url) q.set("audio_url", req.audio_url);
+  if (req.yt_page) q.set("yt_page", req.yt_page);
+  if (req.yt_height) q.set("yt_height", String(req.yt_height));
   // Cookie 也要活过协议跳转：需要登录的视频站，没有它就是 403。
   if (req.cookie) q.set("cookie", req.cookie);
   return "zdm://add?" + q.toString();
@@ -529,6 +1051,9 @@ async function handOff(req) {
       kind: req.kind || undefined,
       // DASH 的视频轨需要配套音频，后端会合并
       audio_url: req.audio_url || undefined,
+      // YouTube：给了页面地址 + 高度就让后端用 yt-dlp 下（直链不能分块取）
+      yt_page: req.yt_page || undefined,
+      yt_height: req.yt_height || undefined,
     });
 
   // 1. 客户端已在运行：直接 POST。
@@ -663,16 +1188,97 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
+  // YouTube 清晰度解析：转给本机 ZDM，由它用 yt-dlp 把加密的直链解开
+  // （ghostdownload 同款思路：浏览器里解 signatureCipher 太脆，交给桌面端）。
+  if (msg.type === "zdm-youtube-resolve") {
+    (async () => {
+      let cookie = "";
+      try {
+        cookie = await youtubeCookieText();
+      } catch (_) {
+        cookie = "";
+      }
+      // 老版本 content script 会自己带 cookie 过来，仍然兼容
+      if (!cookie && msg.cookie) cookie = msg.cookie;
+      const r = await api("youtube/resolve", {
+        url: msg.url,
+        cookie,
+        cookie_count: cookie ? cookie.split("\n").length - 2 : 0,
+      });
+      return r || { ok: false, error: "empty" };
+    })()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  // 页面交出「清晰度 → 大小」阶梯：YouTube 面板的数据源。
+  // SABR 之后那条 /videoplayback 是流式 POST，没有长度可报，因此面板改成
+  // 按清晰度列（每档都有确切字节数），推送时带 page_url + height 走后端。
+  if (msg.type === "sniffer-ladder") {
+    const tabId = sender.tab && sender.tab.id;
+    ensureRestored().then(() => {
+      const rows = (msg.rows || []).filter(
+        (r) => r && Number(r.height) > 0 && Number(r.size) > 0
+      );
+      if (!tabId || !rows.length) {
+        sendResponse({ ok: false });
+        return;
+      }
+      ladderByTab.set(tabId, {
+        pageUrl: msg.pageUrl || (sender.tab && sender.tab.url) || "",
+        title: msg.title || "",
+        rows,
+      });
+      persistLadder();
+      sendResponse({ ok: true, rows: rows.length });
+      notifyTab(tabId, false);
+    });
+    return true;
+  }
+  // 页面把「itag → 字节数」表交过来，用来补掉列表里的「大小未知」。
+  // YouTube 的 videoplayback 分包响应既没有 Content-Length 也没有
+  // Content-Range，URL 里也常常不带 clen —— 发 Range 请求去问又会被 403。
+  // 而 adaptiveFormats[].contentLength 不管直链有没有加密都在，直接用它最稳。
+  if (msg.type === "sniffer-sizes") {
+    const tabId = sender.tab && sender.tab.id;
+    ensureRestored().then(() => {
+      const lens = msg.sizes || {};
+      // 记住这张表：之后才抓到的分段（点击播放、切清晰度都会产生新请求）
+      // 在 rememberMedia 里直接用，不用再等页面同步一次。
+      lensByTab.set(tabId, Object.assign(lensByTab.get(tabId) || {}, lens));
+      persistLens();
+      const changed = applyLens(tabId, lens);
+      if (changed) persist();
+      sendResponse({ ok: true, changed });
+      if (changed) notifyTab(tabId, false);
+      // itag 表只覆盖「URL 里还带 itag」的老式直链；SABR 的链接对不上号，
+      // 剩下的交给桌面端按 URL 精确问一遍。
+      probeSizesViaBackend(tabId);
+    });
+    return true;
+  }
   // 媒体嗅探：content script 来要当前标签页已发现的媒体。
   // 先等 storage.session 恢复完再答 —— SW 刚被唤醒时恢复可能还没完成，
   // 直接读 Map 会返回空，用户就看到「嗅探到 0 个」。
   if (msg.type === "sniffer-list") {
     const tabId = sender.tab && sender.tab.id;
     ensureRestored().then(() => {
+      // 打开面板这一刻再补一次大小：条目可能是页面同步之后才抓到的。
+      const n = lensByTab.get(tabId);
+      if (n && applyLens(tabId, n)) persist();
+      const tabUrl = (sender.tab && sender.tab.url) || "";
       sendResponse({
         ok: true,
-        items: (tabId != null && snifferByTab.get(tabId)) || [],
+        items: viewItems(tabId, tabUrl),
       });
+      // 先把面板放出来（不让人干等），再异步把「大小未知」补上，
+      // 补到之后 notifyTab 会让面板自己刷新。
+      probeSizesViaBackend(tabId);
+      // YouTube：页面阶梯没上来（软导航换了视频 / SABR-only / 脚本还没跑）
+      // 就直接问桌面端要阶梯，答完重绘面板。
+      if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$/i.test(hostOf(tabUrl))) {
+        ensureLadderViaBackend(tabId, tabUrl);
+      }
     });
     return true;
   }
@@ -680,15 +1286,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // 因此冷启动唤醒、原生消息、协议兜底的行为三者一致。
   if (msg.type === "sniffer-push") {
     const item = msg.item || {};
+    const tabId = sender.tab && sender.tab.id;
+    // 推送的若是视频轨：优先用调用方给的音频，否则在嗅探列表里自动配对。
+    // DASH 音频是另一条请求，不配对就必然「下完没声音」。
+    let audioUrl = item.audio_url || "";
+    let url = item.url;
+    if (YT_MEDIA_HOST.test(hostOf(url))) url = stripRange(url);
+    if (!audioUrl && item.kind !== "audio") {
+      const sib = audioSiblingFor(tabId, item.url);
+      if (sib) {
+        audioUrl = YT_MEDIA_HOST.test(hostOf(sib.url)) ? stripRange(sib.url) : sib.url;
+      }
+    } else if (audioUrl && YT_MEDIA_HOST.test(hostOf(audioUrl))) {
+      audioUrl = stripRange(audioUrl);
+    }
     handOff({
-      url: item.url,
+      url,
       filename: item.filename,
       referer: item.referer,
       cookie: item.cookie,
       source: item.source || "sniffer",
       kind: item.kind || "video",
       // DASH 视频轨的配套音频轨，后端下载后用 ffmpeg 合并
-      audio_url: item.audio_url,
+      audio_url: audioUrl || undefined,
+      // YouTube：页面地址 + 高度 → 后端走 yt-dlp 通道
+      yt_page: item.page_url || undefined,
+      yt_height: item.height || undefined,
     })
       .then((ok) => {
         sendResponse({ ok });

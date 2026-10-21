@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="${ZDM_VERSION:-1.13.0}"
+VERSION="${ZDM_VERSION:-1.14.7}"
 APP_NAME="ZDM"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 STAGING="$(mktemp -d)/${APP_NAME}"

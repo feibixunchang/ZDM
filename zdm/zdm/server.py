@@ -59,6 +59,128 @@ def _site_referer(url: str) -> str:
             return SITE_REFERRERS.get(site, "")
     return ""
 
+
+# ---------------------------------------------------------------- 大小探测
+#
+# 为什么这件事只能放在桌面端做：
+#   googlevideo 的 CORS 只放行 https://www.youtube.com 这个源。
+#   - 浏览器扩展的 service worker 里 fetch，Origin 是 chrome-extension://…，
+#     googlevideo 不回 Access-Control-Allow-Origin → 响应头一个都读不到；
+#   - 页面里 fetch 又常常命中 SABR（POST 流式），既没有 Content-Length
+#     也没有 Content-Range。
+#   桌面端没有 CORS 这回事，带上同一份 Referer/cookie 发一个 2 字节的
+#   Range 请求，`Content-Range: bytes 0-1/84426489` 里的总数就是文件大小，
+#   而且只读 2 字节，不会把视频真的拖下来。
+
+_PROBE_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+)
+_PROBE_CACHE: dict = {}  # url -> (bytes, 时间戳)。直链会过期，缓存 10 分钟
+_PROBE_TTL = 600.0
+
+
+def probe_one_size(
+    url: str,
+    *,
+    cookie: str = "",
+    referer: str = "",
+    proxy: str = "",
+    timeout: float = 8.0,
+) -> int:
+    """问出「这个资源总共多大」，失败返回 0。绝不下载响应体。"""
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return 0
+    hit = _PROBE_CACHE.get(url)
+    if hit and time.time() - hit[1] < _PROBE_TTL:
+        return hit[0]
+    import urllib.request
+
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Range", "bytes=0-1")
+    req.add_header("User-Agent", _PROBE_UA)
+    req.add_header("Accept", "*/*")
+    if referer:
+        req.add_header("Referer", referer)
+    if cookie:
+        req.add_header("Cookie", cookie)
+    handlers = []
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    if handlers:
+        opener = urllib.request.build_opener(*handlers).open
+    else:
+        opener = urllib.request.urlopen
+    total = 0
+    try:
+        resp = opener(req, timeout=timeout)
+    except Exception:
+        return 0
+    try:
+        headers = resp.headers
+        ctype = (headers.get("Content-Type") or "").lower()
+        # 有些站点会回一张很小的 HTML 错误页（200 + text/html），
+        # 那不是媒体，别把它的长度当成视频大小。
+        if ctype.startswith("text/html"):
+            return 0
+        cr = headers.get("Content-Range") or ""
+        if "/" in cr:
+            try:
+                total = int(cr.rsplit("/", 1)[1].strip())
+            except Exception:
+                total = 0
+        # 200 说明服务端忽略了 Range，Content-Length 就是整个文件；
+        # 206 却拿不到 Content-Range 时，Content-Length 只是那一小段，不能用。
+        if not total and resp.status == 200:
+            try:
+                total = int(headers.get("Content-Length") or 0)
+            except Exception:
+                total = 0
+    except Exception:
+        total = 0
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+    if total > 0:
+        _PROBE_CACHE[url] = (total, time.time())
+    return total
+
+
+def probe_sizes(
+    urls,
+    *,
+    cookie: str = "",
+    referer: str = "",
+    proxy: str = "",
+    timeout: float = 8.0,
+    limit: int = 12,
+) -> dict:
+    """并发问一批网址的大小。返回 {url: bytes}（问不到的就不出现在结果里）。"""
+    out: dict = {}
+    todo = [u for u in (urls or []) if isinstance(u, str) and u][:limit]
+    if not todo:
+        return out
+    lock = threading.Lock()
+
+    def work(u):
+        n = probe_one_size(
+            u, cookie=cookie, referer=referer, proxy=proxy, timeout=timeout
+        )
+        if n > 0:
+            with lock:
+                out[u] = n
+
+    threads = [threading.Thread(target=work, args=(u,), daemon=True) for u in todo]
+    for t in threads:
+        t.start()
+    # 等全部结束（每个都有自己的 timeout），最多再多等 2 秒收尾。
+    deadline = time.time() + timeout + 2.0
+    for t in threads:
+        t.join(max(0.05, deadline - time.time()))
+    return out
+
 MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
@@ -249,6 +371,9 @@ class Handler(BaseHTTPRequestHandler):
                     source=body.get("source"),
                     kind=body.get("kind"),
                     audio_url=body.get("audio_url"),
+                    # YouTube：给了页面地址就走 yt-dlp 下载通道
+                    yt_page=body.get("yt_page") or body.get("page_url"),
+                    yt_height=body.get("yt_height") or body.get("height"),
                 )
             except (ValueError, TypeError) as e:
                 # TypeError as well as ValueError: the body is untrusted JSON,
@@ -326,6 +451,46 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ok = self.manager.open_path(path)
             return self._json({"ok": ok})
+
+        # 嗅探面板的「大小未知」补全：扩展把拿不到长度的直链发过来，
+        # 桌面端用 2 字节 Range 问出真实总大小（浏览器侧被 CORS 卡死，
+        # 详见 probe_one_size 的注释）。
+        if parts == ["probe-size"]:
+            urls = body.get("urls") or []
+            if not isinstance(urls, list):
+                urls = []
+            referer = (body.get("referer") or "").strip() or (
+                _site_referer(urls[0]) if urls else ""
+            )
+            cookie = body.get("cookie") or (
+                self._site_cookie_for(urls[0]) if urls else ""
+            )
+            sizes = probe_sizes(
+                urls,
+                cookie=cookie or "",
+                referer=referer or "",
+                proxy=self.manager.config.get("proxy") or "",
+            )
+            return self._json({"ok": True, "sizes": sizes})
+
+        # YouTube resolution via yt-dlp (desktop-side, robust). The extension
+        # forwards a watch/shorts URL; we return plain, downloadable streams so
+        # it never has to fight YouTube's signatureCipher in the browser.
+        if len(parts) == 2 and parts[0] == "youtube" and parts[1] == "resolve":
+            from .yt_resolve import resolve as _yt_resolve
+
+            url = (body.get("url") or "").strip()
+            if not url:
+                return self._error(400, "缺少视频链接")
+            # Prefer an explicit cookie from the caller, then the cookie
+            # configured in Settings (first-party session) as a fallback.
+            cookie = body.get("cookie") or self._site_cookie_for(url) or None
+            proxy = self.manager.config.get("proxy") or None
+            try:
+                result = _yt_resolve(url, cookie=cookie, proxy=proxy)
+            except Exception as e:  # resolver should self-report, but stay safe
+                result = {"ok": False, "formats": [], "title": "", "error": str(e)}
+            return self._json(result)
 
         return self._error(404, "not found")
 

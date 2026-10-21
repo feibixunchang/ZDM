@@ -38,13 +38,31 @@ hiddenimports = [
 # The theme/watchdog code imports platform helpers lazily; make sure the whole
 # package travels with the binary.
 hiddenimports += collect_submodules("zdm")
+# YouTube 的解析/下载已经改走「自带解释器的单文件 yt-dlp」二进制（见 binaries），
+# 不再依赖 pip 的 yt_dlp 包 —— 2026.x 的包要求 Python 3.10+，而容器/内嵌解释器
+# 可能是 3.9，import 会直接抛 "unsupported version of Python"。
+# 这里仍保留可选的收集：仓库里如果还带着旧包就不会被漏掉，没带也不让构建失败。
+try:
+    hiddenimports += collect_submodules("yt_dlp")
+except Exception:
+    pass
+
+# 随包的 yt-dlp 二进制。**必须走 binaries 而不是 datas**：datas 有时会丢掉
+# 可执行位，装到用户机器上就变成「文件在、但执行不了」。落点在 _internal/bin/，
+# 正好被 ytdlp_bin.binary_path() 的 dirname(here)/bin 探到。
+binaries = []
+_ytdlp = os.path.join(SRC, "bin", "yt-dlp")
+if os.path.isfile(_ytdlp):
+    binaries.append((_ytdlp, "bin"))
+else:
+    print("WARNING: zdm/bin/yt-dlp missing — 打包版将无法解析/下载 YouTube")
 
 block_cipher = None
 
 a = Analysis(
     [os.path.join(SRC, "zdm_app.py")],
     pathex=[SRC],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

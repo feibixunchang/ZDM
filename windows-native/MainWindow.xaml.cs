@@ -627,6 +627,7 @@ public partial class MainWindow : Window
     // ---------------- updates ----------------
 
     private UpdateInfo? _pendingUpdate;
+    private bool _updating;
 
     /// <summary>
     /// Check GitHub for a newer release. Every outcome reports back explicitly —
@@ -635,6 +636,7 @@ public partial class MainWindow : Window
     /// </summary>
     private async void CheckUpdatesAsync(bool interactive = true)
     {
+        if (_updating) return; // 正在下载安装包时别去搅局
         SetUpdateButtonBusy(true);
         StatusHint.Text = "正在检查更新…";
 
@@ -667,6 +669,7 @@ public partial class MainWindow : Window
         {
             StatusHint.Text = $"已是最新版本（{AppVersion.Display}）";
             UpdateButton.Visibility = Visibility.Collapsed;
+            _pendingUpdate = null;
             if (interactive)
                 MessageBox.Show(this,
                     $"已是最新版本（{AppVersion.Display}）。",
@@ -676,20 +679,28 @@ public partial class MainWindow : Window
 
         _pendingUpdate = info;
         UpdateButton.Visibility = Visibility.Visible;
-        UpdateButton.Content = $"{info.Tag} 可更新";
+        // 有安装包直链就自己下自己装；没有才退回网页（只有源码包的老版本会这样）
+        UpdateButton.Content = info.CanInstall
+            ? $"{info.Tag} · 立即更新"
+            : $"{info.Tag} · 去下载";
         StatusHint.Text = $"发现新版本 {info.Tag}";
 
         if (!interactive)
             return;
 
-        var answer = MessageBox.Show(
-            this,
-            $"发现新版本 {info.Tag}（当前 {AppVersion.Display}）。\n\n是否打开下载页面？",
-            "发现新版本",
+        var text = info.CanInstall
+            ? $"发现新版本 {info.Tag}（当前 {AppVersion.Display}）。\n\n" +
+              "是否现在下载并安装？\n" +
+              "下载完成后 ZDM 会自动退出，安装程序静默覆盖升级，无需再点“下一步”。"
+            : $"发现新版本 {info.Tag}（当前 {AppVersion.Display}）。\n\n" +
+              "这个版本没有提供可直接下载的安装包，是否打开下载页面？";
+
+        var answer = MessageBox.Show(this, text, "发现新版本",
             MessageBoxButton.YesNo, MessageBoxImage.Information);
 
-        if (answer == MessageBoxResult.Yes)
-            OpenUrl(info.Url);
+        if (answer != MessageBoxResult.Yes) return;
+        if (info.CanInstall) BeginUpdate(info);
+        else OpenUrl(info.Url);
     }
 
     private void SetUpdateButtonBusy(bool busy)
@@ -699,18 +710,93 @@ public partial class MainWindow : Window
         UpdateButton.Content = busy ? "检查中…" : "检查更新";
     }
 
+    /// <summary>状态栏那颗按钮：还不知道有没有新版就先查，已知有就直接装。</summary>
     private void OnOpenUpdatePage(object sender, RoutedEventArgs e)
     {
-        var target = _pendingUpdate?.Url
-                     ?? "https://github.com/feibixunchang/ZDM/releases/latest";
-        OpenUrl(target);
+        if (_updating) return;
+        var info = _pendingUpdate;
+        if (info is null)
+        {
+            CheckUpdatesAsync(interactive: true);
+            return;
+        }
+        if (!info.CanInstall)
+        {
+            OpenUrl(info.Url);
+            return;
+        }
+        BeginUpdate(info);
     }
+
+    /// <summary>
+    /// 下载并静默安装。装完就退出 —— Inno 要覆盖的是我们正在运行的 exe，
+    /// 不退出的话 /CLOSEAPPLICATIONS 只能强行结束进程，用户会看到窗口突然消失。
+    /// </summary>
+    internal async void BeginUpdate(UpdateInfo info)
+    {
+        if (_updating) return;
+        _updating = true;
+        UpdateButton.IsEnabled = false;
+        UpdateButton.Content = "准备下载…";
+        StatusHint.Text = "正在下载安装包…";
+
+        try
+        {
+            var progress = new Progress<(long Got, long Total)>(p =>
+            {
+                if (p.Total > 0)
+                {
+                    var pct = (int)Math.Clamp(p.Got * 100 / p.Total, 0, 100);
+                    UpdateButton.Content = $"下载 {pct}%";
+                    StatusHint.Text =
+                        $"正在下载更新 {Mb(p.Got):0.0} / {Mb(p.Total):0.0} MB（{pct}%）";
+                }
+                else
+                {
+                    StatusHint.Text = $"正在下载更新 {Mb(p.Got):0.0} MB";
+                }
+            });
+
+            var path = await UpdateInstaller.DownloadAsync(info, progress);
+
+            StatusHint.Text = "下载完成，正在安装…";
+            if (!UpdateInstaller.RunInstaller(path))
+            {
+                _updating = false;
+                UpdateButton.IsEnabled = true;
+                UpdateButton.Content = "重试更新";
+                StatusHint.Text = "安装程序启动失败";
+                var open = MessageBox.Show(this,
+                    $"安装包已下载到：\n{path}\n\n自动安装没能启动，是否手动打开这个安装包？",
+                    "更新", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (open == MessageBoxResult.Yes) OpenUrl(path);
+                return;
+            }
+
+            // 安装器已接手，本进程立即退出
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            _updating = false;
+            UpdateButton.IsEnabled = true;
+            UpdateButton.Content = "重试更新";
+            StatusHint.Text = "更新失败";
+            var go = MessageBox.Show(this,
+                $"下载更新失败：{ex.Message}\n\n要不要打开下载页面手动下载？",
+                "更新失败", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (go == MessageBoxResult.Yes) OpenUrl(info.Url);
+        }
+    }
+
+    private static double Mb(long bytes) => bytes / 1048576.0;
 
     private static void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
         try
         {
+            // 本地文件（下载好的安装包）也要能这样打开，所以不判断 http
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
         catch
