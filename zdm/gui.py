@@ -2588,6 +2588,13 @@ def main(argv=None) -> int:
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
+
+    # App 升级后把随包新版扩展同步到数据目录（Chrome 钉死在旧路径上，
+    # 不同步的话用户永远跑着旧扩展 —— 详见 runtime.sync_extension_to_data_dir）
+    try:
+        runtime.sync_extension_to_data_dir()
+    except Exception:
+        pass
     _install_translations(app)
     _dlog(f"[init] ZDM v{VERSION} starting (log={_dock_log_file()}, exe={sys.executable})")
 

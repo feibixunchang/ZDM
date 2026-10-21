@@ -77,6 +77,80 @@ def extension_dir() -> str:
     return cands[-1] if (is_frozen() and os.name == "nt") else cands[0]
 
 
+def _manifest_version(path: str) -> str:
+    """manifest.json 的 version 字段；读不到就返回空串。"""
+    import json
+
+    try:
+        with open(os.path.join(path, "manifest.json"), encoding="utf-8") as f:
+            return str(json.load(f).get("version") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def sync_extension_to_data_dir() -> str:
+    """把随包扩展同步到数据目录（仅 macOS 有此问题）。
+
+    Chrome 的「加载已解压的扩展程序」会把扩展**钉死在第一次选择的路径**上——
+    install.sh 时代的指引选的是数据目录（``~/Library/Application Support/ZDM/
+    extension``）。App 升级只更新 bundle 里的副本，数据目录那份永远停在旧版，
+    用户看到的就是「升级了 App，扩展行为还是老的」（v1.15.3 实锤：数据目录
+    停在 1.5.10，没有 cookie 导出，YouTube 全部报人机验证）。
+
+    所以启动时对比两边 manifest 的 version，不一致就把随包版整体覆盖过去。
+    Windows/Linux 的用户可见目录就是随包目录本身，无需同步；数据目录还没有
+    扩展的全新安装也不动它 —— 指引本来就指向随包目录，不凭空造一份。
+    """
+    if sys.platform != "darwin":
+        return ""
+    shipped = os.path.join(app_root(), "extension")
+    data = os.path.join(
+        os.path.expanduser("~"), "Library", "Application Support", "ZDM", "extension"
+    )
+    if not os.path.isfile(os.path.join(shipped, "manifest.json")):
+        return ""
+    if not os.path.isdir(data):
+        return ""
+    v_ship, v_data = _manifest_version(shipped), _manifest_version(data)
+    if not v_ship or v_ship == v_data:
+        return ""
+
+    import shutil
+
+    try:
+        tmp = data + ".syncing"
+        if os.path.exists(tmp):
+            shutil.rmtree(tmp)
+        shutil.copytree(shipped, tmp)
+        shutil.rmtree(data)
+        try:
+            os.replace(tmp, data)
+        except OSError:
+            # 同目录改名被拒（云同步/权限加锁）时退回复制
+            shutil.copytree(shipped, data, dirs_exist_ok=True)
+            shutil.rmtree(tmp, ignore_errors=True)
+        _log_extension_sync(f"synced extension {v_data} -> {v_ship}")
+        return data
+    except Exception as e:  # noqa: BLE001
+        _log_extension_sync(f"sync failed: {e}")
+        return ""
+
+
+def _log_extension_sync(msg: str) -> None:
+    """同步结果落到数据目录的小日志里 —— 关键路径不允许静默失败。"""
+    try:
+        p = os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", "ZDM",
+            "extension_sync.log",
+        )
+        import time
+
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def exe_path() -> str:
     """Abs path of the executable that represents this app."""
     return os.path.abspath(sys.executable or "python3")
