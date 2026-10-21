@@ -264,27 +264,38 @@
     }
   }
 
+  let bootRunning = false;
   async function boot() {
+    if (bootRunning) return;
+    bootRunning = true;
     try {
-      const site = await ask("siteOf");
-      siteName = site || "";
-      if (!siteName) {
-        __err("不是支持的站点");
-        return;
+      /* 桥接的 data-zdm-ready 属性一置位 waitForBridge 就会调这里，但那一刻
+         sites.js 未必已经能应答 siteOf/config —— 以前一次失败就直接 return，
+         且轮询定时器已被清掉，按钮从此永久消失（「刷新页面后按钮不见了，
+         只能新开标签页」就是这个竞态）。改成带退避的重试，全部落空再退化。 */
+      for (let i = 0; i < 10; i++) {
+        try {
+          const site = await ask("siteOf");
+          siteName = site || "";
+          if (siteName) {
+            // 拿站点配置（选择器等）—— 通过 postMessage 传
+            const cfg = await ask("config");
+            if (cfg) {
+              S = cfg;
+              PLAYER_SEL = cfg.player || "";
+              start();
+              if (siteName === "youtube") syncSnifferSizes();
+              return;
+            }
+          }
+        } catch (_) {
+          /* 忽略，下一轮再试 */
+        }
+        await new Promise((r) => setTimeout(r, 800));
       }
-      // 拿站点配置（选择器等）—— 通过 postMessage 传
-      const cfg = await ask("config");
-      if (!cfg) {
-        __err("拿不到站点配置");
-        return;
-      }
-      S = cfg;
-      PLAYER_SEL = cfg.player || "";
-      start();
-      if (siteName === "youtube") syncSnifferSizes();
-    } catch (e) {
-      __err("boot: " + (e && e.message));
-      console.warn("[ZDM] 初始化失败:", e && e.message, e && e.stack);
+      bootWithFallbackConfig();
+    } finally {
+      bootRunning = false;
     }
   }
   // 播放页的播放器：列表页没有它，播放页没有卡片。boot() 时按站点赋值。

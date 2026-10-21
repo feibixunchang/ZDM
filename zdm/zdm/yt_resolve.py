@@ -159,6 +159,17 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
             _CACHE[url] = (time.time(), res)
             return res
         last_bin_err = res.get("error") or ""
+        # 人机验证（"Sign in to confirm you're not a bot"）是**按请求**随机判的
+        # —— 同一个 cookie、同一台机器，隔几秒再发一次往往就过了（2026-10-21
+        # 实测：迷你主机视频一次过、PVE 视频连挂两次、几分钟后又自己好了）。
+        # 所以在二进制路径上隔 3 秒重试一次，代价可控、收益明显。
+        if _is_bot_check(last_bin_err):
+            time.sleep(3.0)
+            res = _resolve_via_binary(binp, url, cookie, proxy)
+            if res.get("ok") and res.get("formats"):
+                _CACHE[url] = (time.time(), res)
+                return res
+            last_bin_err = res.get("error") or last_bin_err
     else:
         last_bin_err = ""
 

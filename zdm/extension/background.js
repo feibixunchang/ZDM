@@ -1363,20 +1363,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         audioUrl = stripRange(audioUrl);
       }
 
-      /* YouTube 的登录态全是 HttpOnly（SID / HSID / __Secure-1PSID），
-         content script 里的 document.cookie 一个都读不到 —— 它传来的
-         `item.cookie` 对 YouTube 等于空。以前这里就照单全收，于是 yt-dlp
-         永远收到空 cookiejar，只能回「Sign in to confirm you're not a bot」，
-         下载必定失败。必须在这一层（service worker，能读 HttpOnly）现取。 */
+      /* YouTube 的登录态几乎全是 HttpOnly（SID / HSID / __Secure-1PSID），
+         content script 传来的 document.cookie 只有 SAPISID/APISID 这几块 ——
+         **非空但残缺**。以前只在 `!cookie` 时才换完整导出，残缺版一进来就把
+         完整导出挡住了，yt-dlp 拿着半个 cookiejar 照样报人机验证
+         （失败任务里存的 "APISID=...; SAPISID=..." 就是铁证）。
+         chrome.cookies 的导出是严格超集，YouTube 一律优先用它。 */
       let cookie = item.cookie || "";
       const page = item.page_url || item.referer || "";
       const host = hostOf(page) || hostOf(url);
-      if (!cookie && /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host)) {
+      if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host)) {
+        let full = "";
         try {
-          cookie = await youtubeCookieText();
+          full = await youtubeCookieText();
         } catch (_) {
-          cookie = "";
+          full = "";
         }
+        if (full) cookie = full;
       }
 
       const ok = await handOff({
