@@ -2152,7 +2152,16 @@ class MainWindow(QMainWindow):
             QApplication.quit()
             return
         if sys.platform.startswith("linux") and path.lower().endswith(".deb"):
-            self._status("正在打开系统安装器…", hold=30)
+            # 用 GUI 自己的会话打开 .deb：QDesktopServices 走 Qt 的 xdg/DDE
+            # 集成，实测能稳定弹出「软件包安装器」。从后台线程 Popen
+            # deepin-deb-installer 在本机偶尔会直接退出，用户看到的就是
+            # 「下载完了，安装器没出来」。
+            self._status("正在打开系统安装器…", hold=10)
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                self._status("已打开系统安装器，请按提示完成安装；ZDM 即将关闭", hold=15)
+                QTimer.singleShot(2000, QApplication.quit)
+                return
+            # 极端情况下没有 xdg handler：再退回 pkexec/dpkg。
             self._background(
                 lambda: update.install_linux(path),
                 lambda res: self._on_linux_installed(res, path),
