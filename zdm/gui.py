@@ -1590,7 +1590,34 @@ class MainWindow(QMainWindow):
         self.poll.start()
 
     def _on_offline(self, msg: str):
-        self.statusBar().showMessage(f"服务未连接（{msg}）— 请运行：zdm start --daemon")
+        # 服务没起来就自动拉起（升级后/开机后最常见的掉线场景）。
+        # 每轮掉线只尝试一次（30s 节流），成败交给轮询自然验证——
+        # 不再让用户去终端敲 zdm start --daemon（Linux 升级后实测）。
+        if self._try_start_backend():
+            self.statusBar().showMessage("服务未连接，正在自动启动服务…")
+        else:
+            self.statusBar().showMessage(f"服务未连接（{msg}）— 请运行：zdm start --daemon")
+
+    def _try_start_backend(self) -> bool:
+        """尝试把本地 serve 拉起来。返回 False 表示这轮已试过/失败。"""
+        now = time.time()
+        if now < getattr(self, "_next_backend_start", 0.0):
+            return False
+        self._next_backend_start = now + 30.0
+        try:
+            if runtime.is_frozen() and os.path.isfile(sys.executable):
+                cmd = [sys.executable, "start", "--daemon", "--no-open"]
+            else:
+                cmd = runtime.cli_cmd("start", "--daemon", "--no-open")
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                **runtime.silent_proc_kwargs(),
+            )
+            return True
+        except Exception:
+            return False
 
     def _on_state(self, st: dict):
         self.config = st.get("config") or {}
@@ -2611,7 +2638,7 @@ def _zh_standard_menu(edit) -> None:
     class _Filter(QObject):
         def eventFilter(self, obj, ev):
             if ev.type() == QEvent.ContextMenu:
-                menu = obj.createStandardContextMenu()
+                menu = edit.createStandardContextMenu()
                 for a in menu.actions():
                     t = a.text()
                     if not t:
@@ -2620,11 +2647,19 @@ def _zh_standard_menu(edit) -> None:
                     renamed = zh.get(base.replace("&", "").strip().lower())
                     if renamed:
                         a.setText(renamed + (("\t" + hotkey) if hotkey else ""))
-                menu.exec_(ev.globalPos())
+                # popup 而不是 exec_：非阻塞，事件循环不被菜单卡住
+                menu.popup(ev.globalPos())
                 return True
             return False
 
-    edit.installEventFilter(_Filter(edit))
+    f = _Filter(edit)
+    edit.installEventFilter(f)
+    # QPlainTextEdit/QTextEdit 是 QAbstractScrollArea：右键事件发给内部
+    # viewport，只装在控件本体上拦不到（Windows 实测菜单仍是英文）。
+    try:
+        edit.viewport().installEventFilter(f)
+    except Exception:
+        pass
 
 
 def _install_translations(app) -> None:

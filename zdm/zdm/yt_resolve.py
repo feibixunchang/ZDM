@@ -105,16 +105,21 @@ def _bin_module():
         return m
 
 
-def _resolve_via_binary(binp: str, url: str, cookie: Optional[str], proxy: Optional[str]) -> Dict:
+def _resolve_via_binary(
+    binp: str, url: str, cookie: Optional[str], proxy: Optional[str],
+    extra: Optional[List[str]] = None,
+) -> Dict:
     """用 yt-dlp 可执行文件解析（`-J`，一次调用就能拿到完整阶梯）。
 
     比「逐个 player_client 试 python 模块」快得多：新版默认客户端本身就给
-    完整 adaptive 列表，一次 3~5 秒；旧的多客户端轮询是不得已的兜底。
+    完整 adaptive 列表，一次 3~5 秒；多客户端轮换是不得已的重试手段。
     """
     mod = _bin_module()
     cookie_path = _cookiefile(cookie)
     try:
-        info, err = mod.extract_json(binp, url, cookie_path=cookie_path, proxy=proxy)
+        info, err = mod.extract_json(
+            binp, url, cookie_path=cookie_path, proxy=proxy, extra=extra
+        )
     except Exception as e:  # noqa: BLE001
         info, err = None, str(e)
     finally:
@@ -132,6 +137,23 @@ def _resolve_via_binary(binp: str, url: str, cookie: Optional[str], proxy: Optio
         }
     merged["client"] = "cli"
     return merged
+
+
+def _resolve_retryable(err: str) -> bool:
+    """解析失败的报错是否值得换客户端/再试一次（与下载侧同源的随机拦截）。"""
+    if not err:
+        return False
+    e = err.lower()
+    return (
+        "not a bot" in e
+        or "sign in to confirm" in e
+        or "page needs to be reloaded" in e
+        or "requested format is not available" in e
+        or "没有可直接下载的直链" in err
+        or "没有可用的" in err
+        or "未解析到视频信息" in err
+        or "解析失败" in err
+    )
 
 
 def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None) -> Dict:
@@ -154,22 +176,27 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
     except Exception:  # noqa: BLE001
         binp = None
     if binp:
-        res = _resolve_via_binary(binp, url, cookie, proxy)
-        if res.get("ok") and res.get("formats"):
-            _CACHE[url] = (time.time(), res)
-            return res
-        last_bin_err = res.get("error") or ""
-        # 人机验证（"Sign in to confirm you're not a bot"）是**按请求**随机判的
-        # —— 同一个 cookie、同一台机器，隔几秒再发一次往往就过了（2026-10-21
-        # 实测：迷你主机视频一次过、PVE 视频连挂两次、几分钟后又自己好了）。
-        # 所以在二进制路径上隔 3 秒重试一次，代价可控、收益明显。
-        if _is_bot_check(last_bin_err):
-            time.sleep(3.0)
-            res = _resolve_via_binary(binp, url, cookie, proxy)
+        # YouTube 的拦截是**按请求**随机判的（bot check / 空格式列表 /
+        # page needs to be reloaded），且部分网络环境下默认客户端几乎
+        # 必被拦、android_vr 才有完整阶梯。所以解析和下载一样轮换：
+        # 默认 → android_vr → 各再试一次（隔 3 秒冷却）。
+        last_bin_err = ""
+        attempts = [
+            (None, 0.0),
+            (["--extractor-args", "youtube:player_client=android_vr"], 0.0),
+            (None, 3.0),
+            (["--extractor-args", "youtube:player_client=android_vr"], 3.0),
+        ]
+        for extra, delay in attempts:
+            if delay:
+                time.sleep(delay)
+            res = _resolve_via_binary(binp, url, cookie, proxy, extra=extra)
             if res.get("ok") and res.get("formats"):
                 _CACHE[url] = (time.time(), res)
                 return res
             last_bin_err = res.get("error") or last_bin_err
+            if not _resolve_retryable(last_bin_err):
+                break
     else:
         last_bin_err = ""
 
