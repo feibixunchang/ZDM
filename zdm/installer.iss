@@ -1,7 +1,7 @@
 ; ZDM 下载管理器 - Windows 安装脚本（PyQt5 三端统一版）
 ;
 ; 由 zdm/build_windows_app.ps1 调用：
-;   iscc /DAppVersion=1.15.4 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
+;   iscc /DAppVersion=1.15.5 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
 ;
 ; SourceDir 是 PyInstaller 产出的 onedir（ZDM.exe + _internal\ 整个运行时，
 ; 内含 CPython 与 PyQt5）。用户机器上不需要装 Python、不需要 pip、不需要 VC 运行库。

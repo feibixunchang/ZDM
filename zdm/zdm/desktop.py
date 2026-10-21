@@ -221,7 +221,17 @@ def ensure_desktop(urls=None, port: int = 9000) -> bool:
         elif IS_WIN:
             exe = _win_exe()
             if exe:
-                subprocess.Popen([exe] + urls, **_detached())
+                # 冻结版只有一个 exe，角色由参数决定（见 zdm_app.py）：必须带
+                # --gui 才会进窗口分支。以前这里裸拉 [exe]+urls：
+                #   urls 为空 → zdm_app 兜成 ["gui"] 子命令 → cmd_gui 又调
+                #   ensure_desktop（且 cmd_gui 每次都清零节流）→ 无限拉起链，
+                #   十几秒堆出几十个进程 → 资源耗尽 → ucrtbase BEX64 崩溃，
+                #   表层就是「Failed to load Python DLL / 内存资源不足」；
+                #   urls 非空 → 落进 CLI 分支被 argparse 拒掉，窗口照样不出。
+                # macOS 走 open bundle、Linux 走 zdm-gui 启动器，都没这条死路。
+                subprocess.Popen(
+                    [exe, "--gui", str(port)] + list(urls), **_detached()
+                )
                 return True
         else:
             # Prefer the source-install launcher / our own gui.py. Falling back
