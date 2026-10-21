@@ -19,13 +19,15 @@
 #ifndef OutDir
   #define OutDir "..\dist"
 #endif
+; 扩展 ID 由构建脚本从 extension/manifest.json 的 "key" 现算后传入
+; （sha256 前 32 位映射到 a-p）。这里的默认值是同算法的结果，仅作兜底。
+#ifndef ExtId
+  #define ExtId "mpodbnemeeghjpllgphpemhoogddfhjg"
+#endif
 
 #define AppName "ZDM 下载管理器"
 #define AppExeName "ZDM.exe"
 #define AppPublisher "ZDM"
-; 扩展的固定 ID：由 extension/manifest.json 的 "key" 做 sha256 取前 32 位
-; 再映射到 a-p 得到。扩展靠它在这个安装包里被识别为「自己人」。
-#define ExtId "mpodbnemeeghjpllgphpemhoogddfhjg"
 
 [Setup]
 AppId={{7C5B8E11-4A2D-4F6B-9C3E-ZDM110000001}
