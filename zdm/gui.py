@@ -865,6 +865,9 @@ class ExtensionDialog(QDialog):
         v.addWidget(dir_row)
 
         btns = QDialogButtonBox(QDialogButtonBox.Close)
+        # 冻结包里 Qt 的翻译文件不一定能加载（CI 打包环境差异，Windows 实测
+        # 出现过英文 Save/Cancel），标准按钮直接写中文，三端一致。
+        btns.button(QDialogButtonBox.Close).setText("关闭")
         # Close 按钮在 Qt 里挂 RejectRole（部分版本是 AcceptRole），两边都连
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -2176,6 +2179,8 @@ class MainWindow(QMainWindow):
         form.addRow("保存到", row)
         form.addRow("Referer", referer)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.button(QDialogButtonBox.Ok).setText("确定")
+        box.button(QDialogButtonBox.Cancel).setText("取消")
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
         form.addRow(box)
@@ -2289,6 +2294,8 @@ class MainWindow(QMainWindow):
         form.addRow("版本", ver_row)
         form.addRow("", update_cb)
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        box.button(QDialogButtonBox.Save).setText("保存")
+        box.button(QDialogButtonBox.Cancel).setText("取消")
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
         quit_btn = QPushButton("退出")
