@@ -1,7 +1,7 @@
 ; ZDM 下载管理器 - Windows 安装脚本（PyQt5 三端统一版）
 ;
 ; 由 zdm/build_windows_app.ps1 调用：
-;   iscc /DAppVersion=1.15.0 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
+;   iscc /DAppVersion=1.15.1 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
 ;
 ; SourceDir 是 PyInstaller 产出的 onedir（ZDM.exe + _internal\ 整个运行时，
 ; 内含 CPython 与 PyQt5）。用户机器上不需要装 Python、不需要 pip、不需要 VC 运行库。
@@ -87,9 +87,12 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Source: "{#SourceDir}\_internal\extension\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\_internal\extension\icons\icon.ico"
+; **必须带 gui 参数**。裸 ZDM.exe 在 CLI 里等于 `start`：前台跑服务 +
+; 用浏览器打开网页版 —— 1.15.0 的快捷方式就是这样，用户更新后看到的是
+; 「桌面界面没了，只剩网页版」。gui 子命令会先确保本机服务在跑，再开窗口。
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "gui"; IconFilename: "{app}\_internal\extension\icons\icon.ico"
 Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\_internal\extension\icons\icon.ico"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "gui"; IconFilename: "{app}\_internal\extension\icons\icon.ico"; Tasks: desktopicon
 
 [Registry]
 Root: HKA; Subkey: "Software\ZDM"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletevalue

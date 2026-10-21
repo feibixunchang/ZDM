@@ -862,7 +862,17 @@ class Download:
         if (rc != 0 or err) or not path:
             self._yt_cleanup(stem)
             self.status = "error"
-            self.error = (err or f"yt-dlp 退出码 {rc}，没有产出文件").strip()[:400]
+            msg = (err or f"yt-dlp 退出码 {rc}，没有产出文件").strip()
+            # yt-dlp 的原文只有英文和 GitHub 链接，用户看不出该做什么。
+            # 实测这个报错的唯一原因是「这条任务没带登录 cookie」——
+            # 扩展里点「下载此视频」会自动带，手填链接或网页版则没有。
+            if "not a bot" in msg or "Sign in to confirm" in msg:
+                msg += (
+                    "\n\n提示：YouTube 要求登录态才能下载。"
+                    "请在浏览器里登录 YouTube，用扩展的「下载此视频」重试；"
+                    "手填链接的任务不会带浏览器 cookie。"
+                )
+            self.error = msg[:600]
             self._emit("error")
             return
 
