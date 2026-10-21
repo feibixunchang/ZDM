@@ -20,7 +20,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from zdm import __version__ as VERSION  # noqa: E402
-from zdm import autostart, desktop, update  # noqa: E402
+from zdm import autostart, desktop, runtime, update  # noqa: E402
 import theme as _theme  # noqa: E402
 
 # Global theme manager. Created lazily in main() (it needs the QApplication),
@@ -366,6 +366,10 @@ class Api:
     def state(self):
         return self._req("GET", "state")
 
+    def extension(self):
+        """「浏览器扩展」对话框用：扩展最近有没有心跳。"""
+        return self._req("GET", "extension", timeout=3.0)
+
     def add(self, payload=None, **kw):
         """Create a task.
 
@@ -411,12 +415,14 @@ from PyQt5.QtCore import (  # noqa: E402
     Qt,
     QThread,
     QTimer,
+    QUrl,
     pyqtSignal,
 )
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PyQt5.QtGui import (  # noqa: E402
     QColor,
     QCursor,
+    QDesktopServices,
     QFont,
     QIcon,
     QPainter,
@@ -800,6 +806,128 @@ class ElidedLabel(QLabel):
         p.drawText(self.rect(), Qt.AlignLeft | Qt.AlignVCenter, elided)
 
 
+class ExtensionDialog(QDialog):
+    """「浏览器扩展」引导：检测扩展是否已加载 + 一键打开扩展目录。
+
+    扩展没法上架 Chrome 应用商店（它要访问 127.0.0.1 才能工作，审核基本
+    过不了），所以每台新电脑上都要手动「加载已解压的扩展程序」——这是
+    新用户最容易卡住的一步。这个对话框把三件事放到一个页面：
+
+    * **装没装**：不读注册表、不猜浏览器配置目录，反过来听——扩展每次
+      被唤醒都会向本机服务报一个到（``/api/extension/ping`` 心跳），
+      服务记下最近一次时间，这里轮询 ``/api/extension`` 即可；
+    * **目录在哪**：:func:`zdm.runtime.extension_dir` 给出真实磁盘路径，
+      一键打开（选「加载已解压的扩展程序」时要的就是它）；
+    * **怎么装**：三步说明。
+
+    三端（macOS / Windows / Linux）跑的是同一份 PyQt5 代码，这里天然覆盖。
+    """
+
+    def __init__(self, api: Api, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("浏览器扩展")
+        self.setMinimumWidth(600)
+        self.api = api
+        self._worker = None  # 防止轮询堆叠
+
+        v = QVBoxLayout(self)
+        v.setSpacing(10)
+
+        self.status = QLabel("正在检测…")
+        self.status.setWordWrap(True)
+        v.addWidget(self.status)
+
+        tips = QLabel(
+            "尚未安装？按下面三步加载（Chrome / Edge 通用）：\n"
+            "  1. 浏览器地址栏打开 chrome://extensions，右上角开启「开发者模式」\n"
+            "  2. 点「加载已解压的扩展程序」，选择下面的扩展目录\n"
+            "  3. 弹出「未列在 Chrome 网上应用商店」时点「继续」\n"
+            "加载后自动生效；ZDM 升级后回到 chrome://extensions 点一下刷新即可。"
+        )
+        tips.setWordWrap(True)
+        v.addWidget(tips)
+
+        ext_dir = runtime.extension_dir()
+        dir_title = QLabel("扩展目录：")
+        v.addWidget(dir_title)
+        dir_row = QWidget()
+        dh = QHBoxLayout(dir_row)
+        dh.setContentsMargins(0, 0, 0, 0)
+        self.dir_label = ElidedLabel(ext_dir)
+        self.dir_label.setToolTip(ext_dir)
+        dh.addWidget(self.dir_label, 1)
+        btn_open = QPushButton("打开目录")
+        btn_open.clicked.connect(self._open_ext_dir)
+        dh.addWidget(btn_open)
+        btn_copy = QPushButton("复制路径")
+        btn_copy.clicked.connect(self._copy_path)
+        dh.addWidget(btn_copy)
+        v.addWidget(dir_row)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        # Close 按钮在 Qt 里挂 RejectRole（部分版本是 AcceptRole），两边都连
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        v.addWidget(btns)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+        self._refresh()
+
+    # ---- 状态轮询：网络请求走 OpWorker 线程，不卡 UI ----
+    def _refresh(self):
+        if self._worker is not None:
+            return
+        self._worker = OpWorker(self.api.extension)
+        self._worker.done.connect(self._on_status)
+        self._worker.start()
+
+    def _on_status(self, tag: str, payload):
+        self._worker = None
+        if tag != "ok":
+            self.status.setText(f"⚠️ 检测失败：{payload}")
+            return
+        r = payload if isinstance(payload, dict) else {}
+        if not r.get("ok"):
+            self.status.setText("⚠️ 本机服务未响应，无法检测扩展（服务可能没在运行）")
+            return
+        if r.get("seen_recently"):
+            self.status.setText("✅ 已检测到浏览器扩展，工作正常。")
+        elif r.get("last_seen"):
+            self.status.setText(
+                "✅ 浏览器扩展已连接过，最近一次活跃：{}。"
+                "浏览器关闭后扩展休眠、不再心跳，属正常现象。".format(
+                    fmt_clock(float(r["last_seen"]))
+                )
+            )
+        else:
+            self.status.setText(
+                "❌ 未检测到浏览器扩展 —— 服务启动以来扩展从未连接过。"
+                "如果还没装，按下面的步骤加载即可。"
+            )
+
+    def _open_ext_dir(self):
+        d = runtime.extension_dir()
+        if not os.path.isdir(d):
+            QMessageBox.information(
+                self, "扩展目录不存在",
+                f"目录不存在：\n{d}\n\nZDM 安装可能不完整，请重新安装。",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+
+    def _copy_path(self):
+        d = runtime.extension_dir()
+        QApplication.clipboard().setText(d)
+        self.status.setText(f"已复制扩展路径：{d}")
+
+    def closeEvent(self, e):  # noqa: N802 - Qt 命名
+        self._timer.stop()
+        super().closeEvent(e)
+
+
 class NameCell(QWidget):
     """文件名 + 来源徽标。
 
@@ -1178,6 +1306,7 @@ class MainWindow(QMainWindow):
         for text, fn in (
             ("清除已完成", lambda: self._bulk("clear_finished")),
             ("打开网页版", self._open_web),
+            ("浏览器扩展", self._extensions),
             ("打开目录", self._open_dir),
             ("设置", self._settings),
         ):
@@ -1381,6 +1510,7 @@ class MainWindow(QMainWindow):
         menu.addAction("全部继续", lambda: self._bulk("resume_all"))
         menu.addSeparator()
         menu.addAction("打开网页版", self._open_web)
+        menu.addAction("浏览器扩展", self._extensions)
         menu.addAction("打开下载目录", self._open_dir)
         menu.addSeparator()
         self.autostart_action = menu.addAction("开机自启")
@@ -2247,6 +2377,17 @@ class MainWindow(QMainWindow):
             self._status(f"已在浏览器打开网页版：http://127.0.0.1:{port}/")
         except Exception as e:
             self._status(f"打开网页版失败：{e}")
+
+    def _extensions(self):
+        """「浏览器扩展」引导对话框（单例：避免重复弹出堆叠）。"""
+        dlg = getattr(self, "_ext_dlg", None)
+        if dlg is None:
+            dlg = ExtensionDialog(self.api, self)
+            self._ext_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        dlg._refresh()
 
     def _open_selected_file(self, row):
         """Double-click a row: open the finished file, or its folder otherwise."""

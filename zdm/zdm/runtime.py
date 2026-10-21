@@ -40,6 +40,43 @@ def app_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def extension_dir() -> str:
+    """Best-effort absolute path of the shipped browser-extension folder.
+
+    The layout differs per shape, and the difference is *user facing*: this is
+    the folder the user must pick in Chrome's "Load unpacked" dialog, so it
+    has to be the real one on disk, not a guess.
+
+    * Windows frozen: the installer deliberately puts a copy at
+      ``{app}\\extension`` (a sibling of ``_internal``) because Chrome pins the
+      unpacked extension to that path — updating must not move it;
+    * macOS bundle / Linux frozen / source checkout: ``<app_root>/extension``
+      (Resources, ``_internal``, or the repo root respectively);
+    * the macOS CLI flavor (``install.sh``) also keeps a copy in the data dir.
+
+    Returns the first candidate that actually contains a ``manifest.json``;
+    when none does (broken install) it returns the path the *installer* would
+    have used, so the dialog still points the user at the right place.
+    """
+    root = app_root()
+    cands = [os.path.join(root, "extension")]
+    if is_frozen() and os.name == "nt":
+        # PyInstaller onedir: root is <app>\_internal; the user-facing copy
+        # sits next to it.
+        cands.append(os.path.join(os.path.dirname(root), "extension"))
+    if sys.platform == "darwin":
+        cands.append(
+            os.path.join(
+                os.path.expanduser("~"), "Library", "Application Support",
+                "ZDM", "extension",
+            )
+        )
+    for c in cands:
+        if os.path.isfile(os.path.join(c, "manifest.json")):
+            return c
+    return cands[-1] if (is_frozen() and os.name == "nt") else cands[0]
+
+
 def exe_path() -> str:
     """Abs path of the executable that represents this app."""
     return os.path.abspath(sys.executable or "python3")

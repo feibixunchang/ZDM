@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from . import __version__ as VERSION
 from . import desktop
+from . import presence
 from .manager import Manager
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -211,6 +212,14 @@ class Handler(BaseHTTPRequestHandler):
             "Access-Control-Allow-Headers", "Content-Type,X-ZDM-Token,X-ZDM-Extension"
         )
         self.send_header("Access-Control-Max-Age", "86400")
+        # 顺手做扩展存在性检测：_cors 在每个响应（含 OPTIONS 预检）上都会走，
+        # 而扩展的每个请求要么带 X-ZDM-Extension、要么 Origin 是
+        # chrome-extension://。GUI 的「浏览器扩展」对话框就靠这个回答
+        # 「扩展装上了没有」——比读注册表/翻浏览器配置目录可靠得多。
+        if self.headers.get("X-ZDM-Extension") or (
+            self.headers.get("Origin") or ""
+        ).startswith("chrome-extension://"):
+            presence.note_seen()
 
     def _auth_ok(self) -> bool:
         if not self.token:
@@ -266,6 +275,12 @@ class Handler(BaseHTTPRequestHandler):
         if not parts:
             return self._serve_static("index.html")
         if parts[0] == "api":
+            if parts == ["api", "extension", "ping"]:
+                # 扩展心跳：故意不鉴权（它只记录「扩展来过」，不泄露任何
+                # 东西），否则 token 校验会把最需要这条信号的新装机用户挡在
+                # 门外。返回体里也不带任何路径信息。
+                presence.note_seen()
+                return self._json({"ok": True})
             if not self._auth_ok():
                 return self._error(401, "invalid token")
             return self._api_get(parts[1:])
@@ -302,6 +317,18 @@ class Handler(BaseHTTPRequestHandler):
             )
         if parts == ["config"]:
             return self._json({"ok": True, "config": self.manager.config})
+        if parts == ["extension"]:
+            # GUI「浏览器扩展」对话框轮询这个：扩展装没装、最近什么时候
+            # 活跃过。扩展目录的定位在 GUI 侧用 runtime.extension_dir() 做
+            # （GUI 可能是独立进程，路径要自己算），这里只给信号不给路径。
+            return self._json(
+                {
+                    "ok": True,
+                    "version": VERSION,
+                    "last_seen": presence.last_seen(),
+                    "seen_recently": presence.recent(),
+                }
+            )
         if parts == ["events"]:
             return self._sse()
         return self._error(404, "not found")
