@@ -865,16 +865,26 @@ async function youtubeCookieText() {
 
 async function api(path, body, method = "POST") {
   const cfg = await getCfg();
-  const r = await fetch(baseUrl(cfg) + "/api/" + path.replace(/^\/+/, ""), {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      // Lets the client whitelist this extension id for native messaging even
-      // if it was reloaded under a different id.
-      "X-ZDM-Extension": chrome.runtime.id,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const doFetch = () =>
+    fetch(baseUrl(cfg) + "/api/" + path.replace(/^\/+/, ""), {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        // Lets the client whitelist this extension id for native messaging even
+        // if it was reloaded under a different id.
+        "X-ZDM-Extension": chrome.runtime.id,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  let r;
+  try {
+    r = await doFetch();
+  } catch (e) {
+    // 服务重启（升级）的瞬间连接池里可能全是死 socket：歇 400ms 重试
+    // 一次，面板就不用等用户重开浏览器才恢复。
+    await new Promise((res) => setTimeout(res, 400));
+    r = await doFetch();
+  }
   return r.json();
 }
 

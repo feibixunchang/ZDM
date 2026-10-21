@@ -788,22 +788,31 @@ class Download:
             from . import yt_resolve
 
             cookie = (self.headers or {}).get("Cookie") or ""
-            res = yt_resolve.resolve(self.yt_page, cookie=cookie, proxy=self.proxy or "")
+            best = None
+            # 第一优先：任务自带直链。播放器按钮推送时扩展已经把解析的
+            # 直链放进 body.url（googlevideo），这条链在推送当时刚验证
+            # 可用 —— 不必再赌一遍解析通道（它同样会被随机拦）。
+            if self.url and "googlevideo.com/" in self.url:
+                best = {"url": self.url, "audio_url": self.audio_url or ""}
+            # 第二优先：重新解析（带 5 分钟缓存），解析通道还活着就能拿到。
+            if best is None:
+                res = yt_resolve.resolve(
+                    self.yt_page, cookie=cookie, proxy=self.proxy or ""
+                )
+                if not (res and res.get("ok")):
+                    return False
+                want = int(self.yt_height or 0)
+                for f in res.get("formats") or []:
+                    if not f or f.get("kind") != "video" or not f.get("url"):
+                        continue
+                    h = int(f.get("height") or 0)
+                    if want and h > want:
+                        continue
+                    if best is None or h >= int(best.get("height") or 0):
+                        best = f
+            if best is None:
+                return False
         except Exception:
-            return False
-        if not (res and res.get("ok")):
-            return False
-        want = int(self.yt_height or 0)
-        best = None
-        for f in res.get("formats") or []:
-            if not f or f.get("kind") != "video" or not f.get("url"):
-                continue
-            h = int(f.get("height") or 0)
-            if want and h > want:
-                continue
-            if best is None or h >= int(best.get("height") or 0):
-                best = f
-        if best is None:
             return False
 
         # 原地切换成普通下载通道。meta 里存着旧的 yt_page，先删掉，

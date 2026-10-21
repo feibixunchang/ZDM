@@ -2083,6 +2083,23 @@ class MainWindow(QMainWindow):
             self._status("正在关闭并安装更新…", hold=8)
             QApplication.quit()
             return
+        # Linux 的安装包是 .deb：pkexec 一键安装（弹系统授权框），
+        # postinst 会自动重启后台服务；不用再让用户开终端 dpkg -i。
+        if sys.platform.startswith("linux") and path.lower().endswith(".deb"):
+            if not self._message_yes_no(
+                "安装更新",
+                f"已下载 {os.path.basename(path)}。\n\n"
+                "现在安装吗？接下来会弹出系统授权窗口（输入登录密码）。\n"
+                "装完后 ZDM 会自动关闭，重新打开即是新版。",
+            ):
+                self._status(f"安装包已保存到 {path}，可稍后手动安装", hold=10)
+                return
+            self._status("正在安装更新（请在授权窗口输入密码）…", hold=120)
+            self._background(
+                lambda: update.install_linux(path),
+                lambda res: self._on_linux_installed(res, path),
+            )
+            return
         self._status(f"已下载 {os.path.basename(path)}，正在打开安装包…", hold=6)
         # "打开" = hand the file to the OS: a .dmg mounts and shows the installer,
         # a .exe starts the setup wizard.
@@ -2093,6 +2110,22 @@ class MainWindow(QMainWindow):
             "已为你打开：按提示完成安装即可。\n"
             "macOS 把 ZDM 拖进“应用程序”会自动覆盖旧版本；Windows 直接下一步。",
         )
+
+    def _on_linux_installed(self, res, path):
+        ok, err = (res if isinstance(res, tuple) else (bool(res), ""))
+        if ok:
+            self._message(
+                "安装完成",
+                "新版本已安装，后台服务也已自动重启。\n\n"
+                "ZDM 现在会关闭——重新打开即是新版。",
+            )
+            QApplication.quit()
+        else:
+            self._message(
+                "更新未能自动安装",
+                f"自动安装失败：{err or '未知原因'}\n\n"
+                f"可以手动安装：\ndpkg -i {path}",
+            )
 
     def _show_release_notes(self):
         info = self._update_info or {}

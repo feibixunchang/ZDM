@@ -3,7 +3,7 @@
 
 #define AppName "ZDM 下载管理器"
 #define AppNameEn "ZDM Download Manager"
-#define AppVersion "1.15.13"
+#define AppVersion "1.15.14"
 #define AppPublisher "ZDM"
 #define AppExeName "Zdm.exe"
 #define AppUrl "https://github.com/"
@@ -91,3 +91,18 @@ Type: filesandordirs; Name: "{app}\Assets"
 ; 扩展目录整棵删掉：卸载后 Chrome 里那条扩展会自己消失，不会留下指向空目录的残留条目。
 Type: filesandordirs; Name: "{app}\extension"
 Type: files; Name: "{userappdata}\ZDM\com.zdm.launcher.json"
+[Code]
+// 安装前先把正在运行的 Zdm.exe 结束掉（GUI / 后台服务 / 原生消息宿主
+// 都是同一个映像名）。不做这一步，用户双击新安装包就会被「文件被占用」
+// 卡住，只能开任务管理器手动结束（Windows 实测）；taskkill 找不到进程
+// 时返回非零，属正常，不用处理。
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  RC: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'),
+    '/C taskkill /F /IM Zdm.exe /T & taskkill /F /IM ZDM.exe /T',
+    '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Sleep(800);
+  Result := '';
+end;

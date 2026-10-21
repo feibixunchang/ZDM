@@ -256,6 +256,43 @@ def download(
 
 
 # --------------------------------------------------------------------------- install
+def install_linux(deb_path: str) -> Tuple[bool, str]:
+    """Linux：pkexec + dpkg 一键安装下载好的 .deb。返回 (成功, 错误信息)。
+
+    pkexec 会弹系统授权框（用户输登录密码），无需开终端。装完后
+    postinst 自动重启 serve；界面层提示用户重启一次 ZDM 加载新版。
+    """
+    import shutil
+
+    if not sys.platform.startswith("linux") or not deb_path:
+        return False, "仅在 Linux 上可用"
+    pkexec = shutil.which("pkexec")
+    dpkg = shutil.which("dpkg")
+    if not pkexec:
+        return False, "系统里没有 pkexec（无法弹出授权窗口）"
+    if not dpkg:
+        dpkg = "/usr/bin/dpkg"
+    try:
+        p = subprocess.run(
+            [pkexec, dpkg, "-i", deb_path],
+            timeout=600,
+            **_silent_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "安装超时"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+    if p.returncode != 0:
+        return False, f"dpkg 退出码 {p.returncode}"
+    return True, ""
+
+
+def _silent_kwargs() -> dict:
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 def install_windows(setup_path: str, relaunch_exe: str = "") -> bool:
     """Windows：静默升级，装完把新版重新拉起来。返回是否成功拉起安装器。
 
