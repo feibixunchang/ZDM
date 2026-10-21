@@ -26,9 +26,12 @@ def _no_window() -> dict:
 def _yt_should_swap_client(err: str) -> bool:
     """下载失败的报错是否值得换 player_client 再试一次。
 
-    只认实测特征：SABR 拦截（"page needs to be reloaded"）与人机验证
-    （"Sign in to confirm" / "not a bot"）。其它错误（403 音轨 CDN、
-    磁盘满等）换客户端没用，不重试。"""
+    只认实测特征：SABR 拦截（"page needs to be reloaded"）、人机验证
+    （"Sign in to confirm" / "not a bot"），以及 SABR 只回分段不给格式时
+    的 "Requested format is not available"（此时默认客户端的格式列表是
+    空的，任何 -f 表达式都落空，换 android_vr 才有完整阶梯 —— 第二台
+    Windows 与 Linux 实测）。其它错误（403 音轨 CDN、磁盘满等）换客户端
+    没用，不重试。"""
     if not err:
         return False
     e = err.lower()
@@ -36,6 +39,7 @@ def _yt_should_swap_client(err: str) -> bool:
         "page needs to be reloaded" in e
         or "sign in to confirm" in e
         or "not a bot" in e
+        or "requested format is not available" in e
     )
 
 MIN_SPLIT = 1 << 20  # 1 MiB: minimum remaining size to justify splitting

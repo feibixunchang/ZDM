@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.15.8**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.15.9**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -21,11 +21,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.15.8.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.15.9.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.15.8_amd64.deb` | `sudo apt install ./zdm_1.15.8_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.15.9_amd64.deb` | `sudo apt install ./zdm_1.15.9_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.15.8.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.15.9.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.15.8
+bash zdm/build_linux_app.sh ./linux-build 1.15.9
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -100,10 +100,10 @@ powershell -ExecutionPolicy Bypass -File zdm\build_windows_app.ps1 -OutDir dist
 
 **Windows 安装后打不开，报「Failed to load Python DLL '_internal\python312.dll' —
 LoadLibrary: 内存资源不足」** —— 这**不是真的内存不足**（32G 也会报）。
-v1.15.8 之前的真正根因是**进程无限拉起链**：`desktop.py::ensure_desktop` 拉起
+v1.15.9 之前的真正根因是**进程无限拉起链**：`desktop.py::ensure_desktop` 拉起
 窗口时漏传 `--gui`，冻结版 exe 只好落到 CLI 分支又再次拉起，十几秒堆出几十个
 进程把资源耗尽，`LoadLibrary` 才报内存不足（事件查看器里是 ucrtbase.dll
-BEX64 / 0xc0000409）。**升级到 v1.15.8 及以上即可根治。**
+BEX64 / 0xc0000409）。**升级到 v1.15.9 及以上即可根治。**
 
 如果你停留在旧版本，两大环境因素也会触发同样的报错：
 
