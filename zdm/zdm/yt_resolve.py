@@ -629,7 +629,7 @@ def _shape(info, client_name: str) -> Dict:
             "mime": s.get("mime_type") or "",
             "width": int(s.get("width") or 0),
             "height": int(s.get("height") or 0),
-            "itag": int(s.get("format_id") or 0),
+            "itag": _safe_itag(s.get("format_id")),
             "audioQuality": "",
             "bitrate": int((s.get("tbr") or 0) * 1000),
             # 合并阶段要靠它判断「同一高度该留哪条」：H.264 优先
@@ -661,6 +661,21 @@ def _shape(info, client_name: str) -> Dict:
         "error": "",
         "client": client_name,
     }
+
+
+def _safe_itag(v) -> int:
+    """format_id 不保证是纯数字。
+
+    2026-10 起 YouTube 给一批音轨/视频轨发了 ``249-drc`` 这样的 DRC 变体
+    （还有 sb0~sb3 故事板），``int("249-drc")`` 直接抛 ValueError ——
+    而且是在拿到完整阶梯**之后**的整形阶段才炸，表现就是「明明解析到了
+    却永远报错、面板大小全是播放器的假数据」。这里只取前导数字。
+    """
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        m = re.match(r"(\d+)", str(v or ""))
+        return int(m.group(1)) if m else 0
 
 
 def _label(s, kind):
