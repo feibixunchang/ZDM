@@ -21,12 +21,12 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.13.0.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.14.7.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.13.0_amd64.deb` | `sudo apt install ./zdm_1.13.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.14.7_amd64.deb` | `sudo apt install ./zdm_1.14.7_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.13.0.exe` | C#/WPF 原生客户端，双击安装（用户级、无需管理员、不依赖 Python）；**软件内可直接一键更新** |
-| 浏览器扩展 | 随上面各包附带 | 装好后从 `~/Library/Application Support/ZDM/extension`（macOS）加载已解压的扩展程序 |
+| Windows | `ZDM-Setup-1.14.7.exe` | C#/WPF 原生客户端，双击安装（用户级、无需管理员、不依赖 Python）；**软件内可直接一键更新** |
+| 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
 > `ZDM-<version>.dmg` 在 `macos-latest` 上构建，`ZDM-Setup-*.exe` 在 `windows-latest` 上构建（由
@@ -65,7 +65,9 @@ Windows 端是 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`
 - 注册 `zdm://` 协议，浏览器里点链接可直接把下载任务交给 ZDM；
 - 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`），
   **ZDM 没运行时**，扩展一点下载就能把它拉起来，再把任务接过去；
-- 校验并修复「开机自启」注册项。
+- 校验并修复「开机自启」注册项；
+- 把浏览器扩展解压到 `{app}\extension`（默认 `%LOCALAPPDATA%\Programs\ZDM\extension`），
+  扩展的落盘路径由安装包保证，不再依赖任何临时目录。
 
 安装包参数 `Zdm.exe --register` 可在无界面下重做上述注册（安装器与「设置 → 浏览器自动唤醒」按钮走的是同一段代码）。
 
@@ -79,10 +81,18 @@ Windows 端是 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`
 ```bash
 cd windows-native
 dotnet publish Zdm.App.csproj -c Release -r win-x64 --self-contained -o publish
+# 安装包会把这份扩展一起打进去，所以必须先落到 publish/extension
+mkdir -p publish/extension && cp -r ../zdm/extension/* publish/extension/
+iscc installer.iss
 ```
 
-打包安装器需要 Inno Setup 6：`iscc installer.iss`（版本号在 `installer.iss` 的 `AppVersion` 与
-`Zdm.App.csproj` 的 `<Version>` 两处保持一致）。
+`iscc` 来自 Inno Setup 6（用户级安装默认在 `%LOCALAPPDATA%\Programs\Inno Setup 6`，
+官方安装包不带简体中文语言文件，需要把 `ChineseSimplified.isl` 放进它的 `Languages` 目录）。
+版本号的唯一来源是 `Zdm.App.csproj` 的 `<Version>`，CI 会自动同步 `installer.iss` 的 `AppVersion`；
+本地打包前记得手动对齐这两处。
+
+**升级提示**：扩展文件装在 `{app}\extension` 里，跨版本升级时该目录会被重写。
+升级前先退出 Chrome，否则 Chrome 可能在目录重建的瞬间把扩展条目丢掉。
 
 ## macOS：真正的原生 App（v1.11.0 起）
 
