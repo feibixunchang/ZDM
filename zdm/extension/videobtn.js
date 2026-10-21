@@ -359,16 +359,21 @@
     return { pageUrl, title: title || "视频" };
   }
 
+  /* 注意单位表与循环的配套关系：先判 <1024 标 B，单位表必须从 "KB" 起步。
+     之前这里把 "B" 放进循环表、i 从 -1 起步，导致每除一次 1024 单位却只
+     前进一级的少一级 —— 80MB 的文件被标成「76.8 KB」，而嗅探面板同一
+     数据是「76.8 MB」，正是「数字相同、单位差 1024 倍」的元凶。 */
   const fmtSize = (n) => {
     n = Number(n) || 0;
     if (!n) return "";
-    const u = ["B", "KB", "MB", "GB", "TB"];
+    if (n < 1024) return n.toFixed(0) + " B";
+    const u = ["KB", "MB", "GB", "TB"];
     let i = -1;
     do {
       n /= 1024;
       i++;
     } while (n >= 1024 && i < u.length - 1);
-    return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + " " + u[i];
+    return n.toFixed(1) + " " + u[i];
   };
 
   const send = (msg) =>
@@ -1050,7 +1055,7 @@
         label: h + "P · 视频+音频",
         url: byHeight[h].url,
         kind: "video",
-        size: byHeight[h].size,
+        size: plausibleSize(byHeight[h].size),
         height: h,
         itag: byHeight[h].itag,
         audio_url: audio ? audio.url : undefined,
