@@ -17,11 +17,17 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
 # 二进制可能放在这些位置（源码树 / bundle 压平后都兼容）
 _PROBE_SUBDIRS = ("bin", "vendor", "yt-dlp")
 _BINARY_NAMES = ("yt-dlp", "yt-dlp_macos", "yt-dlp.exe", "yt-dlp_linux")
+
+# yt-dlp 解 YouTube 的 JS 挑战需要外部运行时。2026 起默认只启用 deno，
+# node / bun / quickjs 必须用 --js-runtimes 显式开启（见 yt-dlp --help）。
+_JS_RUNTIMES = ("deno", "node", "bun", "quickjs")
+_JS_FLAG_SUPPORT: Dict[str, bool] = {}
 
 
 def _no_window() -> dict:
@@ -55,16 +61,54 @@ def binary_path() -> Optional[str]:
     return shutil.which("yt-dlp")
 
 
+def _extra_bin_dirs() -> List[str]:
+    """「工具装在 PATH 之外」的常见目录（deno / node 安装器默认落点）。
+
+    Linux / Windows 上这些目录几乎永远不在 .desktop / 资源管理器启动的
+    进程 PATH 里 —— 以前这里只补了 macOS 的 /opt/homebrew/bin，于是 Mac 的
+    yt-dlp 能找到 deno、Linux / Windows 找不到：同一个视频在那两端解析降级
+    甚至直链 403，表现就是「只有 Mac 能下」。
+    """
+    home = os.path.expanduser("~")
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA", "")
+        roaming = os.environ.get("APPDATA", "")
+        user = os.environ.get("USERPROFILE") or home
+        return [
+            os.path.join(user, ".deno", "bin"),
+            os.path.join(local, "Programs", "deno"),
+            os.path.join(user, ".bun", "bin"),
+            os.path.join(roaming, "npm"),
+            os.path.join(local, "Programs", "nodejs"),
+            r"C:\Program Files\nodejs",
+            os.path.join(user, "scoop", "shims"),
+            os.path.join(local, "Microsoft", "WinGet", "Links"),
+        ]
+    if sys.platform == "darwin":
+        return [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            os.path.join(home, ".deno", "bin"),
+            os.path.join(home, ".bun", "bin"),
+        ]
+    return [
+        os.path.join(home, ".deno", "bin"),
+        os.path.join(home, ".bun", "bin"),
+        os.path.join(home, ".local", "bin"),
+        "/usr/local/bin",
+        "/snap/bin",
+    ]
+
+
 def child_env() -> Dict[str, str]:
     """给子进程补齐 PATH。
 
-    ZDM.app 不继承用户 shell 的 PATH（没有 /opt/homebrew/bin），而 yt-dlp 要靠
-    那里的 deno 解 YouTube 的 JS 挑战、靠那里的 ffmpeg 合流。缺任何一个都会
-    直接失败，所以在唯一的入口处补全，而不是每个调用点各补一次。
+    ZDM 的桌面进程不继承用户 shell 的 PATH，而 yt-dlp 要靠那里的 deno/node
+    解 YouTube 的 JS 挑战、靠那里的 ffmpeg 合流。缺任何一个都会失败，所以
+    在唯一的入口处补全，而不是每个调用点各补一次。
     """
     env = dict(os.environ)
-    extra = [
-        "/opt/homebrew/bin",
+    extra = _extra_bin_dirs() + [
         "/usr/local/bin",
         "/usr/bin",
         "/bin",
@@ -73,10 +117,55 @@ def child_env() -> Dict[str, str]:
     ]
     parts = [p for p in (env.get("PATH") or "").split(os.pathsep) if p]
     for p in extra:
-        if p not in parts:
+        if p and p not in parts:
             parts.append(p)
     env["PATH"] = os.pathsep.join(parts)
     return env
+
+
+def _supports_js_flag(binp: str) -> bool:
+    """yt-dlp 是否认识 ``--js-runtimes``。
+
+    老版本（2025.11 之前）没有这个参数，传进去会直接 "no such option" 退出，
+    比不传更糟。所以先问一次 --help 并缓存结果（每进程一次）。
+    """
+    hit = _JS_FLAG_SUPPORT.get(binp)
+    if hit is not None:
+        return hit
+    ok = False
+    try:
+        p = subprocess.run(
+            [binp, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=child_env(),
+            check=False,
+            **_no_window(),
+        )
+        ok = "--js-runtimes" in ((p.stdout or "") + (p.stderr or ""))
+    except Exception:  # noqa: BLE001
+        ok = False
+    _JS_FLAG_SUPPORT[binp] = ok
+    return ok
+
+
+def js_runtime_args(binp: str, env: Optional[Dict[str, str]] = None) -> List[str]:
+    """找到的 JS 运行时 → ``--js-runtimes name:path`` 参数。
+
+    官方单文件 yt-dlp 只默认启用 deno：装了 Node.js 的 Windows 机器（很常见）
+    不会被自动使用。这里把找到的都显式开启；一个都没有时返回空列表，参数表
+    保持原样。
+    """
+    if not _supports_js_flag(binp):
+        return []
+    env = env or child_env()
+    args: List[str] = []
+    for name in _JS_RUNTIMES:
+        cand = shutil.which(name, path=env.get("PATH"))
+        if cand and os.path.isfile(cand):
+            args += ["--js-runtimes", f"{name}:{cand}"]
+    return args
 
 
 def extract_json(
@@ -90,6 +179,7 @@ def extract_json(
 ) -> Tuple[Optional[dict], str]:
     """`yt-dlp -J`：把视频信息当 JSON 拿回来。返回 (info, 错误文案)。"""
     args = [binp, "-J", "--no-warnings", "--no-playlist"]
+    args += js_runtime_args(binp)
     if cookie_path:
         args += ["--cookies", cookie_path]
     if proxy:
@@ -161,6 +251,7 @@ def download(
     ]
     if ffmpeg:
         args += ["--ffmpeg-location", ffmpeg]
+    args += js_runtime_args(binp)
     if cookie_path:
         args += ["--cookies", cookie_path]
     if proxy:

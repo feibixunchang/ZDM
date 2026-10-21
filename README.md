@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.15.14**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.15.15**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -21,11 +21,11 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.15.14.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-1.15.15.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.15.14_amd64.deb` | `sudo apt install ./zdm_1.15.14_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.15.15_amd64.deb` | `sudo apt install ./zdm_1.15.15_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.15.14.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.15.15.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.15.13
+bash zdm/build_linux_app.sh ./linux-build 1.15.15
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -114,6 +114,18 @@ BEX64 / 0xc0000409）。**升级到 v1.15.13 及以上即可根治。**
    恢复为自动管理后重启。
 
 处理后重新运行安装包覆盖安装一遍即可。
+
+**视频下载失败（YouTube 转圈/报 403/提示人机验证）** —— v1.15.15 修了三处：
+① 下载重试用的 `android_vr` 客户端已经失效（只回 360p，直链必 403），换成
+`tv_embedded`，并且只有「视频本身不可用」才提前放弃重试；
+② yt-dlp 通道全灭时不再被 403 挡住，直接切到解析出的直链用内置引擎下载；
+③ 三端都会在常见安装目录里找 deno / node 给 yt-dlp 解 JS 挑战（以前只找 macOS 的
+`/opt/homebrew/bin`），并把找到的运行时用 `--js-runtimes` 显式传入。
+
+**每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
+Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。
+排查时先看这个文件，再对比版本号——旧版本升级失败最常见的原因是旧进程还在跑：
+Linux 免 root 包和 Windows 安装包从 v1.15.15 起都会在安装前先结束旧进程。
 
 ## macOS：真正的原生 App（v1.11.0 起）
 

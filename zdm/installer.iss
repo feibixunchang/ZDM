@@ -53,6 +53,10 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 ; 升级时由 Restart Manager 关掉正在运行的旧进程，否则 ZDM.exe 被占用写不进去。
+; 但 Restart Manager 只可靠地处理「有主窗口的进程」：ZDM.exe serve（开机自启的
+; 后台服务）和 Chrome 拉起的 ZDM-NativeHost.exe 往往没有窗口，Setup 会以为
+; 没人占用而覆盖失败/只覆盖一半 —— 用户看到的是「更新了还是旧界面、下载还是
+; 坏」。所以下面 [Code] 里还有一步显式 taskkill，别只依赖这一行。
 CloseApplications=yes
 RestartApplications=no
 
@@ -214,11 +218,30 @@ begin
   end;
 end;
 
+procedure KillRunningZdm();
+var
+  Ok: Boolean;
+  Rc: Integer;
+begin
+  // 安装/升级前先杀干净旧进程。静默安装（应用内一键更新就是 /VERYSILENT）
+  // 时旧进程几乎一定还在：ZDM.exe serve 是后台常驻的，没有窗口，Restart
+  // Manager 关不掉它；`ZDM-NativeHost.exe` 更短命、由 Chrome 拉起。
+  // 文件被占用时 Setup 会覆盖失败或留下半新半旧的目录 —— 表现就是「装完
+  // 还是旧版本的行为」。安装包自身的镜像名是 ZDM-Setup-*.exe，不受影响。
+  // 进程本来就没在跑时 taskkill 返回非 0，这里不当作失败。
+  Ok := Exec(ExpandConstant('{cmd}'),
+             '/C taskkill /F /IM ZDM.exe /T >NUL 2>&1 & taskkill /F /IM ZDM-NativeHost.exe /T >NUL 2>&1',
+             '', SW_HIDE, ewWaitUntilTerminated, Rc);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Line: string;
   Rc: Integer;
 begin
+  if CurStep = ssInstall then
+    KillRunningZdm();
+
   if CurStep = ssPostInstall then
   begin
     PreFlightCheck();

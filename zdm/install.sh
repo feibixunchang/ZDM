@@ -113,6 +113,13 @@ install_linux() {
   local BIN_DIR="$PREFIX/bin"
 
   echo "==> 安装到 $APP_DIR"
+  # 升级时旧进程很可能还在跑：桌面端是单实例、服务还占着 9000 端口，
+  # 文件换掉后它们继续执行**旧代码**，新装的版本永远用不上 —— 这就是
+  # 「更新了还是老毛病 / 下载还是失败」的典型原因。先停掉再覆盖。
+  "$BIN_DIR/zdm" stop >/dev/null 2>&1 || true
+  pkill -f "$APP_DIR/zdm.py" >/dev/null 2>&1 || true
+  pkill -f "$APP_DIR/gui.py" >/dev/null 2>&1 || true
+  sleep 0.5
   mkdir -p "$APP_DIR" "$BIN_DIR" "$PREFIX/share/applications" \
            "$PREFIX/share/icons/hicolor/128x128/apps"
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"

@@ -369,6 +369,13 @@ DEST="${XDG_DATA_HOME:-$HOME/.local/share}/zdm"
 BIN="$HOME/.local/bin"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 mkdir -p "$DEST" "$BIN" "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+# 升级时旧版本很可能还在跑：桌面端是单实例，服务还占着 9000 端口。文件
+# 换掉后旧进程继续执行**旧代码**，新装的版本永远用不上 —— 免 root 安装
+# 最典型的「更新了下载还是失败」就是这么来的。先停掉再覆盖。
+if [ -x "$DEST/ZDM" ]; then
+    pkill -f "$DEST/ZDM" >/dev/null 2>&1 || true
+    sleep 0.5
+fi
 rm -rf "$DEST.new" "$DEST.old"
 cp -a "$HERE/." "$DEST.new"
 mv -f "$DEST" "$DEST.old" 2>/dev/null || true
