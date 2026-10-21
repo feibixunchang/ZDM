@@ -142,7 +142,7 @@ class CurlTransport(Transport):
         marker = "__ZDM_META__"
         cmd = self._base(proxy) + [
             "--max-time", str(max(5, int(timeout))),
-            "-r", "0-0", "-D", "-", "-o", "/dev/null",
+            "-r", "0-0", "-D", "-", "-o", os.devnull,
             "-w", marker + '%{http_code} %{url_effective}',
         ]
         for k, v in headers.items():

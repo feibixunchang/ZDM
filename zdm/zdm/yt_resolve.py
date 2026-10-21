@@ -58,21 +58,19 @@ def _import_yt_dlp():
 
 # Client configurations, tried in order.
 #
-# 顺序不是随手排的，是实测出来的（2026-10，yt-dlp 2025.10.14）：
-#   - default / web / android 现在只回**一条 360p 合轨**（itag 18），
-#     adaptive 阶梯被 YouTube 按「无 PO token」限流掉了。
-#   - android_vr 仍然给完整阶梯（144~2160 + 3 条纯音频），直链可直接下载。
-#   - tv / ios / mweb / web_safari 大多直接报「page needs to be reloaded」。
-# 旧代码把 default 放第一个，而且「拿到任何格式就 return」，于是永远停在
-# 那条 360p 上 —— 这正是扩展菜单只有一档、还点不动的原因。
+# 顺序不是随手排的，是实测出来的（2026-10，随包 yt-dlp 2026.08.19）：
+#   - default 给完整阶梯（144~2160 + 3 条纯音频），直链可直接下载；
+#   - tv_embedded 也给完整阶梯，是默认客户端被拦时的可靠替补；
+#   - tv / ios / mweb / web_safari / web_embedded 大多直接报
+#     "The page needs to be reloaded" 或 "Requested format is not available"；
+#   - android / android_vr 已经退化：只回 5 条格式（最高 360p），
+#     而且用它的直链下载必 403 —— 不能再当第一选择（旧版本正好相反，
+#     这就是「Mac 能下、Linux/Windows 不能」的其中一个原因）。
 _STRATEGIES: List[Tuple[str, Optional[List[str]]]] = [
-    ("android_vr", ["android_vr"]),
-    ("tv", ["tv"]),
-    ("android", ["android"]),
-    ("ios", ["ios"]),
-    ("web_safari", ["web_safari"]),
-    ("mweb", ["mweb"]),
     ("default", None),
+    ("tv_embedded", ["tv_embedded"]),
+    ("android", ["android"]),
+    ("android_vr", ["android_vr"]),
 ]
 
 # Bounded so a wedged attempt cannot hang the extension's menu forever.
@@ -177,15 +175,16 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
         binp = None
     if binp:
         # YouTube 的拦截是**按请求**随机判的（bot check / 空格式列表 /
-        # page needs to be reloaded），且部分网络环境下默认客户端几乎
-        # 必被拦、android_vr 才有完整阶梯。所以解析和下载一样轮换：
-        # 默认 → android_vr → 各再试一次（隔 3 秒冷却）。
+        # page needs to be reloaded），且同一时刻不同客户端能拿到的档位差别
+        # 很大。所以解析和下载一样轮换：默认 → tv_embedded → 各再试一次
+        # （隔 3 秒冷却）。android_vr 已经退化（只回 360p 且直链 403），
+        # 不再参与重试。
         last_bin_err = ""
         attempts = [
             (None, 0.0),
-            (["--extractor-args", "youtube:player_client=android_vr"], 0.0),
+            (["--extractor-args", "youtube:player_client=tv_embedded"], 0.0),
             (None, 3.0),
-            (["--extractor-args", "youtube:player_client=android_vr"], 3.0),
+            (["--extractor-args", "youtube:player_client=tv_embedded"], 3.0),
         ]
         for extra, delay in attempts:
             if delay:
@@ -236,7 +235,7 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
             except Exception as e:
                 last_err = _clean_err(str(e))
                 # 注意：**不要**在这里 break。人机验证是按客户端判的 ——
-                # web 被要求验证时 android_vr / mweb 往往照常放行，
+                # 默认客户端被要求验证时 tv_embedded 往往照常放行，
                 # 一命中就放弃等于自己把后面的路全堵上了。
                 continue
 
@@ -554,8 +553,9 @@ def _merge(pool: List[Dict], title: str) -> Dict:
     """把多个客户端拿到的格式并成一份阶梯。
 
     为什么不直接用某一个客户端的结果：同一时刻不同 client 能拿到的档位
-    差别很大（android_vr 给全量、android 只给 360p）。并集 + 按高度去重，
-    既不会出现重复的「1080P」两行，也不会因为某个 client 限流就丢掉高清档。
+    差别很大（default / tv_embedded 给全量、android_vr 只给 360p）。
+    并集 + 按高度去重，既不会出现重复的「1080P」两行，也不会因为某个
+    client 限流就丢掉高清档。
     """
     if not pool:
         return {

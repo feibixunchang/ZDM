@@ -29,9 +29,8 @@ def _yt_should_swap_client(err: str) -> bool:
     只认实测特征：SABR 拦截（"page needs to be reloaded"）、人机验证
     （"Sign in to confirm" / "not a bot"），以及 SABR 只回分段不给格式时
     的 "Requested format is not available"（此时默认客户端的格式列表是
-    空的，任何 -f 表达式都落空，换 android_vr 才有完整阶梯 —— 第二台
-    Windows 与 Linux 实测）。其它错误（403 音轨 CDN、磁盘满等）换客户端
-    没用，不重试。"""
+    空的，任何 -f 表达式都落空，换客户端才有完整阶梯）。其它错误（磁盘满、
+    视频被删等）换客户端没用，不重试。"""
     if not err:
         return False
     e = err.lower()
@@ -41,6 +40,29 @@ def _yt_should_swap_client(err: str) -> bool:
         or "not a bot" in e
         or "requested format is not available" in e
     )
+
+
+def _yt_permanent_error(err: str) -> bool:
+    """确定性失败：换客户端/换时间都没用，重试链应当立刻收工。
+
+    和 ``_yt_should_swap_client`` 是互补关系：那个决定「值不值得再试」，
+    这个决定「试都不用试了」。缺了它，一个已被删除的视频会把 4 次尝试
+    （含两次 3 秒冷却）全部跑满，用户看着进度条空转半分钟。
+    """
+    if not err:
+        return False
+    e = err.lower()
+    return (
+        "video unavailable" in e
+        or "this video is unavailable" in e
+        or "private video" in e
+        or "members-only" in e
+        or "has been removed" in e
+        or "unsupported url" in e
+        or "is not a valid url" in e
+        or "no space left" in e
+    )
+
 
 MIN_SPLIT = 1 << 20  # 1 MiB: minimum remaining size to justify splitting
 HAS_PWRITE = hasattr(os, "pwrite")
@@ -637,6 +659,8 @@ class Download:
         self._on_event = cb
 
     def _emit(self, event: str) -> None:
+        if event == "error":
+            _log_download_error(self)
         if self._on_event:
             try:
                 self._on_event(event, self)
@@ -961,16 +985,21 @@ class Download:
             should_stop=self._stop.is_set,
             on_proc=self._yt_take_proc,
         )
-        # 客户端重试链：YouTube 的 SABR 拦截/空格式列表是**按请求**随机判的
-        # （同一台机器同一视频，解析能过、下载被拦，隔几分钟又自愈）。
-        # 所以默认与 android_vr 各试两次、中间隔 3 秒 —— android_vr 是
-        # 2026-10 实测能完整下载的客户端（见 yt_resolve._STRATEGIES 注释）。
-        # 命中特征错误才继续换；其它错误（403 音轨 CDN、磁盘满等）立即放弃。
+        # 客户端重试链（2026-10 用随包 yt-dlp 2026.08.19 实测各客户端）：
+        #   default      → 唯一稳定给完整 144~2160 阶梯、且直链真能下载的客户端；
+        #   tv_embedded  → 同一次实测里也拿到完整阶梯，可作为默认被拦时的替补；
+        #   android_vr   → **已退化**成「只有 5 条格式、最高 360p，直链必 403」。
+        #                  旧代码拿它当唯一替补，于是默认客户端一旦被 SABR 拦，
+        #                  重试就把「可恢复的拦截」变成「必然失败」，而且 403
+        #                  不在换客户端特征里，重试链当场 break —— 这就是
+        #                  「有些机器上永远下不动」的根因之一。
+        # YouTube 的拦截是**按请求**随机判的（同一台机器同一视频，解析能过、
+        # 下载被拦，隔几分钟又自愈），所以两个客户端各试两次、中间隔 3 秒。
         attempts = [
             (None, 0.0),
-            (("--extractor-args", "youtube:player_client=android_vr"), 0.0),
+            (("--extractor-args", "youtube:player_client=tv_embedded"), 0.0),
             (None, 3.0),
-            (("--extractor-args", "youtube:player_client=android_vr"), 3.0),
+            (("--extractor-args", "youtube:player_client=tv_embedded"), 3.0),
         ]
         rc, err = 1, ""
         try:
@@ -987,10 +1016,12 @@ class Download:
                 )
                 if rc == 0 and not err:
                     break
-                if not _yt_should_swap_client(err):
+                # 只有「视频本身不可用」才值得跳过剩下的尝试；403/空格式
+                # 这类可能下一次就恢复，必须把整条链走完。
+                if _yt_permanent_error(err):
                     break
-            if rc != 0 and err and _yt_should_swap_client(err):
-                err += "（已自动用 android_vr 客户端重试仍未成功；建议在浏览器登录 YouTube、或在扩展设置里填写 Cookie 后重试）"
+            if rc != 0 and err and ("403" in err or _yt_should_swap_client(err)):
+                err += "（已自动换 tv_embedded 客户端重试仍未成功；建议在浏览器登录 YouTube、或在扩展设置里填写 Cookie 后重试）"
         finally:
             self._yt_proc = None
             if cookie_path:
@@ -1015,7 +1046,10 @@ class Download:
             # 最后兜底：yt-dlp 的下载通道被 SABR 拦死（重试链全灭）时，
             # 解析通道往往还拿得到可用直链 —— 原地切换成内置引擎顺序
             # 下载直链（嗅探推送就是这条路，全平台实测可用）。
-            if _yt_should_swap_client(err or "") and self._yt_fallback_direct():
+            # 以前这里还要求「最后一次错误必须命中换客户端特征」，于是重试
+            # 客户端一旦报 403（它现在必 403），兜底就永远不执行：明明手里
+            # 有能下的直链，任务还是直接失败。
+            if not _yt_permanent_error(err or "") and self._yt_fallback_direct():
                 return
             self.status = "error"
             msg = (err or f"yt-dlp 退出码 {rc}，没有产出文件").strip()
@@ -1542,6 +1576,46 @@ class Download:
                 proc.terminate()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _log_download_error(d) -> None:
+    """把失败原因落盘（配置目录下的 download-errors.log）。
+
+    GUI 的错误只在弹窗里显示一次，用户一关就没了；而「下载失败」是必须
+    拿到原文才能定位的问题（yt-dlp 的报错、403、磁盘错误……），尤其是
+    Windows/Linux 用户没法像 mac 那样直接翻控制台。日志按大小轮转，
+    不会无限增长。
+
+    错误日志写不进去（权限/磁盘满）绝不能反过来影响下载本身，所以整段
+    都吞异常。
+    """
+    import json
+
+    try:
+        from .manager import config_dir
+
+        path = os.path.join(config_dir(), "download-errors.log")
+        try:
+            if os.path.getsize(path) > 256 * 1024:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        rec = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "id": d.id,
+            "status": d.status,
+            "url": (d.url or "")[:500],
+            "yt_page": d.yt_page,
+            "yt_height": d.yt_height,
+            "kind": d.kind,
+            "error": (d.error or "")[:2000],
+            "mux_error": (d.mux_error or "")[:400],
+            "directory": d.directory,
+        }
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - 诊断日志失败不影响下载
+        pass
 
 
 def _unique_name(directory: str, filename: str) -> str:
