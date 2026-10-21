@@ -1,7 +1,7 @@
 ; ZDM 下载管理器 - Windows 安装脚本（PyQt5 三端统一版）
 ;
 ; 由 zdm/build_windows_app.ps1 调用：
-;   iscc /DAppVersion=1.15.1 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
+;   iscc /DAppVersion=1.15.2 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
 ;
 ; SourceDir 是 PyInstaller 产出的 onedir（ZDM.exe + _internal\ 整个运行时，
 ; 内含 CPython 与 PyQt5）。用户机器上不需要装 Python、不需要 pip、不需要 VC 运行库。
@@ -131,6 +131,8 @@ Type: files; Name: "{app}\com.zdm.launcher.json"
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Line: string;
+  SelfCheckOut: string;
+  Rc: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -149,6 +151,42 @@ begin
       '  "allowed_origins": ["chrome-extension://' + '{#ExtId}' + '/"]' + #13#10 +
       '}' + #13#10,
       False);
+
+    // ---- 装完立刻自检一遍 ----
+    // PyInstaller 引导器若加载不了 _internal\python312.dll（典型原因：杀毒
+    // 软件在安装过程中隔离/篡改了 DLL；个别机器是页面文件被关掉），用户要
+    // 等第一次双击才会看到「Failed to load Python DLL / 内存资源不足」这种
+    // 没头没脑的报错。这里当场验一遍，失败就直接给出可操作的指引。
+    // 静默安装（应用内一键更新 / CI）**绝不**执行：那两个场景各有自己的
+    // 验证，而且绝不能在静默路径上等待子进程 —— [Run]+WizardSilent 卡死
+    // CI 的教训就在眼前。
+    if not WizardSilent() then
+    begin
+      SelfCheckOut := ExpandConstant('{tmp}\zdm-selfcheck.json');
+      // 窗口版 exe 没有 stdout，JSON 报告靠这个环境变量落到临时文件
+      SetEnvironmentVariable('ZDM_SELFCHECK_OUT', SelfCheckOut);
+      if not Exec(
+           ExpandConstant('{app}\ZDM.exe'), '--selfcheck',
+           ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Rc)
+         or (Rc <> 0) then
+      begin
+        MsgBox(
+          '安装后的自检未通过（退出码 ' + IntToStr(Rc) + '），ZDM 可能无法启动。' + #13#10 +
+          '最常见的原因是杀毒软件（Windows Defender / 360 / 腾讯管家等）在' + #13#10 +
+          '安装过程中隔离或改动了 ZDM 的运行组件（如 _internal\python312.dll），' + #13#10 +
+          '表现为启动时报「Failed to load Python DLL / 内存资源不足」——这并' + #13#10 +
+          '不是真的内存不足。' + #13#10 + #13#10 +
+          '建议：' + #13#10 +
+          '1. 打开杀毒软件的「隔离区/信任区」，还原相关文件，并把 ZDM 安装目录' + #13#10 +
+          '   （' + ExpandConstant('{app}') + '）加入信任或排除列表；' + #13#10 +
+          '2. 若系统虚拟内存（页面文件）被关闭，请在「系统属性 → 高级 → 性能' + #13#10 +
+          '   设置 → 虚拟内存」里恢复为自动管理；' + #13#10 +
+          '3. 处理完成后重新运行本安装包覆盖安装一遍。',
+          mbCriticalError, MB_OK);
+      end;
+      DeleteFile(SelfCheckOut);
+      SetEnvironmentVariable('ZDM_SELFCHECK_OUT', '');
+    end;
   end;
 end;
 

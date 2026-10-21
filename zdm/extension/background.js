@@ -878,6 +878,47 @@ async function api(path, body, method = "POST") {
   return r.json();
 }
 
+/* ------------------------------------------------------------- 存活心跳
+
+   桌面端「浏览器扩展」对话框要回答「扩展装上了没有」。不读注册表、
+   不翻浏览器配置目录（每个浏览器路径都不同，还不一定读得到），反过来
+   听：扩展每次被唤醒都向本机服务报一个到（GET /api/extension/ping，
+   无鉴权，服务只记录「来过」的时间）。
+
+   service worker 空闲 30 秒就被回收，所以三层保险：
+   - SW 每次被唤醒（嗅探/推送/alarms 都会唤醒它）：顶层代码直接 ping；
+   - 浏览器启动 / 扩展安装更新：onStartup / onInstalled 各 ping 一次，
+     并创建 30 分钟周期的 chrome.alarms；
+   - alarms 到点会唤醒 SW → 又回到第一层。
+   浏览器整个关掉后心跳自然停格 —— 桌面端会如实显示「最近一次活跃」，
+   而不是误报「未安装」。 */
+
+async function pingPresence() {
+  try {
+    const cfg = await getCfg();
+    await fetch(baseUrl(cfg) + "/api/extension/ping", {
+      method: "GET",
+      headers: { "X-ZDM-Extension": chrome.runtime.id },
+    });
+  } catch (_) {
+    /* 服务没开：静默。桌面端自然显示「未检测到」。 */
+  }
+}
+
+try {
+  chrome.alarms.create("zdm-presence", { periodInMinutes: 30 });
+  chrome.alarms.onAlarm.addListener((a) => {
+    if (a && a.name === "zdm-presence") pingPresence();
+  });
+} catch (_) {
+  /* 老 Chrome 没有 alarms 就少一层保险，不影响其它功能。 */
+}
+try {
+  chrome.runtime.onInstalled.addListener(pingPresence);
+  chrome.runtime.onStartup.addListener(pingPresence);
+} catch (_) {}
+pingPresence();
+
 function notify(title, message) {
   getCfg().then((cfg) => {
     if (!cfg.notify) return;
