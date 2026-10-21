@@ -2541,23 +2541,38 @@ def _install_translations(app) -> None:
     buttons in every QDialogButtonBox and QMessageBox, because those texts come
     from Qt itself. The Qt translation is shipped with both the system PyQt5
     and the frozen bundle.
+
+    冻结包（Windows/Linux）里 QLibraryInfo 指向的翻译目录不一定带着
+    qtbase_zh_CN.qm（zdm.spec 已把中文 *.qm 收进 _internal/i18n），
+    所以除了 Qt 自己的路径外，再探一遍 app_root()/i18n。
     """
     try:
         from PyQt5.QtCore import QLibraryInfo, QLocale, QTranslator
 
-        path = QLibraryInfo.location(QLibraryInfo.TranslationsPath)
+        dirs = []
+        try:
+            p = QLibraryInfo.location(QLibraryInfo.TranslationsPath)
+            if p:
+                dirs.append(p)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            dirs.append(os.path.join(runtime.app_root(), "i18n"))
+        except Exception:  # noqa: BLE001
+            pass
         names = ["qtbase_zh_CN", "qt_zh_CN"]
         try:
             locale = QLocale.system().name()  # e.g. zh_CN
             if locale:
                 names.insert(0, f"qtbase_{locale}")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
-        for name in names:
-            tr = QTranslator(app)
-            if tr.load(name, path):
-                app.installTranslator(tr)
-                return
+        for d in dirs:
+            for name in names:
+                tr = QTranslator(app)
+                if tr.load(name, d):
+                    app.installTranslator(tr)
+                    return
     except Exception as e:  # noqa: BLE001 - translations are cosmetic
         _dlog(f"[i18n] failed: {type(e).__name__}: {e}")
 

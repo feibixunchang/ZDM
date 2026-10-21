@@ -433,7 +433,12 @@ def format_selector(height: int) -> str:
         f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/"
         f"bv*[height<={h}]+ba/"
         f"b[height<={h}]/"
-        f"bv*[height<={h}]+ba/b"
+        f"bv*[height<={h}]+ba/"
+        # 最后必须有无条件兜底：解析端（多客户端合并）报的高度在下载端
+        # （单个客户端）可能一档都对不上，缺了这级就报
+        # 「Requested format is not available」直接失败（另一台 Windows
+        # 与 Linux 实测）。宁可下到不匹配的最近档，也比失败强。
+        f"b"
     )
 
 
