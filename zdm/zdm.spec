@@ -47,7 +47,7 @@ try:
             if _f.endswith(".qm") and ("zh_CN" in _f or "zh_TW" in _f):
                 datas.append((os.path.join(_qtdir, _f), "i18n"))
 except Exception as _e:  # pragma: no cover
-    print(f"WARNING: 无法收集 Qt 中文翻译：{_e} —— 冻结包的内置按钮将是英文")
+    print(f"WARNING: cannot collect Qt zh_CN translations: {_e} - frozen buttons will be English")
 
 hiddenimports = [
     "PyQt5.QtNetwork",   # single-instance guard (QLocalServer)
@@ -90,11 +90,11 @@ for _name in ("yt-dlp", "yt-dlp.exe", "ffmpeg", "ffmpeg.exe", "deno", "deno.exe"
 # Windows 是 yt-dlp.exe，写死哪个都会在另一条流水线上误报。
 _found = {os.path.basename(_p) for _p, _ in binaries}
 if not (_found & {"yt-dlp", "yt-dlp.exe"}):
-    print("WARNING: zdm/bin/yt-dlp missing — 打包版将无法解析/下载 YouTube")
+    print("WARNING: zdm/bin/yt-dlp missing - YouTube resolve/download unavailable")
 if not (_found & {"ffmpeg", "ffmpeg.exe"}):
-    print("WARNING: zdm/bin/ffmpeg missing — 打包版合并 DASH 音轨会退回系统 ffmpeg")
+    print("WARNING: zdm/bin/ffmpeg missing - DASH muxing will fall back to system ffmpeg")
 if not (_found & {"deno", "deno.exe"}):
-    print("WARNING: zdm/bin/deno missing — YouTube 的 JS 挑战无法求解")
+    print("WARNING: zdm/bin/deno missing - YouTube JS challenges cannot be solved")
 
 block_cipher = None
 
