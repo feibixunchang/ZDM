@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -91,11 +92,56 @@ def _get_json(url: str, timeout: float = 8.0, proxy: str = "") -> Optional[dict]
 
 
 # --------------------------------------------------------------------------- release
+def _latest_from_html(timeout: float = 8.0, proxy: str = "") -> Optional[dict]:
+    """api.github.com 被限流/被墙时的兜底：走 github.com 普通网页。
+
+    api.github.com 未登录限流 60 次/小时/IP —— 走共享代理出口的用户几乎
+    必然 403，表现就是「检查更新永远连不上服务器」。而 github.com 的网页
+    没有这个限制：``releases/latest`` 302 重定向到 ``/tag/<tag>`` 即可拿到
+    最新版本号；再用 ``releases/expanded_assets/<tag>``（纯 HTML）解析资产。
+    """
+    try:
+        with _open(f"{PROJECT_URL}/releases/latest", timeout, proxy) as r:
+            final = r.geturl()
+        m = re.search(r"/releases/tag/([^/?#]+)", final)
+        if not m:
+            return None
+        tag = m.group(1)
+    except Exception:  # noqa: BLE001
+        return None
+    version = tag.lstrip("vV")
+    if not version:
+        return None
+
+    assets: List[dict] = []
+    try:
+        with _open(f"{PROJECT_URL}/releases/expanded_assets/{tag}", timeout, proxy) as r:
+            html = r.read().decode("utf-8", "replace")
+        for href in re.findall(r'href="([^"]*?/releases/download/[^"]+)"', html):
+            path = href if href.startswith("/") else "/" + href.lstrip("/")
+            url = f"https://github.com{path}" if path.startswith("/") else path
+            name = path.rsplit("/", 1)[-1]
+            if name and not any(a["name"] == name for a in assets):
+                assets.append({"name": name, "url": url, "size": 0})
+    except Exception:  # noqa: BLE001
+        pass  # 资产拿不到没关系 —— 版本号已经到手，「有新版」的提示照常弹
+
+    return {
+        "version": version,
+        "tag": tag,
+        "url": f"{PROJECT_URL}/releases/tag/{tag}",
+        "notes": "",
+        "published": "",
+        "assets": assets,
+    }
+
+
 def latest_release(timeout: float = 8.0, proxy: str = "") -> Optional[dict]:
     """Newest published Release as ``{version, url, notes, assets}`` or None."""
     data = _get_json(API_LATEST, timeout, proxy)
     if not isinstance(data, dict):
-        return None
+        # API 限流/网络不通 → 网页兜底（见 _latest_from_html 注释）
+        return _latest_from_html(timeout, proxy)
     tag = str(data.get("tag_name") or data.get("name") or "").strip()
     version = tag.lstrip("vV")
     if not version:
