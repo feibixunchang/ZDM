@@ -23,6 +23,13 @@ dist/deb_staging/
 dist/zdm-linux/
 dist/zdm-macos/
 dist/zdm-windows/
+dist/build-venv/
+dist/build-windows/
+dist/pyinstaller.log
+dist/selfcheck.json
+dist/ffmpeg-extract/
+dist/ffmpeg-win64.zip
+dist/ZDM/
 .build_win/
 
 # 构建产物：.deb / tarball / .exe 由 CI（GitHub Actions）产出并挂到 Release，

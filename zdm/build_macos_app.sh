@@ -19,7 +19,9 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../zdm/
 REPO="$(cd "$SRC/.." && pwd)"                         # repo root
 BUILD_DIR="${1:-$(pwd)/macos-build}"
-VERSION="${2:-1.14.7}"
+# 版本号默认读 zdm/zdm/__init__.py（唯一真源），避免脚本里写死的版本和后端漂开。
+VERSION="${2:-$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SRC/zdm/__init__.py" 2>/dev/null | head -1)}"
+VERSION="${VERSION:-0.0.0}"
 APP="$BUILD_DIR/ZDM.app"
 STAGE="$BUILD_DIR/dmg-root"
 
@@ -130,6 +132,35 @@ cp "$YTDLP_SRC" "$RES/bin/yt-dlp"
 chmod +x "$RES/bin/yt-dlp"
 "$RES/bin/yt-dlp" --version >/dev/null || {
     echo "ERROR: 随包 yt-dlp 无法执行（架构不匹配或文件损坏）" >&2; exit 1; }
+
+# ffmpeg：DASH 的 video 轨没有声音，B站/YouTube 下完必须靠它把音轨合进去。
+# 不内置的话，用户没装 brew ffmpeg 就得到「下载成功但打开是无声视频」——
+# 这个现象看起来像下载坏了，实际是缺一个合并器。
+# 落点 $RES/bin/ffmpeg，正好被 core._find_ffmpeg() 的「随包优先」分支命中。
+FFMPEG_SRC="$SRC/bin/ffmpeg"
+if [ ! -x "$FFMPEG_SRC" ]; then
+    FFMPEG_TAG="${FFMPEG_TAG:-b6.0}"
+    case "$(uname -m)" in
+        arm64) FFMPEG_ASSET="ffmpeg-darwin-arm64" ;;
+        *)     FFMPEG_ASSET="ffmpeg-darwin-x64" ;;
+    esac
+    echo "==> ffmpeg binary missing, downloading $FFMPEG_ASSET ($FFMPEG_TAG)"
+    mkdir -p "$SRC/bin"
+    curl -fL --retry 3 -o "$FFMPEG_SRC" \
+        "https://github.com/eugeneware/ffmpeg-static/releases/download/$FFMPEG_TAG/$FFMPEG_ASSET" || {
+        echo "WARNING: 下载 ffmpeg 失败 —— 打包版合并音轨时会退回系统 ffmpeg" >&2; }
+    chmod +x "$FFMPEG_SRC" 2>/dev/null || true
+fi
+if [ -x "$FFMPEG_SRC" ]; then
+    cp "$FFMPEG_SRC" "$RES/bin/ffmpeg"
+    chmod +x "$RES/bin/ffmpeg"
+    # 真的跑一下：架构不匹配的二进制在 chmod +x 之后依然「存在且可执行」，
+    # 只有真正调用才会报 "Bad CPU type in executable"。
+    "$RES/bin/ffmpeg" -version >/dev/null || {
+        echo "ERROR: 随包 ffmpeg 无法执行（架构不匹配）" >&2; exit 1; }
+else
+    echo "WARNING: 没有随包 ffmpeg，B站/YouTube 下载将只有画面没有声音" >&2
+fi
 find "$APP" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Fail fast if a module gui.py imports at top level is missing.
@@ -153,7 +184,7 @@ VENV="$RES/venv"
 # Now that a Python exists, actually import every top-level module gui.py needs.
 # This is the check that catches a module being forgotten in the copy lists.
 echo "==> import check for runtime modules"
-( cd "$RES" && "$VENV/bin/python" -c "
+( cd "$RES" && ZDM_RES="$RES" "$VENV/bin/python" -c "
 import importlib.util as u, sys
 missing = [m for m in ('theme', 'gui') if u.find_spec(m) is None]
 if missing:
@@ -175,7 +206,17 @@ if not _bin:
     print('missing bundled yt-dlp binary'); sys.exit(1)
 print('    yt-dlp ->', _bin)
 from zdm.core import _find_ffmpeg
-print('    ffmpeg ->', _find_ffmpeg() or '(not found, 合并音轨会不可用)')
+import os as _os
+_ff = _find_ffmpeg()
+_expect = _os.path.join(_os.environ.get('ZDM_RES', ''), 'bin', 'ffmpeg')
+if not _ff:
+    print('missing ffmpeg —— B站/YouTube 下完会没有声音'); sys.exit(1)
+# 必须是随包那份，不能是开发机上 brew 装的那份：用户机器上没有
+# /opt/homebrew/bin/ffmpeg，构建机有 —— 只打印不校验的话，打出来的包
+# 在开发者机器上「看起来正常」，到用户手里才没声音。
+if _os.path.abspath(_ff) != _os.path.abspath(_expect):
+    print('ffmpeg 不是随包版本:', _ff, '!=', _expect); sys.exit(1)
+print('    ffmpeg ->', _ff)
 print('    theme + gui + update + desktop + yt_resolve importable, both palettes render')
 " ) || { echo "ERROR: runtime module import check failed"; exit 1; }
 

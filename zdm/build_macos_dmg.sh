@@ -11,7 +11,9 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="${ZDM_VERSION:-1.14.7}"
+# 版本号默认读 zdm/zdm/__init__.py（唯一真源）。
+VERSION="${ZDM_VERSION:-$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SRC/zdm/__init__.py" 2>/dev/null | head -1)}"
+VERSION="${VERSION:-0.0.0}"
 APP_NAME="ZDM"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 STAGING="$(mktemp -d)/${APP_NAME}"

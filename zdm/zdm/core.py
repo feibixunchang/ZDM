@@ -40,7 +40,18 @@ def _find_ffmpeg() -> Optional[str]:
     test on one machine.
     """
     exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-    candidates = [
+    # 随包分发的 ffmpeg 排最前：那是打包时验证过的那一份，用户机器上有没有
+    # 装 brew/winget 都不该影响「B站下完没声音」这件事。
+    # app_root() 在三种形态下分别指向 PyInstaller 的 _internal/、macOS 的
+    # Contents/Resources/、源码树的 zdm/ —— 三者下面都有 bin/。
+    bundled = []
+    try:
+        from . import runtime
+
+        bundled = [os.path.join(runtime.app_root(), "bin", exe)]
+    except Exception:  # noqa: BLE001 - 取不到就用系统装的那份
+        pass
+    candidates = bundled + [
         # --- macOS ---
         "/opt/homebrew/bin/ffmpeg",
         "/usr/local/bin/ffmpeg",

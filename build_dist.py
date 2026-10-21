@@ -6,9 +6,13 @@ Outputs (into ./dist):
   - zdm-linux-amd64.tar.gz     Linux  (same bundle, user-level install, no root)
   - zdm-macos.zip              macOS  (ZDM.app + extension + build_macos_dmg.sh)
 
-Windows 只有原生客户端（C#/WPF），由 .github/workflows/build-windows.yml 出
-ZDM-Setup-*.exe；这里不再构建 PyQt5 版 Windows 安装包 —— 两个安装包并存会让人
-装错，而且 PyQt5 版会覆盖原生版的安装目录。
+Windows 由 zdm/build_windows_app.ps1 构建（同一份 PyQt5 界面 + 同一个 PyInstaller
+spec，自带 CPython 运行时），产出 ZDM-Setup-*.exe。
+
+2026-10 起 Windows 也是 PyQt5 那一套了。之前它是独立的 C#/WPF 客户端，自带下载
+引擎和 HTTP API，导致「同一功能两份实现」：mac 上修好的 YouTube 解析、探大小、
+DASH 音频合流，Windows 一行都没生效。现在三端一份代码，修一次三端都生效。
+windows-native/ 仅作参考与回退保留，不再参与构建。
 
 The macOS .dmg itself must be produced on a Mac (hdiutil is macOS-only);
 build_macos_dmg.sh does that in one command.
@@ -21,7 +25,26 @@ import sys
 ROOT = os.path.abspath(os.path.dirname(__file__))
 ZDM = os.path.join(ROOT, "zdm")
 DIST = os.path.join(ROOT, "dist")
-VERSION = "1.14.7"
+
+
+def _read_version() -> str:
+    """版本号只认 zdm/zdm/__init__.py 一个真源。
+
+    这里以前写死过 1.13.0，而后端 /api 报的是 1.14.0 —— 于是打出过「标题栏
+    与 GitHub 最新版对不上」的包，CI 的版本自检也是因为这个挂的。
+    """
+    p = os.path.join(ZDM, "zdm", "__init__.py")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+VERSION = _read_version()
 
 
 def which(cmd):
@@ -90,6 +113,24 @@ def build_linux_native():
         for f in glob.glob(os.path.join(out, pat)):
             shutil.copy2(f, os.path.join(DIST, os.path.basename(f)))
             print(f"    -> dist/{os.path.basename(f)}")
+
+
+# ----------------------------------------------------------------- Windows
+def build_windows_native():
+    """Build the Windows client (PyQt5 onedir + Inno installer).
+
+    The heavy lifting lives in zdm/build_windows_app.ps1 so that CI and a
+    developer machine run exactly the same steps. Only meaningful on Windows:
+    PyInstaller cannot cross-compile, and iscc.exe is Windows-only.
+    """
+    if sys.platform != "win32":
+        print("==> Windows  [跳过：PyInstaller 不能交叉编译，请在 Windows 上构建]")
+        return
+    script = os.path.join(ZDM, "build_windows_app.ps1")
+    run(
+        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", script, "-OutDir", DIST, "-Version", VERSION,
+    )
 
 
 # ----------------------------------------------------------------- macOS zip
@@ -164,13 +205,16 @@ def main():
     # sitting next to a freshly built zdm_1.13.0_all.deb makes any downstream
     # glob ("dist/zdm_*_all.deb") ambiguous and breaks packaging/verification.
     import glob
-    for pat in ("dist/zdm_*.deb", "dist/zdm-linux*.tar.gz", "dist/zdm-macos.zip"):
+    for pat in ("dist/zdm_*.deb", "dist/zdm-linux*.tar.gz", "dist/zdm-macos.zip",
+                "dist/ZDM-Setup-*.exe", "dist/ZDM-*[0-9].dmg"):
         for stale in glob.glob(os.path.join(ROOT, pat)):
             if os.path.isfile(stale):
                 os.remove(stale)
                 print(f"    (removed stale {os.path.basename(stale)})")
     print("==> Linux native bundle + .deb + portable tarball")
     build_linux_native()
+    print("==> Windows bundle + installer")
+    build_windows_native()
     print("==> macOS .zip (ZDM.app + dmg script)")
     build_macos_zip()
     # tidy intermediates
@@ -197,9 +241,9 @@ def main():
             f"       若要 .dmg：在 Mac 上执行包内 build_macos_dmg.sh 一键生成 ZDM-{VERSION}.dmg\n"
             "       （.dmg 需 macOS 的 hdiutil 生成，无法在 Linux 上构建）\n\n"
             "3) Windows\n"
-            "   - ZDM-Setup-x.y.z.exe   （原生 C#/WPF 客户端，由 CI 的 build-windows.yml 产出）\n"
-            "       本脚本不再构建 Windows 的 PyQt5 安装包：原生版功能一致、体积更小，\n"
-            "       两个安装包长期并存只会让人装错（PyQt5 版还会覆盖原生版的安装目录）。\n\n"
+            f"   - ZDM-Setup-{VERSION}.exe   （PyQt5 + 自带 Python 运行时，与 mac/Linux 同一份界面与引擎）\n"
+            "       双击安装，用户级、无需管理员、不依赖本机 Python；软件内可直接一键更新。\n"
+            f"       （需在 Windows 上用 zdm/build_windows_app.ps1 构建，CI 在 windows-latest 上产出）\n\n"
             f"本版新增（v{VERSION}）：\n"
             "  · Linux 安装包改为真正的自包含原生版：内嵌 CPython + PyQt5/Qt，"
             "不再依赖系统 python3 / pip（旧包只有 87KB，桌面窗口其实起不来）\n"

@@ -1874,6 +1874,26 @@ class MainWindow(QMainWindow):
             ):
                 self._open_url((info or {}).get("url") or update.PROJECT_URL)
             return
+        # Windows 的安装包就是静默升级的入口：不再让用户点一遍向导，也不再
+        # 把人送去文件管理器里手动双击。装完由那个游离进程把 ZDM 拉回来。
+        if sys.platform == "win32" and path.lower().endswith(".exe"):
+            if not self._message_yes_no(
+                "安装更新",
+                f"已下载 {os.path.basename(path)}。\n\n"
+                "现在关闭 ZDM 并安装吗？装完会自动重新打开，"
+                "下载记录、设置和已下载的文件都不受影响。",
+            ):
+                self._status(f"安装包已保存到 {path}，双击即可安装", hold=10)
+                return
+            if not update.install_windows(path):
+                self._message(
+                    "更新未能启动",
+                    "没能启动安装程序，请手动运行：\n" + path,
+                )
+                return
+            self._status("正在关闭并安装更新…", hold=8)
+            QApplication.quit()
+            return
         self._status(f"已下载 {os.path.basename(path)}，正在打开安装包…", hold=6)
         # "打开" = hand the file to the OS: a .dmg mounts and shows the installer,
         # a .exe starts the setup wizard.

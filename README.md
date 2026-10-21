@@ -12,7 +12,7 @@
 |---|---|
 | `zdm/` | 完整源码（引擎、服务、CLI、桌面端、浏览器扩展、安装脚本） |
 | `zdm/zdm_launcher.m` | macOS 原生 App 启动器源码（`install.sh` 用 clang 编译成 `ZDM.app` 主程序） |
-| `windows-native/` | **Windows 原生客户端**（C# / WPF / .NET），独立于 PyQt5 桌面端的 Windows 实现 |
+| `windows-native/` | 旧的 Windows C#/WPF 客户端（仅参考/回退，不再构建；Windows 已改用 PyQt5 那一套） |
 | `dist/` | 三端正式安装包 |
 | `docs/` | 安装与使用说明文档 |
 | `build_dist.py` | 打包脚本：重新生成 `dist/` 下各平台安装包 |
@@ -25,7 +25,7 @@
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
 | Linux | `zdm_1.14.7_amd64.deb` | `sudo apt install ./zdm_1.14.7_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.14.7.exe` | C#/WPF 原生客户端，双击安装（用户级、无需管理员、不依赖 Python）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.14.7.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -47,49 +47,46 @@
 ## 构建
 
 ```bash
-python3 build_dist.py   # Linux .deb / tar.gz + macOS zip（Windows 安装包由 CI 的 build-windows.yml 产出）
+python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
 bash zdm/build_linux_app.sh ./linux-build 1.14.7
 ```
 
-> Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（C#/WPF 原生客户端，约 70 MB，自带运行时）。
-> 旧的 `ZDM-PyQt5-Setup-*.exe` 已下线 —— 两个包并存时用户经常装错，
-> 而且 PyQt5 版会覆盖原生版的安装目录（同一个 `%LOCALAPPDATA%\Programs\ZDM`）。
+> Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
+> 用户机器上不需要装 Python）。它和 macOS / Linux 用的是**同一份界面和同一个下载引擎**。
 
-## Windows 原生客户端
+## Windows 客户端
 
-Windows 端是 **C# / WPF / .NET** 原生客户端，源码在 `windows-native/`。
-安装包 `ZDM-Setup-*.exe` 为 Inno Setup 用户级安装，**不需要管理员权限**，装完自动完成：
+Windows 端从 v1.15.0 起与 macOS / Linux **完全同一份代码**：
+`gui.py` + `theme.py` + `zdm/` 引擎，由 `zdm/zdm.spec`（PyInstaller）冻结成 onedir，
+再用 Inno Setup 封成安装包。构建脚本 `zdm/build_windows_app.ps1` 一条命令跑完。
+
+> 为什么不再是独立的 C#/WPF 客户端：那套实现自带下载引擎和 HTTP API，
+> 等于把同一个功能写了两遍。结果是 mac 上修好的 YouTube 解析、探大小、DASH 音频合流，
+> Windows 一行都没生效。`windows-native/` 仅作为参考/回退保留，不再参与构建。
+
+安装包为用户级安装（`%LOCALAPPDATA%\Programs\ZDM`，**不需要管理员权限**），装完自动完成：
 
 - 注册 `zdm://` 协议，浏览器里点链接可直接把下载任务交给 ZDM；
-- 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`），
-  **ZDM 没运行时**，扩展一点下载就能把它拉起来，再把任务接过去；
-- 校验并修复「开机自启」注册项；
-- 把浏览器扩展解压到 `{app}\extension`（默认 `%LOCALAPPDATA%\Programs\ZDM\extension`），
-  扩展的落盘路径由安装包保证，不再依赖任何临时目录。
+- 注册 Chrome / Edge / Chromium / Brave 的 **Native Messaging** 宿主（`com.zdm.launcher`，
+  指向随包的 `ZDM-NativeHost.exe`），**ZDM 没运行时**扩展一点下载就能把它拉起来；
+- 把浏览器扩展解压到 `{app}\extension`，扩展的落盘路径由安装包保证；
+- 「开机自启」写 `HKCU\...\Run`，值与程序内开关用的是同一条命令（`ZDM.exe serve`）。
 
-安装包参数 `Zdm.exe --register` 可在无界面下重做上述注册（安装器与「设置 → 浏览器自动唤醒」按钮走的是同一段代码）。
+**为什么是 Native Messaging 而不是 `zdm://`**：Chrome 只在**有用户手势**的页面里才允许跳转外部协议，
+扩展自己开的隐藏标签页没有手势，`zdm://` 导航会被静默丢弃。所以扩展先
+`chrome.runtime.connectNative("com.zdm.launcher")`，`zdm://` 只作兜底。
 
-**为什么是 Native Messaging 而不是 `zdm://`**：Chrome 只在**有用户手势**的页面里才允许跳转到外部协议，
-扩展自己开的隐藏标签页没有手势，`zdm://` 导航会被静默丢弃——这正是 1.8.0 自动唤醒失效的原因。
-扩展改为先 `chrome.runtime.connectNative("com.zdm.launcher")` 拉起一个短命宿主进程，由宿主 `ShellExecute`
-打开 `zdm://add?url=…`，`zdm://` 只作为兜底。
+构建（在 Windows 上）：
 
-构建：
-
-```bash
-cd windows-native
-dotnet publish Zdm.App.csproj -c Release -r win-x64 --self-contained -o publish
-# 安装包会把这份扩展一起打进去，所以必须先落到 publish/extension
-mkdir -p publish/extension && cp -r ../zdm/extension/* publish/extension/
-iscc installer.iss
+```powershell
+# venv + PyQt5 + PyInstaller + 下载 bin/yt-dlp.exe 与 bin/ffmpeg.exe + 冻结 + 自检 + 打安装包
+powershell -ExecutionPolicy Bypass -File zdm\build_windows_app.ps1 -OutDir dist
 ```
 
-`iscc` 来自 Inno Setup 6（用户级安装默认在 `%LOCALAPPDATA%\Programs\Inno Setup 6`，
-官方安装包不带简体中文语言文件，需要把 `ChineseSimplified.isl` 放进它的 `Languages` 目录）。
-版本号的唯一来源是 `Zdm.App.csproj` 的 `<Version>`，CI 会自动同步 `installer.iss` 的 `AppVersion`；
-本地打包前记得手动对齐这两处。
+依赖：Python 3.9+、网络可访问 PyPI 与 GitHub、Inno Setup 6（`iscc`）。
+版本号唯一来源是 `zdm/zdm/__init__.py` 的 `__version__`，脚本自己读取，不需要手动对齐。
 
 **升级提示**：扩展文件装在 `{app}\extension` 里，跨版本升级时该目录会被重写。
 升级前先退出 Chrome，否则 Chrome 可能在目录重建的瞬间把扩展条目丢掉。
@@ -146,10 +143,10 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
 - **视频卡片上的「下载此视频」按钮**：B站 / YouTube 的每个视频卡片右上角，鼠标移上去
   会浮出一颗按钮，点开是该视频的**清晰度列表**（1080P / 720P / 音频…），选一个直接推给 ZDM。
   扩展就地解析页面里已加载的媒体数据（YouTube 的 `streamingData`、B站的 `__playinfo__`），
-  不额外发请求。DASH 的画面与声音是分开的，ZDM 下载后用 `ffmpeg` 合成有声音的视频
-  （没有 ffmpeg 时视频照旧保存，只是无声）。
-- **未启动也能接管**：ZDM 没开着时，浏览器里点下载会**自动把它拉起来**再接手任务（Windows 原生客户端
-  通过 Native Messaging 实现，`zdm://` 协议兜底；其他平台靠协议唤起）
+  不额外发请求。DASH 的画面与声音是分开的，ZDM 下载后用随包的 `ffmpeg` 合成有声音的视频
+  （三端安装包都内置 `bin/ffmpeg`，不再依赖用户自己装；真缺了会在任务上写明「无声音」而不是静默成功）。
+- **未启动也能接管**：ZDM 没开着时，浏览器里点下载会**自动把它拉起来**再接手任务
+  （Windows 通过 Native Messaging → `ZDM-NativeHost.exe`，其他平台靠协议唤起）
 - 开机自启（设置里可勾选，macOS / Windows / Linux 三端均支持）
 
 详见 [`zdm/README.md`](zdm/README.md)；macOS 踩坑与修复记录见 [`docs/ZDM_安装与使用说明.md`](docs/ZDM_安装与使用说明.md)。

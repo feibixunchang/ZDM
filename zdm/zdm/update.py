@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -133,8 +134,11 @@ def pick_asset(assets, platform: str = "") -> Optional[dict]:
             or first(lambda n: n.endswith(".dmg"))
         )
     if plat in ("win32", "cygwin"):
-        # The native client is the primary Windows build; the PyQt5 setup is a
-        # fallback for machines where the native one cannot run.
+        # Windows 只有一个安装包：ZDM-Setup-*.exe（PyQt5 + 自带 Python 运行时）。
+        # 文件名刻意不带 pyqt5 —— 它与 1.14.7 及更早的 C#/WPF 包共用同一个目录
+        # 和同一个 AppId，这样老版本能被原地覆盖升级而不是并存两份。
+        # 历史上那个 ZDM-PyQt5-Setup-* 已经下线，但旧 Release 里还留着，所以
+        # 仍然把它排除掉。
         return (
             first(lambda n: n.endswith(".exe") and "pyqt5" not in n and n.startswith("zdm-setup"))
             or first(lambda n: n.endswith(".exe") and "pyqt5" not in n)
@@ -186,6 +190,46 @@ def download(
         except Exception:
             pass
         return None
+
+
+# --------------------------------------------------------------------------- install
+def install_windows(setup_path: str, relaunch_exe: str = "") -> bool:
+    """Windows：静默升级，装完把新版重新拉起来。返回是否成功拉起安装器。
+
+    为什么不用 Inno 的 ``[Run]`` + ``Check: WizardSilent`` 来做重启：静默安装时
+    那条**真的会执行**，Setup 会一直等被拉起的 GUI 进程退出，安装器于是永不返回
+    （CI 的 Install and verify 就这么卡了 20 分钟，日志里只剩一句
+    "Terminate orphan process: pid (9100) (Zdm)"）。
+
+    所以改成：退出前起一个游离的 powershell —— 先等安装器结束，再启动新版，
+    与应用自身的生命周期彻底解耦。调用方拿到 True 后应该立刻退出进程。
+    """
+    if os.name != "nt" or not setup_path:
+        return False
+    exe = relaunch_exe or sys.executable
+    if not exe:
+        return False
+
+    def q(p: str) -> str:  # PowerShell 单引号字符串：内部的 ' 要写成 ''
+        return "'" + str(p).replace("'", "''") + "'"
+
+    script = (
+        f"$p = Start-Process -FilePath {q(setup_path)} -ArgumentList "
+        "'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -PassThru;"
+        " Wait-Process -Id $p.Id -ErrorAction SilentlyContinue;"
+        " Start-Sleep -Seconds 2;"
+        f" Start-Process -FilePath {q(exe)}"
+    )
+    try:
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：本进程退出后它继续活着。
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+            creationflags=0x00000008 | 0x00000200,
+            close_fds=True,
+        )
+        return True
+    except Exception:  # noqa: BLE001 - 交付给调用方处理（提示手动安装）
+        return False
 
 
 # --------------------------------------------------------------------------- ignore list
