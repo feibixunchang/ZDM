@@ -1064,8 +1064,7 @@
     const out = {};
     for (const k of Object.keys(lens || {})) {
       const h = YT_ITAG_HEIGHT[Number(k)] || 0;
-      if (!h) continue;
-      const n = Number(lens[k]) || 0;
+      if (!h) continue;      const n = Number(lens[k]) || 0;
       if (n > (out[h] || 0)) out[h] = n;
     }
     return out;
@@ -1101,12 +1100,21 @@
       label: l.height + "P · 视频+音频",
       url: (byHeight[l.height] || {}).url || "",
       kind: "video",
-      size: (byHeight[l.height] || {}).size || sizes[l.height] || 0,
+      size: plausibleSize((byHeight[l.height] || {}).size || sizes[l.height] || 0),
       height: l.height,
       ytLevel: l.q,
       // 音频轨整段视频只有一条，任何档位都配它
       audio_url: audioUrl || fallbackAudio || undefined,
     }));
+  }
+
+  /* SABR 之后播放器 streamingData 里的 contentLength 常常是「桩」大小：
+     十几~几十 KB，那是初始化段/单个分片而不是整片 —— 真视频哪怕 240P
+     也不可能小于 1MB。小于 1MB 的一律按未知处理：宁可先不显示，也别把
+     「1440P 42.1KB」这种明显错误的数字摆出来（解析成功后合并会补真的）。 */
+  function plausibleSize(n) {
+    n = Number(n) || 0;
+    return n >= 1048576 ? n : 0;
   }
 
   /* 选了一个「还没抓过」的档位：先切档，再轮询嗅探列表等它的直链出现。 */

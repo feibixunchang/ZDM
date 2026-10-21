@@ -1,7 +1,7 @@
 ; ZDM 下载管理器 - Windows 安装脚本（PyQt5 三端统一版）
 ;
 ; 由 zdm/build_windows_app.ps1 调用：
-;   iscc /DAppVersion=1.15.3 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
+;   iscc /DAppVersion=1.15.4 /DSourceDir=dist\ZDM /DOutDir=dist installer.iss
 ;
 ; SourceDir 是 PyInstaller 产出的 onedir（ZDM.exe + _internal\ 整个运行时，
 ; 内含 CPython 与 PyQt5）。用户机器上不需要装 Python、不需要 pip、不需要 VC 运行库。
@@ -128,6 +128,92 @@ Type: filesandordirs; Name: "{app}\extension"
 Type: files; Name: "{app}\com.zdm.launcher.json"
 
 [Code]
+type
+  TSystemInfo = record
+    dwOemId: DWORD;
+    dwPageSize: DWORD;
+    lpMinimumApplicationAddress: Cardinal;
+    lpMaximumApplicationAddress: Cardinal;
+    dwActiveProcessorMask: Cardinal;
+    dwNumberOfProcessors: DWORD;
+    dwProcessorType: DWORD;
+    dwAllocationGranularity: DWORD;
+    wProcessorLevel: Word;
+    wProcessorRevision: Word;
+  end;
+
+procedure GetNativeSystemInfo(var lpSystemInfo: TSystemInfo);
+external 'GetNativeSystemInfo@kernel32.dll stdcall';
+
+function HasNonAscii(const S: string): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  for i := 1 to Length(S) do
+    if Ord(S[i]) > 127 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+// 装完做一次「启动可行性」预检：把「Failed to load Python DLL / 内存资源不足」
+// 这种没头没脑的报错，转成用户能直接照做的处理指引。覆盖三类已知真实原因：
+// ① 本机是 ARM64 但安装包是 x64（骁龙等，x64 模拟层加载 python312.dll 会失败）；
+// ② 系统关掉了「虚拟内存/页面文件」（Windows 靠它映射 DLL，关掉就报内存不足）；
+// ③ 安装路径含中文/特殊字符。
+// 这一检不调用 PyInstaller 引导器（那一步失败只会弹 PyInstaller 自己的英文框），
+// 所以即便静默安装（应用内一键更新）也能落地一份中文诊断，而不是什么提示都没有。
+procedure PreFlightCheck();
+var
+  si: TSystemInfo;
+  nativeArch: Integer;
+  paging: string;
+  installDir: string;
+  reasons: string;
+begin
+  reasons := '';
+  try
+    GetNativeSystemInfo(si);
+    nativeArch := si.dwOemId and $FFFF;   // 低字即 wProcessorArchitecture
+    if (nativeArch = 12) or (nativeArch = 5) then   // 12=ARM64, 5=ARM
+      reasons := reasons + #13#10 +
+        '• 本机是 ARM64 芯片（如高通骁龙 Snapdragon），而当前安装包是 x64。' +
+        'x64 程序在 ARM 上靠模拟层运行，CPython 的 python312.dll 往往无法加载。' +
+        '需要单独的 ARM64 安装包，请反馈需求或等待后续版本。' + #13#10;
+  except
+  end;
+
+  if RegQueryStringValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management', 'PagingFiles', paging) then
+  begin
+    if (paging = '') or (Trim(paging) = '') then
+      reasons := reasons + #13#10 +
+        '• 系统「虚拟内存/页面文件」被关闭了。Windows 需要用它来映射 DLL，' +
+        '关掉后即使内存很大也会报「内存资源不足」。' +
+        '请开启：设置 → 系统 → 关于 → 高级系统设置 → 性能[设置] → 高级 →' +
+        '虚拟内存[更改] → 勾选「自动管理所有驱动器的分页文件大小」。' + #13#10;
+  end;
+
+  installDir := ExpandConstant('{app}');
+  if HasNonAscii(installDir) then
+    reasons := reasons + #13#10 +
+      '• 安装路径含中文/特殊字符（' + installDir + '），请安装到默认路径 C:\Program Files\ZDM。' + #13#10;
+
+  if reasons <> '' then
+  begin
+    reasons := 'ZDM 可能无法启动，常见原因与解决办法：' + reasons + #13#10 + #13#10 +
+      '若按上述处理后仍打不开，多半是杀毒软件隔离了 _internal\python312.dll，' +
+      '请把它加入信任/排除列表后重装。';
+    try
+      SaveStringToFile(ExpandConstant('{app}\ZDM-启动诊断.txt'), reasons, False);
+    except
+    end;
+    if not WizardSilent() then
+      MsgBox(reasons, mbInformation, MB_OK);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Line: string;
@@ -135,6 +221,7 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    PreFlightCheck();
     Line := ExpandConstant('{app}') + '\ZDM-NativeHost.exe';
     StringChangeEx(Line, '\', '\\', True);
     // Chrome 只认 registry 里那个值指向的清单文件，清单里的 path 必须是 exe 的
