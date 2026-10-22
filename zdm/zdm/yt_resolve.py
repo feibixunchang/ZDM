@@ -682,6 +682,7 @@ def _merge(pool: List[Dict], title: str) -> Dict:
     videos: Dict[int, Dict] = {}
     muxed: Dict[int, Dict] = {}
     audios: List[Dict] = []
+    streams: List[Dict] = []   # HLS / DASH 播放列表
     for e in pool:
         kind = e.get("kind")
         h = int(e.get("height") or 0)
@@ -695,6 +696,10 @@ def _merge(pool: List[Dict], title: str) -> Dict:
             cur = muxed.get(h)
             if h and (cur is None or (e.get("bitrate") or 0) > (cur.get("bitrate") or 0)):
                 muxed[h] = e
+        elif kind in ("hls", "dash"):
+            # 播放列表：不能按高度归并（常常没有 height），原样保留，
+            # 交给 ffmpeg 拉。丢掉它就等于「没拿到任何可下载的直链」。
+            streams.append(e)
 
     # 音频优先 m4a：和 H.264 视频一起 copy 进 mp4 才不会有兼容问题。
     best_audio = None
@@ -719,6 +724,13 @@ def _merge(pool: List[Dict], title: str) -> Dict:
             e.pop("audio_url", None)
             e["label"] = _label_video(h, e.get("codec"), True)
             out.append(e)
+
+    # 播放列表（HLS / DASH）：一条就够，交给 ffmpeg 自己挑码率
+    for e in streams:
+        item = dict(e)
+        item.pop("audio_url", None)
+        item["label"] = "HLS 直播流" if item.get("kind") == "hls" else "DASH 自适应流"
+        out.append(item)
 
     return {
         "ok": bool(out),
@@ -761,27 +773,40 @@ def _shape(info, client_name: str) -> Dict:
     for s in streams:
         vcodec = s.get("vcodec")
         acodec = s.get("acodec")
-        if vcodec in (None, "none") and acodec in (None, "none"):
-            continue
         if s.get("has_drm"):
             continue
         u = s.get("url")
         if not u or not str(u).startswith("http"):
             continue
-        # Keep only direct https streams; skip HLS/DASH manifest wrappers.
         proto = (s.get("protocol") or "").split("+")[0]
-        if proto and proto not in ("https", "http", "https_web"):
+        # HLS / DASH 的 url 指的是**播放列表**，不是媒体文件本体。它们不能
+        # 直接下载，但可以整条交给 ffmpeg 拉（跟着 playlist 取分片、解密、
+        # 封装成 mp4）。以前在这里被当成「非 http 直链」过滤掉，于是
+        # 抖音 / 西瓜 / 大部分直播与自适应流站点一律报
+        # 「没拿到任何可下载的直链」——yt-dlp 其实已经拿到了。
+        if proto in ("m3u8", "m3u8_native"):
+            kind = "hls"
+        elif proto in ("http_dash", "dash"):
+            kind = "dash"
+        elif vcodec in (None, "none") and acodec in (None, "none"):
             continue
-        if vcodec not in (None, "none") and acodec not in (None, "none"):
+        elif vcodec not in (None, "none") and acodec not in (None, "none"):
             kind = "video+muxed"
         elif vcodec not in (None, "none"):
             kind = "video"
         else:
             kind = "audio"
+        # Keep only direct https streams; skip HLS/DASH manifest wrappers.
+        if proto and proto not in (
+            "https", "http", "https_web", "m3u8", "m3u8_native",
+            "http_dash", "dash",
+        ):
+            continue
         entry = {
             "label": _label(s, kind),
             "url": u,
             "kind": kind,
+            "protocol": proto,
             "size": int(s.get("filesize") or s.get("filesize_approx") or 0),
             "mime": s.get("mime_type") or "",
             "width": int(s.get("width") or 0),

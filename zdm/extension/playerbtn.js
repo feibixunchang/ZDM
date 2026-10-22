@@ -399,8 +399,10 @@
         .sort((a, b) => Number(b.height) - Number(a.height))[0] ||
       fmts.sort((a, b) => Number(b.height || 0) - Number(a.height || 0))[0];
     /* 音乐站点解析回来可能只有音频轨，kind 要照实写，否则后端会按视频
-       去配音频、下出一个奇怪的容器。 */
+       去配音频、下出一个奇怪的容器。
+       HLS / DASH 播放列表同理：后端要按播放列表处理（ffmpeg 整条拉）。 */
     const isAudioPick = pick.kind === "audio";
+    const isStreamPick = pick.kind === "hls" || pick.kind === "dash";
     const res = await send({
       type: "sniffer-push",
       item: {
@@ -409,7 +411,7 @@
         referer: location.href,
         cookie: document.cookie || undefined,
         source: "playerbtn",
-        kind: isAudioPick ? "audio" : "video",
+        kind: isAudioPick ? "audio" : isStreamPick ? pick.kind : "video",
         // DASH 站点：yt-dlp 已经把配套音轨配好了，不带就下成无声
         audio_url: isAudioPick ? undefined : pick.audio_url || undefined,
         // 刻意**不传** page_url：带了它后端会改走 yt-dlp 通道重新解析一遍，

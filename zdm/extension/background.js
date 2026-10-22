@@ -321,6 +321,12 @@ function nameFromUrl(url, kind) {
   if (/\.m4s$/i.test(name)) {
     name = name.replace(/\.m4s$/i, kind === "audio" ? ".m4a" : ".mp4");
   }
+  /* 播放列表本身不是成品：后端用 ffmpeg 拉完会封装成 mp4，
+     文件名也该是 .mp4。 */
+  if (kind === "hls" || kind === "dash") {
+    name = name.replace(/\.(m3u8|mpd)$/i, "") || "stream";
+    if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += ".mp4";
+  }
   return name;
 }
 
@@ -360,11 +366,18 @@ function classifyResponse(details) {
   // ContentType 会把整个 YouTube 漏掉（嗅探恒为 0）。按 host 直接认定。
   const KNOWN_MEDIA_HOST = YT_MEDIA_HOST;
   let kind = null;
-  /* 判定顺序：**URL 特征优先于 Content-Type**。
-     B站的音频段 ...-1-30280.m4s 的 Content-Type 常年报 video/mp4，
-     以前先看 Content-Type 就把音频轨当成了视频 → 嗅探列表里没有音频
-     → 推送时配不上 → 下完没声音。这是「B站下载无声」的源头。 */
-  if (KNOWN_MEDIA_HOST.test(host)) {
+  /* HLS / DASH 播放列表：它们不是媒体文件，而是「分片清单」。
+     必须单独认出来 —— 以前 MEDIA_EXT 里没有 m3u8/mpd，这些请求被整个
+     丢掉，于是嗅探列表里只剩几百字节的分片（用户看到的就是
+     「300 B」「279 KB」那种），推下去只能下到一个碎片。
+     推播放列表给后端 = 让 ffmpeg 跟着 playlist 把整条流拉下来。 */
+  const HLS_EXT = /\.m3u8(?:$|[?#])/i;
+  const DASH_EXT = /\.mpd(?:$|[?#])/i;
+  if (HLS_EXT.test(url) || ct.indexOf("mpegurl") >= 0) {
+    kind = "hls";
+  } else if (DASH_EXT.test(url) || ct.indexOf("dash+xml") >= 0) {
+    kind = "dash";
+  } else if (KNOWN_MEDIA_HOST.test(host)) {
     /* YouTube 的音频轨也是 /videoplayback，Content-Type 常被报成
        video/mp4 或干脆没有。真实类型在 URL 的 mime= 参数里
        （mime=audio%2Fmp4 / video%2Fmp4），没有 mime 时看 itag。 */
@@ -398,7 +411,9 @@ function classifyResponse(details) {
     kind = MEDIA_AUDIO_EXT.test(url) ? "audio" : "video";
   }
   if (!kind) return null;
-  if (len && len < MIN_MEDIA_BYTES) return null;
+  /* 播放列表天生就小（几 KB），不能拿媒体文件的门槛去卡它 */
+  const isPlaylist = kind === "hls" || kind === "dash";
+  if (len && len < MIN_MEDIA_BYTES && !isPlaylist) return null;
   let size = len;
   if (!size) {
     // YouTube 的 videoplayback URL 自带 clen=<总字节数> 查询参数。响应头
@@ -411,7 +426,7 @@ function classifyResponse(details) {
       /* ignore */
     }
   }
-  if (size && size < MIN_MEDIA_BYTES) return null;
+  if (size && size < MIN_MEDIA_BYTES && !isPlaylist) return null;
   return { url, kind, size, name: nameFromUrl(url, kind), from: "net" };
 }
 

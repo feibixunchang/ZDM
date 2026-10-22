@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re as _re
 import shutil
 import sys
 import threading
@@ -21,6 +22,22 @@ from .runtime import silent_proc_kwargs
 def _no_window() -> dict:
     """Windows 上 ffmpeg 等控制台子进程不弹黑窗（见 runtime.silent_proc_kwargs）。"""
     return silent_proc_kwargs()
+
+
+# ffmpeg 的 stderr 头里有 "Duration: 00:01:20.00" —— 流媒体的总时长，
+# 事先拿不到总大小，只能靠它算百分比。
+_RE_DURATION = _re.compile(r"Duration:\s*(\d+:\d+:\d+(?:\.\d+)?)")
+
+
+def _parse_hms(text: str) -> float:
+    """'01:20.00' / '00:01:20.00' → 秒。"""
+    try:
+        total = 0.0
+        for part in str(text).split(":"):
+            total = total * 60.0 + float(part)
+        return total
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _yt_should_swap_client(err: str) -> bool:
@@ -506,7 +523,7 @@ STATUS = (
 SOURCES = ("manual", "browser", "sniffer", "player", "webui", "protocol")
 # Broad content kind. Empty string means "not a media file" (an ordinary
 # download), which is what every pre-1.12.0 task effectively was.
-KINDS = ("", "video", "audio")
+KINDS = ("", "video", "audio", "hls", "dash")
 
 
 def normalize_source(value, default: str = "manual") -> str:
@@ -619,25 +636,11 @@ class Download:
         self._yt_proc = None      # 正在跑的 yt-dlp 子进程（暂停/取消要 terminate）
         # 音视频合并失败的具体原因（哪一步断了）。None 表示没试过/成功。
         self.mux_error: Optional[str] = None
-
-    def _http_headers(self) -> Dict[str, str]:
-        """发普通 HTTP 请求用的请求头（Cookie 压成一行 header 形式）。
-
-        ``self.headers`` 保持原样不动 —— yt-dlp 通道要的是 Netscape 原文
-        （见 _run_ytdlp / _cookiefile）。只有真正发 HTTP 请求时才规范化，
-        否则 Netscape 文本塞进 Cookie 头会被 urllib 以
-        "Invalid header value" 直接拒掉，probe 阶段就失败。
-        """
-        h = dict(self.headers or {})
-        for k in list(h.keys()):
-            if k.lower() != "cookie":
-                continue
-            try:
-                host = (urllib.parse.urlparse(self.url or "").hostname or "").lower()
-            except Exception:  # noqa: BLE001
-                host = ""
-            h[k] = _cookie_header(h[k] or "", host)
-        return h
+        # HLS / DASH 通道的状态（ffmpeg 子进程 + 进度）
+        self._stream_proc = None
+        self._stream_bytes = 0
+        self._stream_time = 0.0
+        self._stream_duration = 0.0
 
         self.size = 0
         self.status = "queued"
@@ -663,6 +666,25 @@ class Download:
         self._fd: Optional[int] = None
         self._on_event: Optional[Callable[[str, "Download"], None]] = None
         self._lock = threading.Lock()
+
+    def _http_headers(self) -> Dict[str, str]:
+        """发普通 HTTP 请求用的请求头（Cookie 压成一行 header 形式）。
+
+        ``self.headers`` 保持原样不动 —— yt-dlp 通道要的是 Netscape 原文
+        （见 _run_ytdlp / _cookiefile）。只有真正发 HTTP 请求时才规范化，
+        否则 Netscape 文本塞进 Cookie 头会被 urllib 以
+        "Invalid header value" 直接拒掉，probe 阶段就失败。
+        """
+        h = dict(self.headers or {})
+        for k in list(h.keys()):
+            if k.lower() != "cookie":
+                continue
+            try:
+                host = (urllib.parse.urlparse(self.url or "").hostname or "").lower()
+            except Exception:  # noqa: BLE001
+                host = ""
+            h[k] = _cookie_header(h[k] or "", host)
+        return h
 
     # ---------- paths ----------
     @property
@@ -692,7 +714,11 @@ class Download:
             # 音轨合并失败的具体一步（下载 / ffmpeg / 复查），出错弹窗用
             "mux_error": self.mux_error,
             "downloaded": self.downloaded,
-            "speed": round(self._yt_speed if self.yt_page else self.meter.speed()),
+            "speed": round(
+                self._yt_speed
+                if (self.yt_page or self._stream_bytes)
+                else self.meter.speed()
+            ),
             "connections": self.connections,
             "supports_range": self.supports_range,
             "transport": self.transport_name,
@@ -768,6 +794,11 @@ class Download:
             if self.status == "completed" and self.size:
                 return self.size
             return max(0, self._yt_bytes)
+        # 流媒体通道：ffmpeg 自己写文件，meter 统计不到
+        if self._stream_bytes:
+            if self.status == "completed" and self.size:
+                return self.size
+            return self._stream_bytes
         # 合流后文件变大（视频轨 + 音频轨），而 meter 只累计了视频轨的字节。
         # 已完成的项再拿 meter 算，就会显示成「54.5 MB / 57.2 MB、95.3%」——
         # 明明下完了却像没下完。完成态直接按最终文件大小报。
@@ -786,6 +817,13 @@ class Download:
             if not self.size:
                 return 0.0
             return min(99.5, round(self.downloaded / self.size * 100, 2))
+        # 流媒体：总大小事先不知道，用「已播时长 / 总时长」算百分比
+        if self._stream_duration:
+            if self.status == "completed":
+                return 100.0
+            return min(
+                99.5, round(self._stream_time / self._stream_duration * 100, 2)
+            )
         # 合流/完成阶段：字节已经全部到手，百分比只能是 100。
         if self.status in ("merging", "completed"):
             return 100.0
@@ -795,6 +833,12 @@ class Download:
 
     @property
     def eta(self) -> Optional[int]:
+        # 流媒体：总大小事先不知道，用剩余时长除以速度
+        if self._stream_duration and self._yt_speed:
+            left = self._stream_duration - self._stream_time
+            if left <= 0:
+                return 0
+            return int(left / max(0.01, self._yt_speed))
         sp = self._yt_speed if self.yt_page else self.meter.speed()
         if not sp or not self.size:
             return None
@@ -878,6 +922,13 @@ class Download:
         """Run the download to completion in the calling thread."""
         if self.yt_page:
             self._start_ytdlp()
+            return
+        if self.kind in ("hls", "dash"):
+            # 流媒体（m3u8 / mpd）：地址指向的是**播放列表**，不是媒体文件。
+            # 嗅探到的几百字节条目是它的一个分片，直接推给下载引擎只能下到
+            # 一个碎片。整条交给 ffmpeg 拉：它会跟着 playlist 取分片、
+            # 解 AES-128，最后封装成一个能播放的文件。
+            self._start_stream()
             return
         try:
             self._prepare()
@@ -1053,6 +1104,174 @@ class Download:
         self._pause.clear()
         self._emit("started")
         self._run_ytdlp()
+
+    # ---------- HLS / DASH（流媒体播放列表）----------
+
+    def _start_stream(self) -> None:
+        self.status = "downloading"
+        if self.started_at is None:
+            self.started_at = time.time()
+        self._stop.clear()
+        self._pause.clear()
+        self._stream_bytes = 0
+        self._stream_time = 0.0
+        self._stream_duration = 0.0
+        self._emit("started")
+        self._run_stream()
+
+    def _run_stream(self) -> None:
+        """把 m3u8 / mpd 整条拉下来，封装成一个文件。
+
+        为什么必须走 ffmpeg 而不是普通下载通道：m3u8 是**播放列表**，
+        里面列的是一串分片（.ts / .m4s）。嗅探面板里看到的「300 B」
+        「279 KB」那些就是其中一个分片 —— 直接推送只能下到一个碎片。
+        ffmpeg 自带 hls / dash demuxer：跟着 playlist 取分片、AES-128
+        加密流也能解密，最后封装成 mp4。Ghost Downloader 用 N_m3u8DL-RE
+        做的是同一件事。
+        """
+        import subprocess
+        import threading
+
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            self.status = "error"
+            self.error = "找不到 ffmpeg（app 的 bin/ffmpeg 缺失），无法下载流媒体"
+            self._emit("error")
+            return
+
+        stem = "zdm-" + self.id
+        out = os.path.join(self.directory, stem + ".mp4")
+        cmd = [
+            ffmpeg, "-hide_banner", "-nostdin", "-y",
+            # info 级别才会打印 "Duration: 00:10:00.00" —— 那是流媒体唯一的
+            # 总长度线索（事先拿不到 Content-Length），靠它算百分比。
+            # -nostats 已经把逐帧的 stats 行关掉了，剩下的输出很少。
+            "-loglevel", "info",
+            "-progress", "pipe:1", "-nostats",
+        ]
+        # 自定义请求头：m3u8 所在的 CDN 经常要 Referer 才给 playlist，
+        # 直播/会员流还要 Cookie。ffmpeg 的 hls demuxer 用 -headers 传。
+        hdrs = self._http_headers()
+        if hdrs:
+            blob = "".join("%s: %s\r\n" % (k, v) for k, v in hdrs.items())
+            cmd += ["-headers", blob]
+        if self.proxy:
+            cmd += ["-http_proxy", self.proxy]
+        cmd += ["-i", self.url, "-c", "copy", "-movflags", "+faststart", out]
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                **_no_window(),
+            )
+        except Exception as e:  # noqa: BLE001
+            self.status = "error"
+            self.error = "启动 ffmpeg 失败：%s" % e
+            self._emit("error")
+            return
+        self._stream_proc = proc
+
+        err_lines: list = []
+
+        def read_err() -> None:
+            try:
+                for raw in proc.stderr:
+                    line = raw.decode("utf-8", "ignore").strip()
+                    if not line:
+                        continue
+                    err_lines.append(line)
+                    if len(err_lines) > 40:
+                        del err_lines[:20]
+                    m = _RE_DURATION.search(line)
+                    if m:
+                        self._stream_duration = _parse_hms(m.group(1))
+            except Exception:  # noqa: BLE001
+                pass
+
+        def read_out() -> None:
+            try:
+                for raw in proc.stdout:
+                    line = raw.decode("utf-8", "ignore").strip()
+                    if "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    k = k.strip()
+                    v = v.strip()
+                    try:
+                        if k == "out_time_us":
+                            self._stream_time = int(v) / 1e6
+                        elif k == "total_size":
+                            self._stream_bytes = int(v)
+                        elif k == "speed" and v.endswith("x"):
+                            self._yt_speed = float(v[:-1] or 0)
+                    except ValueError:
+                        continue
+                    if self._stop.is_set():
+                        return
+                    self._emit("progress")
+            except Exception:  # noqa: BLE001
+                pass
+
+        t_err = threading.Thread(target=read_err, daemon=True)
+        t_out = threading.Thread(target=read_out, daemon=True)
+        t_err.start()
+        t_out.start()
+        try:
+            proc.wait()
+        finally:
+            t_err.join(timeout=1.0)
+            t_out.join(timeout=1.0)
+            self._stream_proc = None
+
+        if self._stop.is_set():
+            try:
+                if os.path.exists(out):
+                    os.remove(out)
+            except OSError:
+                pass
+            self.status = "paused" if self.status != "canceled" else "canceled"
+            self._emit(self.status)
+            return
+
+        if proc.returncode != 0 or not os.path.exists(out):
+            msg = "；".join(err_lines[-6:]) if err_lines else ""
+            self.status = "error"
+            self.error = (
+                "流媒体下载失败（ffmpeg 退出码 %s）%s"
+                % (proc.returncode, ("：" + msg) if msg else "")
+            )[:600]
+            self._emit("error")
+            return
+
+        # 换成用户看得懂的文件名
+        want = str(self.filename or "").strip()
+        if want.lower() in ("", "download"):
+            want = os.path.basename(out)
+        final = _unique_name(self.directory, want)
+        target = os.path.join(self.directory, final)
+        try:
+            os.replace(out, target)
+        except OSError:
+            try:
+                shutil.move(out, target)
+            except OSError as e:
+                self.status = "error"
+                self.error = "文件下完了但改名失败：%s" % e
+                self._emit("error")
+                return
+        self.filename = final
+        try:
+            self.size = os.path.getsize(target)
+        except OSError:
+            pass
+        self._stream_bytes = self.size
+        self.status = "completed"
+        self.completed_at = time.time()
+        self.error = None
+        self._emit("completed")
 
     def _yt_progress(self, d: dict) -> None:
         """yt-dlp 子进程的进度回报（格式见 ytdlp_bin._parse_progress）。"""
@@ -1736,6 +1955,7 @@ class Download:
     def cancel(self, remove_files: bool = True) -> None:
         self._stop.set()
         self._kill_yt_proc()
+        self._kill_stream_proc()
         self.status = "canceled"
         self._close_fd()
         if remove_files:
@@ -1757,6 +1977,21 @@ class Download:
         try:
             if proc.poll() is None:
                 proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _kill_stream_proc(self) -> None:
+        """停掉 ffmpeg 子进程（流媒体任务）。"""
+        proc = getattr(self, "_stream_proc", None)
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
         except Exception:  # noqa: BLE001
             pass
 
