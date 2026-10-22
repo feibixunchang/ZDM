@@ -362,10 +362,29 @@
     return isAudio ? "m4a" : "mp4";
   }
 
+  /* 抖音信息流的播放弹窗 URL 形如 douyin.com/jingxuan?modal_id=<aweme_id>
+     （/discover 等同理），yt-dlp 只认 douyin.com/video/<aweme_id>，
+     原样丢过去就是 "Unsupported URL"。modal_id 就是 aweme_id，换过去即可。
+     referer 仍用原始地址（防盗链按它校验），只有交给解析器的要归一化。 */
+  function canonicalPageUrl() {
+    try {
+      const p = new URL(location.href);
+      if (!/(^|\.)douyin\.com$/.test(p.hostname)) return location.href;
+      const mid = p.searchParams.get("modal_id");
+      if (mid && /^\d+$/.test(mid) && !p.pathname.startsWith("/video/")) {
+        return "https://www.douyin.com/video/" + mid;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return location.href;
+  }
+
   async function resolveAndPush() {
     const height = Number(shadow.querySelector(".h").value) || 1080;
     setTip("正在解析页面…");
-    const r = await send({ type: "zdm-youtube-resolve", url: location.href });
+    const page = canonicalPageUrl();
+    const r = await send({ type: "zdm-youtube-resolve", url: page });
     if (!r || !r.ok || !(r.formats || []).length) {
       setTip("解析失败：" + ((r && r.error) || "没有可用格式") + "，可改用下面两项", true);
       return;
@@ -393,7 +412,8 @@
         kind: isAudioPick ? "audio" : "video",
         // DASH 站点：yt-dlp 已经把配套音轨配好了，不带就下成无声
         audio_url: isAudioPick ? undefined : pick.audio_url || undefined,
-        page_url: location.href,
+        // 归一化后的地址：后端 yt_page 通道按它再走一次 yt-dlp
+        page_url: page,
         height: Number(pick.height) || height,
       },
     });

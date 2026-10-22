@@ -154,6 +154,38 @@ def _resolve_retryable(err: str) -> bool:
     )
 
 
+def _canonical_page_url(url: str) -> str:
+    """把站点特有的播放弹窗 URL 归一成 yt-dlp 认得的规范页地址。
+
+    抖音信息流的播放弹窗是 douyin.com/jingxuan?modal_id=<aweme_id>
+    （/discover 等同理），yt-dlp 只认 douyin.com/video/<aweme_id>，
+    原样丢过去就是 "Unsupported URL"。modal_id 就是 aweme_id，换过去即可。
+    """
+    # 局部 import：本模块只用这一处 urllib，且 import 放在 try 外面 ——
+    # 放在里面一旦拼错名字，NameError 会被下面的 except 吞掉、静默返回原 URL。
+    import urllib.parse as up
+
+    try:
+        p = up.urlparse(url)
+    except Exception:  # noqa: BLE001
+        return url
+    host = (p.hostname or "").lower()
+    # 注意用 endswith 而不是 re.match：re.match 从头匹配，"www.douyin.com"
+    # 匹配不上 "(^|\.)douyin\.com$"（JS 的 /.../.test 是搜索语义，没这个问题）。
+    if not (host == "douyin.com" or host.endswith(".douyin.com")):
+        return url
+    if p.path.startswith("/video/"):
+        return url
+    try:
+        q = up.parse_qs(p.query)
+    except Exception:  # noqa: BLE001
+        return url
+    mid = (q.get("modal_id") or [""])[0]
+    if mid.isdigit():
+        return "https://www.douyin.com/video/" + mid
+    return url
+
+
 def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None) -> Dict:
     """Resolve a YouTube watch/shorts URL into a ZDM-format list.
 
@@ -162,6 +194,8 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
     Each "video" entry carries ``audio_url`` (best audio-only stream) so the
     engine muxes sound in.
     """
+    # 归一化放在缓存查询之前：同一视频的弹窗 URL 和规范 URL 应命中同一份缓存。
+    url = _canonical_page_url(url)
     hit = _CACHE.get(url)
     if hit and time.time() - hit[0] < _CACHE_TTL:
         return hit[1]
