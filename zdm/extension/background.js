@@ -436,6 +436,9 @@ function rememberMedia(tabId, item) {
     list = [];
     snifferByTab.set(tabId, list);
   }
+  /* 发现时间：播放器按钮要靠它判断「哪条 HLS 播放列表对应当前正在播的
+     视频」——页面上多个视频轮流播时，只有最新发的那条 playlist 是对的。 */
+  if (!item.at) item.at = Date.now();
   // 这张 tab 已经知道「itag → 字节数」的话，新条目一进来就补上大小，
   // 不要等页面的表格同步（那一步只在 boot 时跑一次，常常赶在条目之前）。
   if (!item.size) {
@@ -1515,6 +1518,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 剩下的交给桌面端按 URL 精确问一遍。
       probeSizesViaBackend(tabId);
     });
+    return true;
+  }
+  /* 扫图片得到的条目是 content script 本地的（from: "dom-img"），从来没进过
+     background 的嗅探列表，所以大小探测那条路（probeSize /
+     probeSizesViaBackend）根本不会跑到它们 —— 列表里一律显示「大小未知」。
+     这里让 content script 把图片 URL 交上来，由桌面端问真实体积
+     （桌面端不受 CORS 限制，扩展侧 fetch 读不到 content-range）。 */
+  if (msg.type === "sniffer-probe-sizes") {
+    (async () => {
+      const urls = (msg.urls || [])
+        .filter((u) => /^https?:\/\//i.test(u))
+        .slice(0, 12);
+      if (!urls.length) {
+        sendResponse({ ok: true, sizes: {} });
+        return;
+      }
+      let referer = "";
+      try {
+        const tab = await chrome.tabs.get(sender.tab && sender.tab.id);
+        referer = (tab && tab.url) || "";
+      } catch (_) {
+        /* 标签页关了也没关系 */
+      }
+      let r = null;
+      try {
+        r = await api("probe-size", { urls, referer });
+      } catch (_) {
+        r = null;
+      }
+      sendResponse({ ok: true, sizes: (r && r.sizes) || {} });
+    })();
     return true;
   }
   // 媒体嗅探：content script 来要当前标签页已发现的媒体。

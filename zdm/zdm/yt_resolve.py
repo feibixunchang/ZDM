@@ -196,6 +196,27 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
     """
     # 归一化放在缓存查询之前：同一视频的弹窗 URL 和规范 URL 应命中同一份缓存。
     url = _canonical_page_url(url)
+    if os.environ.get("ZDM_DEBUG_COOKIE"):
+        import sys
+
+        domains = sorted(
+            {
+                ln.split("\t")[0].lstrip("#HttpOnly_.")
+                for ln in (cookie or "").splitlines()
+                if "\t" in ln
+            }
+        )
+        print(
+            "[cookie] host=%s len=%d netscape_domains=%s head=%r"
+            % (
+                _host_of(url),
+                len(cookie or ""),
+                domains[:8],
+                (cookie or "")[:160],
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
     hit = _CACHE.get(url)
     if hit and time.time() - hit[0] < _CACHE_TTL:
         return hit[1]
