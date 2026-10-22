@@ -236,6 +236,11 @@
                 <span class="d">只用播放器正在播的那条地址</span></span>
               <span class="k"></span>
             </button>
+            <button class="act" type="button" data-act="sniffed">
+              <span><span class="t">下载嗅探到的视频轨</span>
+                <span class="d">取本页最新抓到的那条视频直链（带声音取决于站点）</span></span>
+              <span class="k"></span>
+            </button>
             <button class="act" type="button" data-act="panel">
               <span><span class="t">本页所有媒体 / 图片</span>
                 <span class="d">打开嗅探面板，可勾选批量下载</span></span>
@@ -551,12 +556,60 @@
     }
   }
 
+  /* 嗅探到的最新视频直链。
+   *
+   *  抖音 / 快手的网页播放器给的往往就是**完整 mp4 直链**（不是 m3u8），
+   *  而且它出现在 <video> 的 currentSrc 是 blob: 的页面上 —— 于是
+   *  「直接下载当前视频」拿不到地址，但嗅探列表里有。这种站点走这条
+   *  路最快。 */
+  async function sniffedVideo() {
+    const api = window.__zdmSniffer;
+    if (!api || typeof api.items !== "function") return null;
+    let list = [];
+    try {
+      list = api.items() || [];
+    } catch (_) {
+      return null;
+    }
+    const vids = list.filter((x) => x && x.kind === "video" && x.url);
+    if (!vids.length) return null;
+    vids.sort((a, b) => (b.at || 0) - (a.at || 0));
+    return vids[0];
+  }
+
+  async function pushSniffed() {
+    const it = await sniffedVideo();
+    if (!it) {
+      setTip("这一页还没嗅到视频直链，播放几秒再试", true);
+      return;
+    }
+    const res = await send({
+      type: "sniffer-push",
+      item: {
+        url: it.url,
+        filename: pageTitle() + ".mp4",
+        referer: location.href,
+        cookie: document.cookie || undefined,
+        source: "playerbtn",
+        kind: "video",
+      },
+    });
+    if (res && res.ok) {
+      setTip("已推送给 ZDM");
+      closePanel();
+    } else {
+      setTip("推送失败，请确认 ZDM 正在运行", true);
+    }
+  }
+
   async function act(what) {
     if (busy) return;
     busy = true;
     try {
       if (what === "hls") {
         await pushStream();
+      } else if (what === "sniffed") {
+        await pushSniffed();
       } else if (what === "resolve") {
         await resolveAndPush();
       } else if (what === "direct") {
