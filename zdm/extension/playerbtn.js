@@ -531,10 +531,26 @@
     return streams[0];
   }
 
+  /* 播放列表的判定：Twitter 这类站点的 <video> 直接指 m3u8（不用 MSE），
+     把它当普通视频推送，后端会原样把**播放列表文本**存成 .mp4 ——
+     用户点开发现是个 .txt。必须按 hls/dash 派发。 */
+  function playlistKind(url) {
+    if (!url) return "";
+    if (/\.m3u8(?:$|[?#])/i.test(url)) return "hls";
+    if (/\.mpd(?:$|[?#])/i.test(url)) return "dash";
+    return "";
+  }
+
   async function pushStream() {
     const s = await streamForCurrent();
     if (!s) {
-      setTip("这一页还没嗅到播放列表（HLS/DASH）。播放几秒再试，或用下面的其它方式", true);
+      const v = await sniffedVideo();
+      setTip(
+        v
+          ? "这一页没有播放列表（该站点给的是直链），请用下面的「下载嗅探到的视频轨」"
+          : "这一页还没嗅到播放列表或视频轨。播放几秒再试",
+        true
+      );
       return;
     }
     const res = await send({
@@ -583,6 +599,9 @@
       setTip("这一页还没嗅到视频直链，播放几秒再试", true);
       return;
     }
+    // 兜底：万一分类没认出它是播放列表，按 URL 后缀再判一次，
+    // 别把 m3u8 文本存成 mp4。
+    const pk = playlistKind(it.url);
     const res = await send({
       type: "sniffer-push",
       item: {
@@ -591,7 +610,7 @@
         referer: location.href,
         cookie: document.cookie || undefined,
         source: "playerbtn",
-        kind: "video",
+        kind: pk || "video",
       },
     });
     if (res && res.ok) {
@@ -619,22 +638,29 @@
           return;
         }
         const isAudio = media.tagName === "AUDIO";
+        // 有的站点（Twitter/X 就是这样）<video>.src 直接指向 m3u8，
+        // 它没用 MSE 而是浏览器原生播 HLS。这种 URL 当普通 mp4 存
+        // 下来就只是个播放列表文本 —— 按后缀识别，走 hls/dash 通道
+        // 交给 ffmpeg 跟着分片拉、合并成真正的 mp4。
+        const pk = isAudio ? "" : playlistKind(url);
         const res = await send({
           type: "sniffer-push",
           item: {
             url,
-            filename: pageTitle() + "." + extOfUrl(url, isAudio),
+            filename: pageTitle() + "." + (pk ? "mp4" : extOfUrl(url, isAudio)),
             referer: location.href,
             cookie: document.cookie || undefined,
             source: "playerbtn",
-            kind: isAudio ? "audio" : "video",
+            kind: isAudio ? "audio" : pk || "video",
           },
         });
         setTip(
           res && res.ok
-            ? isAudio
-              ? "已推送"
-              : "已推送（若没声音，是站点把音画分开了）"
+            ? pk
+              ? "已推送（HLS 流，ffmpeg 合并中）"
+              : isAudio
+                ? "已推送"
+                : "已推送（若没声音，是站点把音画分开了）"
             : "推送失败",
           !(res && res.ok)
         );
