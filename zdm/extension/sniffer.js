@@ -276,7 +276,7 @@
           <button class="x" type="button" title="关闭">✕</button></div>
         <ul class="list"></ul>
         <div class="ft">
-          <span class="sp">HLS / DASH 自适应流请用「解析此页面」</span>
+          <span class="sp">HLS / DASH 整条推送，后端自动取分片并合并</span>
           <button class="ftbtn" type="button" data-act="all" hidden>全选</button>
           <button class="ftbtn" type="button" data-act="sel" hidden>下载所选 0</button>
         </div>
@@ -320,7 +320,13 @@
     if (titleEl) titleEl.textContent = n ? `检测到 ${n} 个媒体` : "暂无媒体";
   }
 
-  const KIND_LABEL = { video: "视频", audio: "音频", image: "图片" };
+  const KIND_LABEL = {
+    video: "视频",
+    audio: "音频",
+    image: "图片",
+    hls: "HLS 流",
+    dash: "DASH 流",
+  };
   const KIND_ICON = {
     video:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m10 8 6 4-6 4V8z"/><rect x="2" y="4" width="20" height="16" rx="2"/></svg>',
@@ -490,6 +496,25 @@
     return "jpg";
   }
 
+  /* 页面已经加载过的资源，浏览器知道它们到底多大。
+     DOM 扫描出来的图片没有响应头（Content-Length 拿不到），所以列表里
+     一律显示「大小未知」；performance 的 resource timing 里有
+     encodedBodySize / transferSize，用它补上。 */
+  function perfSizes() {
+    const m = new Map();
+    try {
+      const es = performance.getEntriesByType("resource") || [];
+      for (const e of es) {
+        if (!e || !e.name) continue;
+        const sz = e.encodedBodySize || e.transferSize || e.decodedBodySize || 0;
+        if (sz > 0) m.set(e.name, sz);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return m;
+  }
+
   /* 按需扫图片。图库/壁纸/漫画/商品详情页一页几百张，全部交给 webRequest
      会把列表淹掉（而且大半是图标和头像），所以只在用户点了「扫图片」时扫。
      判据：渲染面积足够大；懒加载还没拿到尺寸的（naturalWidth=0）保留，
@@ -500,6 +525,7 @@
     const page = location.href;
     const out = [];
     const seen = new Set();
+    const sizes = perfSizes();
     const add = (raw, el) => {
       let abs;
       try {
@@ -525,7 +551,7 @@
       out.push({
         url: abs,
         kind: "image",
-        size: 0,
+        size: sizes.get(abs) || 0,
         name: name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120),
         from: "dom-img",
       });
