@@ -81,6 +81,39 @@ function stripRange(u) {
   }
 }
 
+/** 可解析主域（去掉子域）：a.b.com / c.b.com → b.com */
+function registrableDomain(host) {
+  const p = String(host || "").split(".").filter(Boolean);
+  return p.length <= 2 ? p.join(".") : p.slice(-2).join(".");
+}
+/** URL 路径的前 n 段。/20241010/ab/xyz.mp4 → "20241010/ab" */
+function pathHead(u, n) {
+  try {
+    return new URL(u).pathname.split("/").filter(Boolean).slice(0, n).join("/");
+  } catch (_) {
+    return "";
+  }
+}
+/** 一条音频轨与一条视频轨「是不是同一批 DASH 分发」的置信分。
+ *
+ *  完全同 host → 100（同一套分发域名，最强信号）；
+ *  跨子域但同主域（CDN 多域名）时看目录：路径前两段相同 → 100，
+ *  只第一段相同 → 75，完全不同 → 60。
+ *  调用方要求 ≥100 才配对，所以「同主域但目录完全不同」这种
+ *  （多半是页面背景音乐）会被挡掉。 */
+function dashAffinity(audioUrl, videoUrl) {
+  const ah = hostOf(audioUrl);
+  const vh = hostOf(videoUrl);
+  if (!ah || !vh) return 0;
+  if (ah === vh) return 100;
+  if (registrableDomain(ah) !== registrableDomain(vh)) return 0;
+  const a2 = pathHead(audioUrl, 2);
+  const v2 = pathHead(videoUrl, 2);
+  if (a2 && a2 === v2) return 100;
+  if (pathHead(audioUrl, 1) && pathHead(audioUrl, 1) === pathHead(videoUrl, 1)) return 75;
+  return 60;
+}
+
 /** 在同一个标签页的嗅探结果里替一条视频轨找配套音频轨。
  *
  *  DASH 把画面和声音拆成两次请求：嗅探面板里能点「推送」的只有视频轨，
@@ -88,8 +121,11 @@ function stripRange(u) {
  *  嗅探面板推送，以前后端收到的 audio_url 是空的，于是下下来只有画面。
  *
  *  B站按 cid 配对（URL 路径里的 /99/91/<cid>/），码率高的优先；
- *  YouTube 没有 cid，取同批里体积最大的一条音频轨。
- */
+ *  YouTube 没有 cid，取同批里体积最大的一条音频轨；
+ *  其它站点（抖音 / 快手 / Facebook / X / 新闻站……）走通用规则：
+ *  按 DASH 亲和分筛选，并在列表里从视频轨的位置向两侧就近找 ——
+ *  音视频轨是几乎同时发出的请求，在插入顺序里必然相邻，这一条同时
+ *  保证了「同一次播放」而不是「这个页面很久以前放过的背景音乐」。 */
 function audioSiblingFor(tabId, url) {
   if (tabId == null || !url) return null;
   const list = snifferByTab.get(tabId) || [];
@@ -109,7 +145,22 @@ function audioSiblingFor(tabId, url) {
     audios.sort((a, b) => (b.size || 0) - (a.size || 0));
     return audios[0];
   }
-  return null;
+  /* 通用站点：亲和分 ≥100（同 host，或同主域且同目录）。
+     从视频轨所在位置向两侧扩散，取最近的那条 —— 相邻即同时刻。
+     视频轨不在列表里时（at<0）相邻性无从判断，宁可不配：
+     乱配一条背景音乐进去，合出来的文件比没声音更糟。 */
+  const at = list.findIndex((it) => it && it.url === url);
+  if (at < 0) return null;
+  const audioIdx = audios
+    .map((a) => ({ i: list.indexOf(a), a }))
+    .filter((x) => x.i >= 0 && dashAffinity(x.a.url, url) >= 100)
+    .sort((x, y) => {
+      const dx = Math.abs(x.i - at);
+      const dy = Math.abs(y.i - at);
+      // 近的优先；同样近就取体积大的（码率高的音轨）
+      return dx - dy || (y.a.size || 0) - (x.a.size || 0);
+    });
+  return audioIdx.length ? audioIdx[0].a : null;
 }
 const MIN_MEDIA_BYTES = 64 * 1024; // 小于这个的多半是图标、埋点、预告片
 const MAX_PER_TAB = 60;
@@ -1377,10 +1428,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       // 推送的若是视频轨：优先用调用方给的音频，否则在嗅探列表里自动配对。
       // DASH 音频是另一条请求，不配对就必然「下完没声音」。
+      // 只对视频轨配对 —— 图片/音频条目没有「配套音轨」这个概念。
       let audioUrl = item.audio_url || "";
       let url = item.url;
       if (YT_MEDIA_HOST.test(hostOf(url))) url = stripRange(url);
-      if (!audioUrl && item.kind !== "audio") {
+      if (!audioUrl && item.kind === "video") {
         const sib = audioSiblingFor(tabId, item.url);
         if (sib) {
           audioUrl = YT_MEDIA_HOST.test(hostOf(sib.url)) ? stripRange(sib.url) : sib.url;

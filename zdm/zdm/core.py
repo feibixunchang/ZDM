@@ -1482,12 +1482,27 @@ class Download:
         headers = dict(self.headers or {})
         # CDN 对 Referer 极敏感（B站 bilivideo / YouTube googlevideo 缺了就
         # 403）。没带就按站点补一个 —— 否则音轨必然下不下来。
+        # B站 / YouTube 有固定主页可写；其它站点（抖音 / 快手 / Facebook /
+        # X / 各种新闻站）用「视频轨自己的来源页」当 Referer —— 音轨和页面
+        # 同源时这一定是服务器认得的那个值，比留空好。
         if not any(k.lower() == "referer" for k in headers):
             host = (urllib.parse.urlparse(self.audio_url).hostname or "").lower()
             if "bilivideo" in host or "bilibili" in host:
                 headers["Referer"] = "https://www.bilibili.com/"
             elif "googlevideo" in host or "youtube" in host:
                 headers["Referer"] = "https://www.youtube.com/"
+            else:
+                # 其它站点：用任务自带页面地址的 origin。页面地址在
+                # yt_page 里（粘贴链接解析进来的任务都带），音轨 CDN 与
+                # 它同源时这个 Referer 一定被服务器认。
+                page = self.yt_page or ""
+                if page:
+                    try:
+                        p = urllib.parse.urlparse(page)
+                        if p.scheme and p.netloc:
+                            headers["Referer"] = "%s://%s/" % (p.scheme, p.netloc)
+                    except Exception:
+                        pass
         if not any(k.lower() == "user-agent" for k in headers):
             headers["User-Agent"] = DEFAULT_UA
 
