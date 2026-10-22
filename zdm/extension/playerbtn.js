@@ -522,9 +522,10 @@
    *  一条（页面刚发的请求，对应的就是当前正在播的视频），推给后端由
    *  ffmpeg 整条拉下来。
    *
-   *  为什么需要它：yt-dlp 只覆盖 2000+ 站点里的**一部分**——实测快手
-   *  只有 generic extractor（Unsupported URL），X 必须是具体推文页
-   *  （x.com/home 直接 Unsupported）。而嗅探到的播放列表不挑站点。 */
+   *  X（Twitter）的音视频是两份独立的播放列表（/pl/avc1/<分辨率>/ 与
+   *  /pl/mp4a/128000/），最新的一条可能恰好是音频轨 —— 只拉它就是
+   *  「只有声音」。挑主轨+配音轨的逻辑在嗅探脚本里（pickStreamPair），
+   *  这里直接复用。 */
   async function streamForCurrent() {
     const api = window.__zdmSniffer;
     if (!api || typeof api.items !== "function") return null;
@@ -533,6 +534,13 @@
       list = api.items() || [];
     } catch (_) {
       return null;
+    }
+    if (typeof api.pickStreamPair === "function") {
+      try {
+        return api.pickStreamPair(list);
+      } catch (_) {
+        /* fall through */
+      }
     }
     const streams = list.filter(
       (x) => x && (x.kind === "hls" || x.kind === "dash") && x.url
@@ -575,10 +583,17 @@
         cookie: document.cookie || undefined,
         source: "playerbtn",
         kind: s.kind,
+        // X（Twitter）的音频是另一份播放列表（/pl/mp4a/…），带上让
+        // 后端两份各拉一遍再合流，不然「有画面没声音」。
+        audio_url: s.audioUrl || undefined,
       },
     });
     if (res && res.ok) {
-      setTip("已推送给 ZDM：后端会取分片并合并成 mp4");
+      setTip(
+        s.audioUrl
+          ? "已推送给 ZDM：音视频两轨都会拉取并合并成 mp4"
+          : "已推送给 ZDM：后端会取分片并合并成 mp4"
+      );
       closePanel();
     } else {
       setTip("推送失败，请确认 ZDM 正在运行", true);

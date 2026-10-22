@@ -27,6 +27,8 @@ def _no_window() -> dict:
 # ffmpeg 的 stderr 头里有 "Duration: 00:01:20.00" —— 流媒体的总时长，
 # 事先拿不到总大小，只能靠它算百分比。
 _RE_DURATION = _re.compile(r"Duration:\s*(\d+:\d+:\d+(?:\.\d+)?)")
+# 音轨本身也是条播放列表（X/Twitter 的音频轨是 /pl/mp4a/128000/xxx.m3u8）
+_PLAYLIST_URL_RE = _re.compile(r"\.(m3u8|mpd)(?:$|[?#])", _re.IGNORECASE)
 
 
 def _parse_hms(text: str) -> float:
@@ -641,6 +643,9 @@ class Download:
         self._stream_bytes = 0
         self._stream_time = 0.0
         self._stream_duration = 0.0
+        # 多阶段拉流（视频轨+音频轨两条播放列表）时的**直接**百分比。
+        # -1 表示未启用，progress 走「时长占比」的老路。
+        self._stream_progress = -1.0
 
         self.size = 0
         self.status = "queued"
@@ -817,7 +822,13 @@ class Download:
             if not self.size:
                 return 0.0
             return min(99.5, round(self.downloaded / self.size * 100, 2))
-        # 流媒体：总大小事先不知道，用「已播时长 / 总时长」算百分比
+        # 流媒体：总大小事先不知道，用「已播时长 / 总时长」算百分比。
+        # 多阶段拉流（视频轨+音频轨）时 _stream_progress 已经是映射好的
+        # 整体百分比（视频 0-85%、音频 85-95%、合流 95-100），优先用它。
+        if self._stream_progress >= 0:
+            if self.status == "completed":
+                return 100.0
+            return min(99.5, round(self._stream_progress, 2))
         if self._stream_duration:
             if self.status == "completed":
                 return 100.0
@@ -1116,6 +1127,7 @@ class Download:
         self._stream_bytes = 0
         self._stream_time = 0.0
         self._stream_duration = 0.0
+        self._stream_progress = -1.0
         self._emit("started")
         self._run_stream()
 
@@ -1128,6 +1140,12 @@ class Download:
         ffmpeg 自带 hls / dash demuxer：跟着 playlist 取分片、AES-128
         加密流也能解密，最后封装成 mp4。Ghost Downloader 用 N_m3u8DL-RE
         做的是同一件事。
+
+        音视频分开的站（实测 X/Twitter：视频是 /pl/avc1/<分辨率>/xxx.m3u8、
+        音频是 /pl/mp4a/128000/xxx.m3u8，两份独立的播放列表）：只拉视频
+        那份就是「有画面没声音」，只拉音频那份就是「只有声音」—— 用户
+        两种都撞到过。audio_url 也是播放列表时，两份各拉一遍再合流；
+        合流失败就退回「无声但能播」的视频文件（和 _mux_audio 同一哲学）。
         """
         import subprocess
         import threading
@@ -1141,110 +1159,202 @@ class Download:
 
         stem = "zdm-" + self.id
         out = os.path.join(self.directory, stem + ".mp4")
-        cmd = [
-            ffmpeg, "-hide_banner", "-nostdin", "-y",
-            # info 级别才会打印 "Duration: 00:10:00.00" —— 那是流媒体唯一的
-            # 总长度线索（事先拿不到 Content-Length），靠它算百分比。
-            # -nostats 已经把逐帧的 stats 行关掉了，剩下的输出很少。
-            "-loglevel", "info",
-            "-progress", "pipe:1", "-nostats",
-        ]
         # 自定义请求头：m3u8 所在的 CDN 经常要 Referer 才给 playlist，
         # 直播/会员流还要 Cookie。ffmpeg 的 hls demuxer 用 -headers 传。
         hdrs = self._http_headers()
+        hdr_blob = ""
         if hdrs:
-            blob = "".join("%s: %s\r\n" % (k, v) for k, v in hdrs.items())
-            cmd += ["-headers", blob]
-        if self.proxy:
-            cmd += ["-http_proxy", self.proxy]
-        cmd += ["-i", self.url, "-c", "copy", "-movflags", "+faststart", out]
+            hdr_blob = "".join("%s: %s\r\n" % (k, v) for k, v in hdrs.items())
 
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                **_no_window(),
-            )
-        except Exception as e:  # noqa: BLE001
-            self.status = "error"
-            self.error = "启动 ffmpeg 失败：%s" % e
-            self._emit("error")
-            return
-        self._stream_proc = proc
+        audio_url = (self.audio_url or "").strip()
+        audio_is_pl = bool(_PLAYLIST_URL_RE.search(audio_url))
+        tmpdir = ""
+        v_tmp = a_tmp = ""
+        if audio_is_pl:
+            import tempfile
+            tmpdir = tempfile.mkdtemp(prefix="zdmstream")
+            # 中间产物用 mkv：-c copy 对乱七八糟的编码组合最宽容，
+            # 最后合成 mp4 那一步再挑错。
+            v_tmp = os.path.join(tmpdir, "video.mkv")
+            a_tmp = os.path.join(tmpdir, "audio.mka")
 
-        err_lines: list = []
+        def pull(url: str, dst: str, lo: float, hi: float, errs: list) -> int:
+            """跑一段 ffmpeg 拉流，进度线性映射到 [lo, hi]。返回退出码。"""
+            cmd = [
+                ffmpeg, "-hide_banner", "-nostdin", "-y",
+                # info 级别才会打印 "Duration: 00:10:00.00" —— 那是流媒体唯一的
+                # 总长度线索（事先拿不到 Content-Length），靠它算百分比。
+                # -nostats 已经把逐帧的 stats 行关掉了，剩下的输出很少。
+                "-loglevel", "info",
+                "-progress", "pipe:1", "-nostats",
+            ]
+            if hdr_blob:
+                cmd += ["-headers", hdr_blob]
+            if self.proxy:
+                cmd += ["-http_proxy", self.proxy]
+            cmd += ["-i", url, "-c", "copy"]
+            # 直接产出 mp4 的那一路（单播放列表路径）保留 faststart；
+            # 中间暂存是 mkv，不需要。
+            if dst.lower().endswith(".mp4"):
+                cmd += ["-movflags", "+faststart"]
+            cmd += [dst]
 
-        def read_err() -> None:
             try:
-                for raw in proc.stderr:
-                    line = raw.decode("utf-8", "ignore").strip()
-                    if not line:
-                        continue
-                    err_lines.append(line)
-                    if len(err_lines) > 40:
-                        del err_lines[:20]
-                    m = _RE_DURATION.search(line)
-                    if m:
-                        self._stream_duration = _parse_hms(m.group(1))
-            except Exception:  # noqa: BLE001
-                pass
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    **_no_window(),
+                )
+            except Exception as e:  # noqa: BLE001
+                errs.append("启动 ffmpeg 失败：%s" % e)
+                return -1
+            self._stream_proc = proc
 
-        def read_out() -> None:
+            def read_err() -> None:
+                try:
+                    for raw in proc.stderr:
+                        line = raw.decode("utf-8", "ignore").strip()
+                        if not line:
+                            continue
+                        errs.append(line)
+                        if len(errs) > 40:
+                            del errs[:20]
+                        m = _RE_DURATION.search(line)
+                        if m:
+                            self._stream_duration = _parse_hms(m.group(1))
+                except Exception:  # noqa: BLE001
+                    pass
+
+            def read_out() -> None:
+                try:
+                    for raw in proc.stdout:
+                        line = raw.decode("utf-8", "ignore").strip()
+                        if "=" not in line:
+                            continue
+                        k, _, v = line.partition("=")
+                        k = k.strip()
+                        v = v.strip()
+                        try:
+                            if k == "out_time_us":
+                                self._stream_time = int(v) / 1e6
+                            elif k == "total_size":
+                                self._stream_bytes = int(v)
+                            elif k == "speed" and v.endswith("x"):
+                                self._yt_speed = float(v[:-1] or 0)
+                        except ValueError:
+                            continue
+                        if self._stop.is_set():
+                            return
+                        # 多阶段进度：本阶段「已播时长/总时长」线性映射到
+                        # [lo, hi] —— 视频轨 0-85%，音频轨 85-95%。
+                        if self._stream_duration > 0:
+                            frac = min(1.0, self._stream_time / self._stream_duration)
+                            self._stream_progress = lo + (hi - lo) * frac
+                        self._emit("progress")
+                except Exception:  # noqa: BLE001
+                    pass
+
+            t_err = threading.Thread(target=read_err, daemon=True)
+            t_out = threading.Thread(target=read_out, daemon=True)
+            t_err.start()
+            t_out.start()
             try:
-                for raw in proc.stdout:
-                    line = raw.decode("utf-8", "ignore").strip()
-                    if "=" not in line:
-                        continue
-                    k, _, v = line.partition("=")
-                    k = k.strip()
-                    v = v.strip()
-                    try:
-                        if k == "out_time_us":
-                            self._stream_time = int(v) / 1e6
-                        elif k == "total_size":
-                            self._stream_bytes = int(v)
-                        elif k == "speed" and v.endswith("x"):
-                            self._yt_speed = float(v[:-1] or 0)
-                    except ValueError:
-                        continue
-                    if self._stop.is_set():
-                        return
-                    self._emit("progress")
-            except Exception:  # noqa: BLE001
-                pass
+                proc.wait()
+            finally:
+                t_err.join(timeout=1.0)
+                t_out.join(timeout=1.0)
+                self._stream_proc = None
+            return proc.returncode
 
-        t_err = threading.Thread(target=read_err, daemon=True)
-        t_out = threading.Thread(target=read_out, daemon=True)
-        t_err.start()
-        t_out.start()
-        try:
-            proc.wait()
-        finally:
-            t_err.join(timeout=1.0)
-            t_out.join(timeout=1.0)
-            self._stream_proc = None
-
-        if self._stop.is_set():
-            try:
-                if os.path.exists(out):
-                    os.remove(out)
-            except OSError:
-                pass
-            self.status = "paused" if self.status != "canceled" else "canceled"
-            self._emit(self.status)
-            return
-
-        if proc.returncode != 0 or not os.path.exists(out):
-            msg = "；".join(err_lines[-6:]) if err_lines else ""
-            self.status = "error"
-            self.error = (
-                "流媒体下载失败（ffmpeg 退出码 %s）%s"
-                % (proc.returncode, ("：" + msg) if msg else "")
-            )[:600]
-            self._emit("error")
-            return
+        errs: list = []
+        self._stream_progress = 0.0
+        if audio_is_pl:
+            # 阶段一：视频轨（大头，0-85%）
+            rc = pull(self.url, v_tmp, 0.0, 85.0, errs)
+            if self._stop.is_set():
+                self._cleanup_stream_tmp(tmpdir)
+                self.status = "paused" if self.status != "canceled" else "canceled"
+                self._emit(self.status)
+                return
+            if rc != 0 or not os.path.exists(v_tmp):
+                self._cleanup_stream_tmp(tmpdir)
+                msg = "；".join(errs[-6:]) if errs else ""
+                self.status = "error"
+                self.error = (
+                    "流媒体下载失败（ffmpeg 退出码 %s）%s"
+                    % (rc, ("：" + msg) if msg else "")
+                )[:600]
+                self._emit("error")
+                return
+            # 阶段二：音频轨（85-95%）。失败不致命 —— 退回无声视频。
+            a_rc = pull(audio_url, a_tmp, 85.0, 95.0, errs)
+            has_audio = a_rc == 0 and os.path.exists(a_tmp)
+            if not has_audio:
+                errs.append("音频轨拉取失败（退出码 %s），退回无声视频" % a_rc)
+            # 阶段三：合流（95-100%）
+            self._stream_progress = 95.0
+            self.status = "merging"
+            self._emit("progress")
+            final_ok = False
+            if has_audio:
+                mux_cmd = [
+                    ffmpeg, "-hide_banner", "-nostdin", "-y",
+                    "-loglevel", "error",
+                    "-i", v_tmp, "-i", a_tmp,
+                    "-c", "copy", "-movflags", "+faststart", out,
+                ]
+                try:
+                    mproc = subprocess.Popen(
+                        mux_cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        **_no_window(),
+                    )
+                    _, merr = mproc.communicate(timeout=600)
+                    final_ok = mproc.returncode == 0 and os.path.exists(out)
+                    if not final_ok and merr:
+                        errs.append(
+                            merr.decode("utf-8", "ignore").strip()[-400:]
+                        )
+                except Exception as e:  # noqa: BLE001
+                    errs.append("合流失败：%s" % e)
+            if not final_ok:
+                # 合流不成 → 无声但能播，总比全丢好
+                try:
+                    os.replace(v_tmp, out)
+                except OSError as e:
+                    self._cleanup_stream_tmp(tmpdir)
+                    self.status = "error"
+                    self.error = (
+                        "流媒体下载失败（合流失败且视频暂存不可用）：%s；%s"
+                        % (e, "；".join(errs[-4:]))
+                    )[:600]
+                    self._emit("error")
+                    return
+            self._cleanup_stream_tmp(tmpdir)
+        else:
+            rc = pull(self.url, out, 0.0, 100.0, errs)
+            if self._stop.is_set():
+                try:
+                    if os.path.exists(out):
+                        os.remove(out)
+                except OSError:
+                    pass
+                self.status = "paused" if self.status != "canceled" else "canceled"
+                self._emit(self.status)
+                return
+            if rc != 0 or not os.path.exists(out):
+                msg = "；".join(errs[-6:]) if errs else ""
+                self.status = "error"
+                self.error = (
+                    "流媒体下载失败（ffmpeg 退出码 %s）%s"
+                    % (rc, ("：" + msg) if msg else "")
+                )[:600]
+                self._emit("error")
+                return
 
         # 换成用户看得懂的文件名
         want = str(self.filename or "").strip()
@@ -1268,10 +1378,22 @@ class Download:
         except OSError:
             pass
         self._stream_bytes = self.size
+        self._stream_progress = 100.0
         self.status = "completed"
         self.completed_at = time.time()
         self.error = None
         self._emit("completed")
+
+    @staticmethod
+    def _cleanup_stream_tmp(tmpdir: str) -> None:
+        """删掉多阶段拉流的中间产物目录（视频/音频暂存）。"""
+        if not tmpdir:
+            return
+        try:
+            import shutil as _sh
+            _sh.rmtree(tmpdir, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _yt_progress(self, d: dict) -> None:
         """yt-dlp 子进程的进度回报（格式见 ytdlp_bin._parse_progress）。"""
