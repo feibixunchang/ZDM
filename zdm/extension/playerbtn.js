@@ -339,7 +339,20 @@
    * 动作
    * ---------------------------------------------------------------- */
 
+  /* 推送文件名。不能直接用 document.title —— 抖音精选这种信息流页面
+     title 恒为「抖音精选电脑版」，十个视频下下来全叫同一个名字。
+     优先走嗅探脚本里的标题阶梯（播放器属性 → og:title → 页面正文），
+     它没加载时退回 document.title。 */
   function pageTitle() {
+    const api = window.__zdmSniffer;
+    if (api && typeof api.title === "function") {
+      try {
+        const t = api.title(media);
+        if (t) return t;
+      } catch (_) {
+        /* ignore */
+      }
+    }
     let t = (document.title || "").trim();
     t = t.replace(/\s*[-_|·—]\s*(bilibili|Bilibili|B站|YouTube|抖音|快手|小红书|微博|知乎).*$/, "");
     t = t.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
@@ -577,7 +590,18 @@
    *  抖音 / 快手的网页播放器给的往往就是**完整 mp4 直链**（不是 m3u8），
    *  而且它出现在 <video> 的 currentSrc 是 blob: 的页面上 —— 于是
    *  「直接下载当前视频」拿不到地址，但嗅探列表里有。这种站点走这条
-   *  路最快。 */
+   *  路最快。
+   *
+   *  **必须跳过分片**（seg 标记，background 打的）：X（Twitter）的 DASH
+   *  分片是 .m4s、Content-Type 报 video/mp4，看起来就是一条「视频」，
+   *  但它只是播放列表里的一小段 —— 推下去只能拿到几秒钟的碎片（实测
+   *  159 KB），这就是「推特下载下来不是真的视频」的原因。 */
+  function hasPlaylist(list) {
+    return (list || []).some(
+      (x) => x && (x.kind === "hls" || x.kind === "dash") && x.url
+    );
+  }
+
   async function sniffedVideo() {
     const api = window.__zdmSniffer;
     if (!api || typeof api.items !== "function") return null;
@@ -587,16 +611,47 @@
     } catch (_) {
       return null;
     }
-    const vids = list.filter((x) => x && x.kind === "video" && x.url);
+    const vids = list.filter((x) => x && x.kind === "video" && x.url && !x.seg);
     if (!vids.length) return null;
     vids.sort((a, b) => (b.at || 0) - (a.at || 0));
     return vids[0];
   }
 
+  /* 这一页抓到的「视频」里是不是全是分片（没有一条成品直链）。
+     全是分片时「下载嗅探到的视频轨」不该装作能下，要引导去「流媒体」。 */
+  async function onlySegments() {
+    const api = window.__zdmSniffer;
+    if (!api || typeof api.items !== "function") return false;
+    let list = [];
+    try {
+      list = api.items() || [];
+    } catch (_) {
+      return false;
+    }
+    return (
+      list.some((x) => x && x.kind === "video" && x.url) &&
+      !list.some((x) => x && x.kind === "video" && x.url && !x.seg)
+    );
+  }
+
   async function pushSniffed() {
     const it = await sniffedVideo();
     if (!it) {
-      setTip("这一页还没嗅到视频直链，播放几秒再试", true);
+      const seg = await onlySegments();
+      const hasList = await (async () => {
+        const api = window.__zdmSniffer;
+        try {
+          return hasPlaylist((api && api.items()) || []);
+        } catch (_) {
+          return false;
+        }
+      })();
+      setTip(
+        seg && hasList
+          ? "这一页抓到的都是播放列表的分片（推下去只有几秒），请用上面的「流媒体」"
+          : "这一页还没嗅到视频直链，播放几秒再试",
+        true
+      );
       return;
     }
     // 兜底：万一分类没认出它是播放列表，按 URL 后缀再判一次，

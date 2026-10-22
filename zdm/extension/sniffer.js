@@ -327,6 +327,12 @@
     hls: "HLS 流",
     dash: "DASH 流",
   };
+
+  function subLabel(it) {
+    if (it.seg) return "播放列表分片";
+    if (it.kind === "image" && it.from === "dom-img") return "图片 · 本页扫描";
+    return KIND_LABEL[it.kind] || "媒体";
+  }
   const KIND_ICON = {
     video:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m10 8 6 4-6 4V8z"/><rect x="2" y="4" width="20" height="16" rx="2"/></svg>',
@@ -361,13 +367,13 @@
           }
           <span class="meta">
             <span class="nm">${esc(it.name || guessName(it.url, it.kind))}</span>
-            <span class="sub">${esc(
-          it.kind === "image" && it.from === "dom-img"
-            ? "图片 · 本页扫描"
-            : KIND_LABEL[it.kind] || "媒体"
-        )} · ${esc(fmtSize(it.size, it.approx))}</span>
+            <span class="sub">${esc(subLabel(it))} · ${esc(fmtSize(it.size, it.approx))}</span>
           </span>
-          <button class="go" type="button" data-i="${i}">推送</button>
+          <button class="go" type="button" data-i="${i}" ${
+        it.seg
+          ? 'title="这是播放列表的一个分片，只包含几秒钟；点推送会自动改推整条流，合并成完整视频"'
+          : ""
+      }>${it.seg ? "推整条" : "推送"}</button>
         </li>`
       )
       .join("");
@@ -458,14 +464,31 @@
 
   async function pushOne(it) {
     const page = location.href;
+    let target = it;
+    /* 分片不是成品：推下去只能拿到几秒钟的碎片（实测 Twitter 的 .m4s
+       159 KB，存成 .mp4 打不开）。用户的意图是「下这个视频」，所以改推
+       同一页里最新的那条播放列表 —— 后端 ffmpeg 会把整条流拉下来合并。
+       页面上没有播放列表时不推（宁可不响应，也别交出一堆碎片）。 */
+    if (it.seg) {
+      const play = items
+        .filter(
+          (x) => x && (x.kind === "hls" || x.kind === "dash") && x.url && !x.seg
+        )
+        .sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+      if (!play) return false;
+      target = play;
+    }
     const body = {
-      url: it.url,
-      filename: it.name || guessName(it.url, it.kind),
+      url: target.url,
+      filename:
+        target === it
+          ? it.name || guessName(it.url, it.kind)
+          : smartTitle() + ".mp4",
       referer: page,
       // 只有同站才带 cookie，见 sameSite() 的说明
       cookie: sameSite(it.url, page) ? document.cookie || undefined : undefined,
       source: "sniffer",
-      kind: it.kind || "video",
+      kind: target.kind || "video",
       // YouTube 阶梯行：真正的下载由后端按「页面地址 + 高度」走 yt-dlp，
       // 这两个字段不带过去，后端就只能拿到一个页面地址、不知道该下哪一档。
       page_url: it.page_url || undefined,
@@ -677,8 +700,11 @@
     const btnSel = shadow.querySelector('.ftbtn[data-act="sel"]');
     if (btnAll) {
       btnAll.addEventListener("click", () => {
-        if (selected.size && selected.size === items.length) selected.clear();
-        else items.forEach((it) => selected.add(keyOf(it)));
+        /* 分片不进批量：批量下出来的是一堆几秒钟的碎片，没有意义。
+           （分片行的单个「推整条」按钮会自动改推播放列表。） */
+        const pickable = items.filter((it) => !it.seg);
+        if (selected.size && selected.size === pickable.length) selected.clear();
+        else pickable.forEach((it) => selected.add(keyOf(it)));
         renderList();
       });
     }
@@ -694,9 +720,133 @@
     /* 给通用播放器按钮（playerbtn.js）用：它要读当前嗅探列表来配对音轨、
        也要能把面板调出来。两个文件是同一批 content script，同在 isolated
        world，直接挂 window 上最省事（不用再走一遍消息往返）。 */
-    window.__zdmSniffer = {
-      items: () => items.slice(),
-      images: () => imgItems.slice(),
+  /* ---------- 文件名用标题 ---------- */
+
+  /* document.title 是不是「站点名」而不是「内容标题」。
+   *
+   *  抖音精选这类信息流页面，title 恒为应用名「抖音精选电脑版」——
+   *  含品牌词、没有句子特征、很短，十个视频下下来全叫同一个名字。
+   *  而 X 的 title 是推文正文（"(8) X 上的 XXX.：……"），带句子标点，
+   *  必须放行。 */
+  const BRAND_CN = {
+    douyin: "抖音",
+    kuaishou: "快手",
+    bilibili: "哔哩",
+    weibo: "微博",
+    xiaohongshu: "小红书",
+    zhihu: "知乎",
+    douyu: "斗鱼",
+    huya: "虎牙",
+  };
+  function titleIsSiteName(t) {
+    if (!t) return true;
+    if (t.length > 16) return false; // 站点名都很短
+    if (/@|https?:|www\.|http/.test(t)) return false; // 明显是内容标题
+    const host = (location.hostname || "").replace(/^www\./, "").toLowerCase();
+    const zh = BRAND_CN[host.split(".")[0]] || "";
+    if (zh && t.indexOf(zh) >= 0) return true;
+    const brand = host.split(".")[0];
+    return brand.length >= 4 && t.toLowerCase().indexOf(brand) >= 0;
+  }
+
+  /* <video> 附近的说明文字。
+   *
+   *  抖音精选的弹窗里，视频标题（作者 + 文案）就在播放器旁边的容器里。
+   *  没有站点规则可用（各站结构都不同），只能用通用启发式：从 <video>
+   *  往上找几层容器，取里面最长的叶子文本。playerbtn 的面板是 Shadow
+   *  DOM，textContent 天然不含它，不会把自己抓进来。 */
+  function captionNear(media) {
+    if (!media || !media.parentElement) return "";
+    let node = media;
+    let budget = 600; // 别把整个页面走完
+    for (let up = 0; up < 4 && node && budget > 0; up++) {
+      node = node.parentElement;
+      if (!node) break;
+      let best = "";
+      const walk = (el) => {
+        if (budget <= 0) return;
+        for (const c of el.children) {
+          if (budget-- <= 0) return;
+          const tag = c.tagName;
+          if (
+            tag === "SCRIPT" || tag === "STYLE" || tag === "BUTTON" ||
+            tag === "INPUT" || tag === "SVG" || tag === "CANVAS" ||
+            tag === "VIDEO" || tag === "AUDIO"
+          ) {
+            continue;
+          }
+          const hasBlock = Array.prototype.some.call(
+            c.children,
+            (x) =>
+              /^(DIV|P|SECTION|ARTICLE|LI|UL|OL|H[1-6]|VIDEO|AUDIO)$/.test(
+                x.tagName
+              )
+          );
+          if (!hasBlock) {
+            const t = (c.textContent || "").replace(/\s+/g, " ").trim();
+            if (t.length >= 6 && t.length <= 150 && t.length > best.length) {
+              best = t;
+            }
+          }
+          walk(c);
+        }
+      };
+      walk(node);
+      if (best) return best;
+    }
+    return "";
+  }
+
+  /* 推送文件名的标题来源，按可靠性排序：
+   * 1. 播放器元素自带的 title / aria-label；
+   * 2. og:title / twitter:title；
+   * 3. document.title（仅当它像内容标题）；
+   * 4. <video> 附近的说明文字（document.title 是站点名时的兜底）；
+   * 5. document.title 原文（实在没有更好的）。 */
+  function smartTitle(media) {
+    const clean = (s) =>
+      String(s || "")
+        .replace(/\s+/g, " ")
+        .replace(/[\\/:*?"<>|]/g, "_")
+        .trim()
+        .slice(0, 100);
+    const accept = (s) => {
+      const v = clean(s);
+      if (v.length < 6 || titleIsSiteName(v)) return "";
+      return v;
+    };
+    if (media && media.getAttribute) {
+      for (const a of ["title", "aria-label", "alt"]) {
+        const v = accept(media.getAttribute(a));
+        if (v) return v;
+      }
+    }
+    for (const sel of [
+      'meta[property="og:title"]',
+      'meta[name="twitter:title"]',
+      'meta[property="og:video:title"]',
+    ]) {
+      const el = document.querySelector(sel);
+      const v = accept(el && el.getAttribute("content"));
+      if (v) return v;
+    }
+    const raw = clean(
+      (document.title || "").replace(
+        /\s*[-_|·—]\s*(bilibili|B站|YouTube|抖音|快手|小红书|微博|知乎).*$/,
+        ""
+      )
+    );
+    const dt = accept(raw);
+    if (dt) return dt;
+    const cap = accept(captionNear(media));
+    if (cap) return cap;
+    return raw || "video";
+  }
+
+  window.__zdmSniffer = {
+    items: () => items.slice(),
+    images: () => imgItems.slice(),
+    title: (media) => smartTitle(media),
       open: () => {
         panelOpen = true;
         panel.hidden = false;
