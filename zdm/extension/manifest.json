@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ZDM Connector",
-  "version": "1.5.24",
+  "version": "1.5.25",
   "description": "接管浏览器下载、嗅探网页视频音频并一键推送给本机 ZDM 多线程下载器；任意网站的播放器上都有「下载此视频」（解析此页面音画完整 / 嗅探音视频合并 / 直链下载三条路径），B站/YouTube 视频卡片另有悬浮按钮与清晰度选择；ZDM 没开着会自动唤醒它",
   "minimum_chrome_version": "102",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkQimyU1MHQNQKGftct6bGvCks+rIcRWTBUVdhkHeMz92llA53zOt8f/0fEcOgeVG4osI63sobXHkmk1ukEqG4OMcFrwgAeb26tdzC0z0hOWZxOu3nK7zYDynszsxSQgc1P/3FWiG3wavtiCBDlAPDV4RKa5gBODtnmWKRxct3vc76URaE0bGlq5Wo8r+byjuRLMFQJukwDyXzJNMNcLH6BR20EybzpgKYzWEmRM9ZoGdlJ7dZi8oB+f9nV97ov5mv1qVa4JK8YOsKAq8/4b0jQbE4VMYqjN3THZFGQyjyeNW+4Rm6MWrFfokT9aRGgkzCSGGY8A8yEEgl5NeSTKMMQIDAQAB",
