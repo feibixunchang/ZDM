@@ -412,8 +412,11 @@
         kind: isAudioPick ? "audio" : "video",
         // DASH 站点：yt-dlp 已经把配套音轨配好了，不带就下成无声
         audio_url: isAudioPick ? undefined : pick.audio_url || undefined,
-        // 归一化后的地址：后端 yt_page 通道按它再走一次 yt-dlp
-        page_url: page,
+        // 刻意**不传** page_url：带了它后端会改走 yt-dlp 通道重新解析一遍，
+        // 而那条通道要的是 Netscape 原文（带域信息）；我们这里给的是压成
+        // 单行的 header 形式，旧版客户端会把它铺到 .youtube.com 域上，
+        // 抖音的登录态就发不出去。已经解析好的直链直接下、后端 ffmpeg
+        // 合流即可，不需要再解析一次。
         height: Number(pick.height) || height,
       },
     });
