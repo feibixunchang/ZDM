@@ -196,6 +196,92 @@ def _find_ffmpeg() -> Optional[str]:
     return shutil.which("ffmpeg", path=aug)
 
 
+def _netscape_pairs(text: str, host: str = "") -> List[Tuple[str, str]]:
+    """从 Netscape cookie 文本里取出 (name, value)。
+
+    只保留与 ``host`` 相关的域；一条都匹配不上时返回空列表，调用方
+    决定是否退回「全带」（CDN 域与页面域不同是常态，硬过滤会把
+    登录态全丢掉）。
+    """
+    pairs: List[Tuple[str, str]] = []
+    seen = set()
+    h = (host or "").lower().lstrip(".")
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("#") and not line.startswith("#HttpOnly_"):
+            continue
+        body = line[len("#HttpOnly_") :] if line.startswith("#HttpOnly_") else line
+        parts = body.split("\t")
+        if len(parts) < 7:
+            continue
+        domain = parts[0].lower().lstrip(".")
+        if h and domain and not (h == domain or h.endswith("." + domain)):
+            continue
+        name, value = parts[5].strip(), parts[6].strip()
+        if name and name not in seen:
+            seen.add(name)
+            pairs.append((name, value))
+    return pairs
+
+
+def _json_pairs(text: str, host: str = "") -> List[Tuple[str, str]]:
+    """从 JSON 形态的 cookie 数组里取出 (name, value)。"""
+    import json as _json
+
+    try:
+        data = _json.loads(text)
+    except Exception:  # noqa: BLE001
+        return []
+    if isinstance(data, dict):
+        data = data.get("cookies") or []
+    if not isinstance(data, list):
+        return []
+    pairs: List[Tuple[str, str]] = []
+    seen = set()
+    h = (host or "").lower().lstrip(".")
+    for c in data:
+        if not isinstance(c, dict):
+            continue
+        name = (c.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        dom = (c.get("domain") or "").lower().lstrip(".")
+        if h and dom and not (h == dom or h.endswith("." + dom)):
+            continue
+        seen.add(name)
+        pairs.append((name, str(c.get("value") or "")))
+    return pairs
+
+
+def _cookie_header(cookie: str, host: str = "") -> str:
+    """把各种形态的 cookie 压成能直接放进 HTTP 头的一行。
+
+    扩展导出的完整 cookie 是 **Netscape 文件格式**（含 tab 和换行），
+    原样塞进 Cookie 头会被 urllib 挡下来：
+        Invalid header value b'# Netscape HTTP Cookie File\\n...'
+    —— probe 阶段就抛错，任务报「probe failed」，一个字节都下不来。
+
+    Netscape / JSON 形态压成 `name=value; name2=value2`；按域名过滤后
+    一条都不剩时退回「全带」（媒体常在 CDN 域上，硬过滤会把登录态丢掉）。
+    普通形态（`a=b; c=d`）原样透传。
+    """
+    text = (cookie or "").strip()
+    if not text:
+        return ""
+    if "\t" in text or "Netscape" in text:
+        pairs = _netscape_pairs(text, host)
+        if not pairs:
+            pairs = _netscape_pairs(text, "")
+    elif text.startswith("[") or text.startswith("{"):
+        pairs = _json_pairs(text, host)
+        if not pairs:
+            pairs = _json_pairs(text, "")
+    else:
+        return text
+    return "; ".join("%s=%s" % (k, v) for k, v in pairs)
+
+
 def _probe_has_audio(path: str) -> Optional[bool]:
     """文件里到底有没有音轨。ffmpeg 不可用/探测失败时返回 None（不下结论）。
 
@@ -534,6 +620,25 @@ class Download:
         # 音视频合并失败的具体原因（哪一步断了）。None 表示没试过/成功。
         self.mux_error: Optional[str] = None
 
+    def _http_headers(self) -> Dict[str, str]:
+        """发普通 HTTP 请求用的请求头（Cookie 压成一行 header 形式）。
+
+        ``self.headers`` 保持原样不动 —— yt-dlp 通道要的是 Netscape 原文
+        （见 _run_ytdlp / _cookiefile）。只有真正发 HTTP 请求时才规范化，
+        否则 Netscape 文本塞进 Cookie 头会被 urllib 以
+        "Invalid header value" 直接拒掉，probe 阶段就失败。
+        """
+        h = dict(self.headers or {})
+        for k in list(h.keys()):
+            if k.lower() != "cookie":
+                continue
+            try:
+                host = (urllib.parse.urlparse(self.url or "").hostname or "").lower()
+            except Exception:  # noqa: BLE001
+                host = ""
+            h[k] = _cookie_header(h[k] or "", host)
+        return h
+
         self.size = 0
         self.status = "queued"
         self.error: Optional[str] = None
@@ -725,7 +830,7 @@ class Download:
             url = self.final_url or self.url
             try:
                 t, info = transport_mod.probe_with_fallback(
-                    url, self.headers, self.timeout, self.proxy
+                    url, self._http_headers(), self.timeout, self.proxy
                 )
             except Exception as e:
                 raise ConnectionError(f"probe failed: {e}") from e
@@ -1008,7 +1113,11 @@ class Download:
         cookie_path = None
         if cookie:
             try:
-                cookie_path = yt_resolve._cookiefile(cookie)
+                # 域要按**页面**来铺，不是媒体直链的域：YouTube 的 cookie
+                # 属于 .youtube.com，媒体却在 googlevideo.com 上。
+                cookie_path = yt_resolve._cookiefile(
+                    cookie, yt_resolve._host_of(self.yt_page or self.url or "")
+                )
             except Exception:  # noqa: BLE001
                 cookie_path = None
         # Cookie 已经写成 cookiefile 了，别再用 -add-header 重复塞一遍
@@ -1231,7 +1340,7 @@ class Download:
         offset = chunk.pos
         while offset < chunk.end and not self._stop.is_set():
             gen = self._transport.stream(
-                url, offset, chunk.end, self.headers, self.timeout, self.proxy
+                url, offset, chunk.end, self._http_headers(), self.timeout, self.proxy
             )
             try:
                 for buf in gen:
@@ -1267,7 +1376,7 @@ class Download:
         try:
             with open(self.part_path, "wb") as f:
                 for buf in self._transport.stream(
-                    url, 0, None, self.headers, self.timeout, self.proxy
+                    url, 0, None, self._http_headers(), self.timeout, self.proxy
                 ):
                     if self._stop.is_set():
                         self.size = offset

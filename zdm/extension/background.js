@@ -918,7 +918,33 @@ function netscapeCookieLine(c) {
   ].join("\t");
 }
 
-async function youtubeCookieText() {
+/* 需要完整 cookie 的站点。
+ *
+ *  这些站点的反爬 token / 登录态大多在 HttpOnly 里，content script 拿不到的
+ *  document.cookie 不够用：抖音没 cookie 直接报 "Fresh cookies are needed"，
+ *  X / Facebook 要登录态也是同理。这些站点改用 chrome.cookies 导出
+ *  （严格超集，拿到 HttpOnly 那部分）。
+ *  extra 是要一并带上的关联域（YouTube 的 SSO 票据有一部分在 google.com）。
+ */
+const FULL_COOKIE_SITES = [
+  { re: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/, extra: ["google.com"] },
+  { re: /(^|\.)douyin\.com$|(^|\.)iesdouyin\.com$/, extra: ["amemv.com"] },
+  { re: /(^|\.)kuaishou\.com$|(^|\.)gifshow\.com$/, extra: [] },
+  { re: /(^|\.)xiaohongshu\.com$|(^|\.)xhslink\.com$/, extra: [] },
+  { re: /(^|\.)twitter\.com$|(^|\.)x\.com$/, extra: ["twitter.com"] },
+  {
+    re: /(^|\.)facebook\.com$|(^|\.)instagram\.com$|(^|\.)fb\.com$/,
+    extra: ["facebook.com"],
+  },
+  { re: /(^|\.)bilibili\.com$|(^|\.)bilibili\.tv$/, extra: [] },
+];
+
+/** 按目标站点导出完整 cookie（Netscape 格式）。不在名单里返回空串。 */
+async function siteCookieText(host) {
+  const h = (host || "").toLowerCase();
+  if (!h) return "";
+  const spec = FULL_COOKIE_SITES.find((s) => s.re.test(h));
+  if (!spec) return "";
   if (!chrome.cookies || !chrome.cookies.getAll) return "";
   const getAll = (filter) =>
     new Promise((res) => {
@@ -931,25 +957,64 @@ async function youtubeCookieText() {
         res([]);
       }
     });
-  // {url} 过滤最准（返回真正会发给该地址的 cookie，含 .youtube.com）；
-  // YouTube 的 SSO 票据有一部分落在 google.com 域下，两个域都要。
-  const [byUrl, byDomain, google] = await Promise.all([
-    getAll({ url: "https://www.youtube.com/" }),
-    getAll({ domain: "youtube.com" }),
-    getAll({ url: "https://www.google.com/" }),
-  ]);
+  // domain 过滤是精确匹配域名，所以主域也要单独取一份
+  // （cookie 记在 .douyin.com 上，而页面是 www.douyin.com）。
+  const domains = new Set([h]);
+  const parts = h.split(".");
+  if (parts.length >= 2) domains.add(parts.slice(-2).join("."));
+  spec.extra.forEach((d) => domains.add(d));
+  const reqs = [getAll({ url: "https://" + h + "/" })];
+  for (const d of domains) reqs.push(getAll({ domain: d }));
+  const groups = await Promise.all(reqs);
   const seen = new Set();
   const lines = [];
-  for (const c of byUrl.concat(byDomain, google)) {
-    if (!c || !c.name) continue;
-    const line = netscapeCookieLine(c);
-    if (!line) continue;
-    const key = line.split("\t").slice(0, 3).join("|") + "|" + c.name;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    lines.push(line);
+  for (const g of groups) {
+    for (const c of g || []) {
+      if (!c || !c.name) continue;
+      const line = netscapeCookieLine(c);
+      if (!line) continue;
+      const key = line.split("\t").slice(0, 3).join("|") + "|" + c.name;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(line);
+    }
   }
   return lines.length ? "# Netscape HTTP Cookie File\n" + lines.join("\n") + "\n" : "";
+}
+
+/** Netscape cookie 文本 → 单行 header 形式（name=value; name2=value2）。
+ *
+ *  完整导出的 Netscape 文本含 tab 和换行，原样塞进 HTTP 的 Cookie 头会被
+ *  直接拒掉（urllib: "Invalid header value b'# Netscape HTTP Cookie
+ *  File\\n...'"），于是**探测阶段**就失败，任务报「probe failed」，
+ *  一个字节都下不来。下载通道统一走这个转换。
+ *
+ *  解析通道（zdm-youtube-resolve）仍传 Netscape 原文 —— 那里要的是域信息，
+ *  Netscape 自带 .douyin.com 这样的域，旧版后端也认。
+ */
+function cookieToHeader(text) {
+  if (!text) return "";
+  if (text.indexOf("\t") < 0) return text; // 已经是 header 形式
+  const out = [];
+  const seen = new Set();
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    if (line.startsWith("#") && !line.startsWith("#HttpOnly_")) continue;
+    const body = line.startsWith("#HttpOnly_")
+      ? line.slice("#HttpOnly_".length)
+      : line;
+    const p = body.split("\t");
+    if (p.length < 7) continue;
+    const name = p[5].trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name + "=" + p[6]);
+  }
+  return out.join("; ");
+}
+
+async function youtubeCookieText() {
+  return siteCookieText("youtube.com");
 }
 
 async function api(path, body, method = "POST") {
@@ -1368,9 +1433,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // （ghostdownload 同款思路：浏览器里解 signatureCipher 太脆，交给桌面端）。
   if (msg.type === "zdm-youtube-resolve") {
     (async () => {
+      /* cookie 要按**目标页面**的站点导，不能固定用 YouTube 的。
+         以前这里硬编码 youtubeCookieText()，于是抖音 / 快手 / X 解析时
+         带过去的是 youtube.com 的 cookie —— 目标站点拿不到自己的登录态，
+         yt-dlp 直接报 "Fresh cookies are needed"。 */
       let cookie = "";
       try {
-        cookie = await youtubeCookieText();
+        cookie = await siteCookieText(hostOf(msg.url || "") || "");
       } catch (_) {
         cookie = "";
       }
@@ -1479,30 +1548,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         audioUrl = stripRange(audioUrl);
       }
 
-      /* YouTube 的登录态几乎全是 HttpOnly（SID / HSID / __Secure-1PSID），
-         content script 传来的 document.cookie 只有 SAPISID/APISID 这几块 ——
-         **非空但残缺**。以前只在 `!cookie` 时才换完整导出，残缺版一进来就把
-         完整导出挡住了，yt-dlp 拿着半个 cookiejar 照样报人机验证
-         （失败任务里存的 "APISID=...; SAPISID=..." 就是铁证）。
-         chrome.cookies 的导出是严格超集，YouTube 一律优先用它。 */
+      /* 登录态几乎都在 HttpOnly 里，content script 传来的 document.cookie
+         只有非 HttpOnly 的那一半 —— **非空但残缺**。以前只在 `!cookie` 时
+         才换完整导出，残缺版一进来就把完整导出挡住了，yt-dlp 拿着半个
+         cookiejar 照样报人机验证（失败任务里存的 "APISID=...; SAPISID=..."
+         就是铁证）。chrome.cookies 的导出是严格超集，一律优先用它。
+
+         名单见 FULL_COOKIE_SITES：YouTube 之外，抖音 / 快手 / 小红书 /
+         X / Facebook 也一样 —— 抖音没 cookie 直接报 "Fresh cookies are
+         needed"，而且这里以前**只**给 YouTube 导，别的站点带的都是
+         youtube.com 的 cookie。 */
       let cookie = item.cookie || "";
       const page = item.page_url || item.referer || "";
       const host = hostOf(page) || hostOf(url);
-      if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host)) {
-        let full = "";
-        try {
-          full = await youtubeCookieText();
-        } catch (_) {
-          full = "";
-        }
-        if (full) cookie = full;
+      let full = "";
+      try {
+        full = await siteCookieText(host);
+      } catch (_) {
+        full = "";
       }
+      if (full) cookie = full;
 
       const ok = await handOff({
         url,
         filename: item.filename,
         referer: item.referer,
-        cookie: cookie || undefined,
+        // 压成单行 header 形式：Netscape 原文会让普通下载通道的探测
+        // 直接抛 "Invalid header value"（旧版客户端没有这层兜底）。
+        cookie: cookieToHeader(cookie) || undefined,
         source: item.source || "sniffer",
         kind: item.kind || "video",
         // DASH 视频轨的配套音频轨，后端下载后用 ffmpeg 合并

@@ -105,7 +105,15 @@ def probe_one_size(
     if referer:
         req.add_header("Referer", referer)
     if cookie:
-        req.add_header("Cookie", cookie)
+        # 扩展导出的完整 cookie 是 Netscape 文件格式（含 tab 和换行），
+        # 原样 add_header 会被 urllib 抛 "Invalid header value"，探测直接
+        # 失败（返回 0 → 界面显示「大小未知」）。压成 header 形式。
+        from .core import _cookie_header
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:  # noqa: BLE001
+            host = ""
+        req.add_header("Cookie", _cookie_header(cookie, host))
     handlers = []
     if proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
@@ -393,6 +401,17 @@ class Handler(BaseHTTPRequestHandler):
                     # Referer; without it the server answers 403.
                     if not headers.get("Referer"):
                         headers["Referer"] = _site_referer(url)
+            # 扩展传过来的可能是 Netscape 文件格式的完整 cookie 导出
+            # （YouTube 就是这样）。原样塞进请求头会被 urllib 以
+            # "Invalid header value" 拒掉 —— 表现为任务「probe failed」，
+            # 一个字节都下不来。统一压成 header 形式。
+            if headers.get("Cookie"):
+                from .core import _cookie_header
+                try:
+                    _host = (urlparse(url).hostname or "").lower()
+                except Exception:  # noqa: BLE001
+                    _host = ""
+                headers["Cookie"] = _cookie_header(headers["Cookie"], _host)
             # 视频**页面**链接（YouTube/B站…）不能当普通文件下：那样存下来的
             # 是一个叫 watch 的 HTML。桌面端、网页版、CLI 都在这里汇合，所以
             # 在服务端统一转成页面任务交给 yt-dlp；扩展推的媒体直链不会命中。
