@@ -66,6 +66,49 @@ function hostOf(url) {
   }
 }
 
+/* 播放列表的**分片**不是独立成品。
+ *
+ *  实测 2026-10-22：X（Twitter）的 DASH 分片是 .m4s、Content-Type 报
+ *  video/mp4，以前整条被判成「视频」—— 推下去只拿到 4 秒钟的碎片
+ *  （159 KB 的 .mp4），用户看到的就是「推特下载下来不是真的视频」。
+ *  打上 seg 标记：面板照常列出（用户可能就想看某个分片），但
+ *  playerbtn 的「下载嗅探到的视频轨」要跳过它们、批量下载不勾它们。
+ *
+ *  判据两条，满足其一即算：
+ *  1. 后缀是分片后缀。**B站除外** —— B站的 .m4s 是整条轨（按
+ *     cid-编号命名、支持 Range），标错会让音视频配对失效；
+ *  2. 同一个 tab 里已经有一条播放列表、且这条媒体跟它同目录
+ *     （Twitter 的 master playlist 和分片就在同一目录下）。
+ */
+const SEGMENT_EXT =
+  /\.(m4s|m4f|fmp4|mp4a|ts|m2ts|cmfv|cmfa)(?:$|[?#])/i;
+const FULL_CONTAINER_EXT = /\.(mp4|webm|mkv|mov|m4v|avi|flv)(?:$|[?#])/i;
+
+function isSegmentMedia(tabId, url, host) {
+  if (!url) return false;
+  if (
+    SEGMENT_EXT.test(url) &&
+    !/\/upgcxcode\//.test(url) &&
+    !BILI_MEDIA_HOST.test(host)
+  ) {
+    return true;
+  }
+  // 完整容器格式（mp4/webm/…）几乎不会是分片，别用目录规则误伤
+  if (FULL_CONTAINER_EXT.test(url)) return false;
+  const list = snifferByTab.get(tabId) || [];
+  const plays = list.filter(
+    (x) => x && (x.kind === "hls" || x.kind === "dash") && x.url
+  );
+  if (!plays.length) return false;
+  try {
+    const u = new URL(url);
+    const dir = u.origin + u.pathname.replace(/\/[^/]*$/, "");
+    return plays.some((p) => p.url.indexOf(dir + "/") === 0);
+  } catch (_) {
+    return false;
+  }
+}
+
 /** 去掉分段请求的 range 参数。
     YouTube 的 videoplayback 是按 Range 分片拉的，URL 里带着 range=0-1234567
     和 rn=8。后端拿着这种地址用普通 GET 下载，只会拿到那一小段 ——
@@ -427,7 +470,8 @@ function classifyResponse(details) {
     }
   }
   if (size && size < MIN_MEDIA_BYTES && !isPlaylist) return null;
-  return { url, kind, size, name: nameFromUrl(url, kind), from: "net" };
+  const seg = isSegmentMedia(details.tabId, url, host);
+  return { url, kind, size, name: nameFromUrl(url, kind), from: "net", seg: seg || undefined };
 }
 
 function rememberMedia(tabId, item) {
