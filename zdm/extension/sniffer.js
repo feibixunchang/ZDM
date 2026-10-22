@@ -465,30 +465,55 @@
   async function pushOne(it) {
     const page = location.href;
     let target = it;
-    /* 分片不是成品：推下去只能拿到几秒钟的碎片（实测 Twitter 的 .m4s
-       159 KB，存成 .mp4 打不开）。用户的意图是「下这个视频」，所以改推
-       同一页里最新的那条播放列表 —— 后端 ffmpeg 会把整条流拉下来合并。
+    let audioUrl = "";
+    let filename = it.name || guessName(it.url, it.kind);
+    /* 分片、音频播放列表都不是用户想要的成品：
+       · 分片推下去只有几秒钟（实测 Twitter 的 .m4s 159 KB）；
+       · 音频播放列表（X 的 /pl/mp4a/…）推下去「只有声音」。
+       都改挑「最新的视频轨播放列表 + 同源音频轨」一起推，后端拉完合流。
        页面上没有播放列表时不推（宁可不响应，也别交出一堆碎片）。 */
-    if (it.seg) {
-      const play = items
-        .filter(
-          (x) => x && (x.kind === "hls" || x.kind === "dash") && x.url && !x.seg
-        )
-        .sort((a, b) => (b.at || 0) - (a.at || 0))[0];
-      if (!play) return false;
-      target = play;
+    if (it.seg || (it.kind === "hls" && isAudioPlaylistUrl(it.url))) {
+      const pair = pickStreamPair(items);
+      if (!pair) return false;
+      target = { url: pair.url, kind: pair.kind };
+      audioUrl = pair.audioUrl;
+      filename = smartTitle() + ".mp4";
+    } else if (it.kind === "hls" || it.kind === "dash") {
+      // 视频播放列表：主轨就用点击的这条，另配同源音频轨一起合流
+      target = it;
+      let best = -1;
+      for (const s of items) {
+        if (!s || s.url === it.url) continue;
+        if (s.kind !== "hls" && s.kind !== "dash") continue;
+        if (!isAudioPlaylistUrl(s.url)) continue;
+        const d = commonPathDepth(it.url, s.url);
+        if (d > best) {
+          best = d;
+          audioUrl = s.url;
+        }
+      }
+      if (best < 2) audioUrl = ""; // 公共前缀太浅＝大概率不是同一条视频
+      filename = smartTitle() + ".mp4";
+    } else if (
+      (it.kind === "video" || it.kind === "audio") &&
+      genericUrlName(filename)
+    ) {
+      // URL 末段是哈希/流水号（抖音 media-video-hvc1、YouTube
+      // videoplayback）时改用页面标题，别让下载目录全是无意义的名字。
+      const m = /\.([a-z0-9]{2,5})$/i.exec(filename);
+      const ext = m ? m[1].toLowerCase() : it.kind === "audio" ? "m4a" : "mp4";
+      filename = smartTitle() + "." + ext;
     }
     const body = {
       url: target.url,
-      filename:
-        target === it
-          ? it.name || guessName(it.url, it.kind)
-          : smartTitle() + ".mp4",
+      filename,
       referer: page,
       // 只有同站才带 cookie，见 sameSite() 的说明
       cookie: sameSite(it.url, page) ? document.cookie || undefined : undefined,
       source: "sniffer",
-      kind: target.kind || "video",
+      kind: target.kind || it.kind || "video",
+      // 音频播放列表配对（X 的音视频是两份 m3u8），后端拉完合流
+      audio_url: audioUrl || undefined,
       // YouTube 阶梯行：真正的下载由后端按「页面地址 + 高度」走 yt-dlp，
       // 这两个字段不带过去，后端就只能拿到一个页面地址、不知道该下哪一档。
       page_url: it.page_url || undefined,
@@ -720,6 +745,110 @@
     /* 给通用播放器按钮（playerbtn.js）用：它要读当前嗅探列表来配对音轨、
        也要能把面板调出来。两个文件是同一批 content script，同在 isolated
        world，直接挂 window 上最省事（不用再走一遍消息往返）。 */
+  /* ---------- 播放列表的音视频配对 ---------- */
+
+  /* X（Twitter）的 HLS 把音视频分成**两份独立的播放列表**：
+   *    视频  /amplify_video/<id>/pl/avc1/1280x720/xxx.m3u8
+   *    音频  /amplify_video/<id>/pl/mp4a/128000/xxx.m3u8
+   * 只推视频那份 = 有画面没声音；只推音频那份 = 只有声音（用户两种都
+   * 撞到过）。两份都要：主轨 + audio_url 一起给后端，ffmpeg 拉完合流。
+   * 配对靠「同源 + 路径公共前缀最深」：同一条视频的两份共享
+   * /amplify_video/<id>/，不同推文的公共前缀只有 /amplify_video/ 一段
+   * —— 前缀深度 <2 的不配（跨视频误配）。 */
+  const AUDIO_PLAYLIST_URL =
+    /\/(mp4a|aac|mp3|opus|ogg|flac)(?:\/|$)|\/audio(?:\/|[-_.])|mime=audio|audio[-_]?track/i;
+
+  function isAudioPlaylistUrl(u) {
+    return !!u && AUDIO_PLAYLIST_URL.test(u);
+  }
+
+  function commonPathDepth(urlA, urlB) {
+    try {
+      const a = new URL(urlA);
+      const b = new URL(urlB);
+      if (a.origin !== b.origin) return -1;
+      const pa = a.pathname.split("/").filter(Boolean);
+      const pb = b.pathname.split("/").filter(Boolean);
+      let i = 0;
+      while (i < pa.length && i < pb.length && pa[i] === pb[i]) i++;
+      return i;
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  /* 从播放列表集合里挑主轨（优先视频轨）+ 配对音轨。
+   *
+   *  选主轨不用「最新优先」：时间线自动播放时，别的视频的播放列表可能
+   *  比当前这条还新。改成「优先挑**有音频配对**的视频轨里最新的」——
+   *  X 的音视频两份是一起请求的，有配对的那条几乎肯定是正在看的。 */
+  function pickStreamPair(list) {
+    const pls = (list || []).filter(
+      (x) => x && (x.kind === "hls" || x.kind === "dash") && x.url && !x.seg
+    );
+    if (!pls.length) return null;
+    const byNew = pls.slice().sort((a, b) => (b.at || 0) - (a.at || 0));
+    const vids = byNew.filter((s) => !isAudioPlaylistUrl(s.url));
+    const auds = byNew.filter((s) => isAudioPlaylistUrl(s.url));
+
+    const deepestAudio = (vUrl) => {
+      let best = -1;
+      let bestUrl = "";
+      for (const a of auds) {
+        if (a.url === vUrl) continue;
+        const d = commonPathDepth(vUrl, a.url);
+        if (d > best) {
+          best = d;
+          bestUrl = a.url;
+        }
+      }
+      return best >= 2 ? bestUrl : ""; // 前缀太浅＝大概率不是同一条视频
+    };
+
+    let main = null;
+    let audioUrl = "";
+    for (const v of vids) {
+      const a = deepestAudio(v.url);
+      if (a) {
+        main = v;
+        audioUrl = a;
+        break;
+      }
+    }
+    if (!main) {
+      // 没有任何视频轨带音频配对：退回「最新的视频轨」，音频尽力配
+      main = vids[0] || byNew[0]; // 全是音频轨时至少还能出声
+      if (main && !isAudioPlaylistUrl(main.url)) audioUrl = deepestAudio(main.url);
+    }
+    return { url: main.url, kind: main.kind, audioUrl };
+  }
+
+  /* URL 末段当文件名是不是「没意义」的：抖音的 media-video-hvc1、
+   * YouTube 的 videoplayback、纯哈希（oMEizcg5DiAsHAr1ASAJgsIcf0ACIBADOBwePi）。
+   * 是的话推送文件名改用页面标题。 */
+  function genericUrlName(name) {
+    if (!name) return true;
+    const stem = name.replace(/\.[a-z0-9]{2,5}$/i, "");
+    if (!stem) return true;
+    if (
+      /^(media[-_]video|video|audio|media|index|master|playlist|videoplayback|seg|chunk|hls|dash)/i.test(
+        stem
+      )
+    ) {
+      return true;
+    }
+    // 纯哈希样：无 CJK、无分隔符、≥16 位的字母数字串
+    if (
+      !/[\u4e00-\u9fff]/.test(stem) &&
+      !/[\s._-]/.test(stem) &&
+      stem.length >= 16 &&
+      /^[A-Za-z0-9_-]+$/.test(stem)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   /* ---------- 文件名用标题 ---------- */
 
   /* document.title 是不是「站点名」而不是「内容标题」。
@@ -810,9 +939,13 @@
         .replace(/[\\/:*?"<>|]/g, "_")
         .trim()
         .slice(0, 100);
+    // 播放器控件的操作提示（抖音 <video> 的 title 就是「点击按住可拖动
+    // 视频」）不是内容标题。真正的标题很少这么短还带这些动词。
+    const UI_HINT = /点击|按住|拖动|轻触|双击|播放|暂停|静音|全屏|倍速|画中画/;
     const accept = (s) => {
       const v = clean(s);
       if (v.length < 6 || titleIsSiteName(v)) return "";
+      if (v.length <= 16 && UI_HINT.test(v)) return "";
       return v;
     };
     if (media && media.getAttribute) {
@@ -847,6 +980,7 @@
     items: () => items.slice(),
     images: () => imgItems.slice(),
     title: (media) => smartTitle(media),
+    pickStreamPair: (list) => pickStreamPair(list),
       open: () => {
         panelOpen = true;
         panel.hidden = false;
