@@ -478,6 +478,18 @@
     if (panelOpen) renderList();
   }
 
+  /* 从 URL 猜图片扩展名：优先真实后缀；其次 query 里的 format= 参数
+     （图床 CDN 常见 ?x-oss-process=image/format,webp 这种地址本身没后缀）；
+     猜不到给 jpg —— 查看器兼容性最好。以前无后缀 URL 直接以 "12345" 这种
+     名字推送，存下来的文件没有扩展名，用户根本打不开。 */
+  function imgExtOf(url) {
+    let m = /\.(jpg|jpeg|png|webp|gif|avif|bmp)(?:$|[?#])/i.exec(url);
+    if (m) return m[1].toLowerCase() === "jpeg" ? "jpg" : m[1].toLowerCase();
+    m = /format[=/,](?:image\/format[=/,])?(webp|png|jpe?g|gif|avif)/i.exec(url);
+    if (m) return m[1].toLowerCase().replace("jpeg", "jpg");
+    return "jpg";
+  }
+
   /* 按需扫图片。图库/壁纸/漫画/商品详情页一页几百张，全部交给 webRequest
      会把列表淹掉（而且大半是图标和头像），所以只在用户点了「扫图片」时扫。
      判据：渲染面积足够大；懒加载还没拿到尺寸的（naturalWidth=0）保留，
@@ -509,11 +521,12 @@
       const rect = el ? el.getBoundingClientRect() : null;
       const shown = rect ? Math.min(rect.width, 480) * Math.min(rect.height, 480) : 0;
       if (w && h && w < 200 && h < 200 && shown < 160 * 160) return;
+      if (!/\.[a-z0-9]{2,5}$/i.test(name)) name = (name || "image") + "." + imgExtOf(abs);
       out.push({
         url: abs,
         kind: "image",
         size: 0,
-        name: (name || "image").replace(/[\\/:*?"<>|]/g, "_").slice(0, 120),
+        name: name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120),
         from: "dom-img",
       });
     };

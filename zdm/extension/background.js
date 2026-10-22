@@ -94,6 +94,35 @@ function pathHead(u, n) {
     return "";
   }
 }
+/** 通用站点（非 YouTube / 非B站）的 DASH 音频轨识别。
+ *
+ *  DASH 的音频轨用 fMP4 容器，Content-Type 报 video/mp4 是常态（B站就是这样），
+ *  抖音 / 快手 / Twitter / Facebook 无一例外。所以音频判定必须看 URL 特征，
+ *  且必须排在 Content-Type 之前 —— 否则这些站点的音频轨全被判成视频，
+ *  嗅探列表里一条音频都没有，从面板推送必然「只有画面没声音」。
+ *
+ *  判据（宁缺毋滥，配错一条背景音乐比没声音更糟）：
+ *   - 路径里出现独立的 audio 段：.../audio.m4s、/audio/seg.m4s、x-audio.mp4
+ *   - query 里显式声明媒体类型：media_type=audio / mime=audio / type=audio
+ *  `?audio=1` 这种不算（视频轨也常带多音轨参数，会误伤）。
+ */
+function genericAudioUrl(url) {
+  let path = "";
+  let query = "";
+  try {
+    const u = new URL(url);
+    path = u.pathname;
+    query = u.search;
+  } catch (_) {
+    return false;
+  }
+  if (/[/_-]audio(?:[._/-]|$)/i.test(path)) return true;
+  if (/(?:^|[?&])(?:media_type|mime|type|format)=audio(?:%|&|$)/i.test(query)) {
+    return true;
+  }
+  return false;
+}
+
 /** 一条音频轨与一条视频轨「是不是同一批 DASH 分发」的置信分。
  *
  *  完全同 host → 100（同一套分发域名，最强信号）；
@@ -281,7 +310,11 @@ function nameFromUrl(url, kind) {
   }
   name = name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
   if (!name || !/\.[a-z0-9]{2,5}$/i.test(name)) {
-    name = (name || "media") + (kind === "audio" ? ".mp3" : ".mp4");
+    /* 图片以前也被补成 .mp4：扫图片推下去的文件名是 JPEG 数据，
+       存成 .mp4 用户当然打不开。按 kind 分别补后缀。 */
+    name =
+      (name || "media") +
+      (kind === "audio" ? ".mp3" : kind === "image" ? ".jpg" : ".mp4");
   }
   /* B站的 DASH 轨是 .m4s（分段 MP4）。存成 .m4s 用户认不出是什么，
      播放器也不认 —— 按音/视频轨分别落成 .mp4 / .m4a。 */
@@ -349,6 +382,11 @@ function classifyResponse(details) {
     // B站 DASH：视频轨 -1-30080.m4s，音频轨 -1-30280.m4s，只能从编号认。
     const m = BILI_AUDIO_ID.exec(url);
     kind = m && isBiliAudioId(Number(m[1])) ? "audio" : "video";
+  } else if (genericAudioUrl(url)) {
+    /* 通用 DASH 的音频轨：Content-Type 常报 video/mp4（fMP4 容器），
+       必须排在 Content-Type 之前，否则抖音/快手/Twitter 的音频轨
+       全被判成视频，嗅探列表里没有音频 → 推送必然没声音。 */
+    kind = "audio";
   } else if (ct.startsWith("video/")) {
     kind = "video";
   } else if (ct.startsWith("audio/")) {
