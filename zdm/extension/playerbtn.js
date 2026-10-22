@@ -216,10 +216,15 @@
                 <option value="2160">2160P（4K）</option>
               </select>
             </div>
-            <button class="act pri" type="button" data-act="resolve">
-              <span><span class="t">解析此页面</span>
-                <span class="d">音视频完整，由 yt-dlp 取合流格式</span></span>
+            <button class="act pri" type="button" data-act="hls">
+              <span><span class="t">下载此视频（流媒体）</span>
+                <span class="d">用嗅探到的播放列表整条拉，后端自动合并分片</span></span>
               <span class="k">推荐</span>
+            </button>
+            <button class="act" type="button" data-act="resolve">
+              <span><span class="t">解析此页面</span>
+                <span class="d">音视频完整，由 yt-dlp 取合流格式（限已支持站点）</span></span>
+              <span class="k"></span>
             </button>
             <button class="act" type="button" data-act="merge">
               <span><span class="t">下载视频 + 音频</span>
@@ -386,7 +391,21 @@
     const page = canonicalPageUrl();
     const r = await send({ type: "zdm-youtube-resolve", url: page });
     if (!r || !r.ok || !(r.formats || []).length) {
-      setTip("解析失败：" + ((r && r.error) || "没有可用格式") + "，可改用下面两项", true);
+      const err = String((r && r.error) || "没有可用格式");
+      /* 报错要能指导下一步，不然用户只看到一句英文 */
+      if (/unsupported url/i.test(err)) {
+        setTip(
+          "yt-dlp 不认识这个页面（首页/信息流通常不行，要具体内容页）。改用上面的「流媒体」或嗅探面板里的 HLS 条目",
+          true
+        );
+      } else if (/fresh cookies|cookies .*needed|login|sign in/i.test(err)) {
+        setTip(
+          "该站点需要登录态：先在浏览器登录这个站点再试，或改用上面的「流媒体」",
+          true
+        );
+      } else {
+        setTip("解析失败：" + err + "，可改用上面的「流媒体」", true);
+      }
       return;
     }
     /* 选档：优先正好命中用户选的清晰度；没有就取不超过它的最高一档；
@@ -478,16 +497,72 @@
     return "";
   }
 
+  /* 嗅探到的播放列表（m3u8 / mpd）。
+   *
+   *  这是**最通用**的一条路：抖音、快手、X、Facebook、绝大多数直播与
+   *  自适应流站点，页面都会去取一份播放列表，扩展能嗅到它。取最新的那
+   *  一条（页面刚发的请求，对应的就是当前正在播的视频），推给后端由
+   *  ffmpeg 整条拉下来。
+   *
+   *  为什么需要它：yt-dlp 只覆盖 2000+ 站点里的**一部分**——实测快手
+   *  只有 generic extractor（Unsupported URL），X 必须是具体推文页
+   *  （x.com/home 直接 Unsupported）。而嗅探到的播放列表不挑站点。 */
+  async function streamForCurrent() {
+    const api = window.__zdmSniffer;
+    if (!api || typeof api.items !== "function") return null;
+    let list = [];
+    try {
+      list = api.items() || [];
+    } catch (_) {
+      return null;
+    }
+    const streams = list.filter(
+      (x) => x && (x.kind === "hls" || x.kind === "dash") && x.url
+    );
+    if (!streams.length) return null;
+    // 最新发的那条 playlist 才是当前视频的（页面上多个视频轮流播时，
+    // 只有最后请求的那个对应现在的画面）
+    streams.sort((a, b) => (b.at || 0) - (a.at || 0));
+    return streams[0];
+  }
+
+  async function pushStream() {
+    const s = await streamForCurrent();
+    if (!s) {
+      setTip("这一页还没嗅到播放列表（HLS/DASH）。播放几秒再试，或用下面的其它方式", true);
+      return;
+    }
+    const res = await send({
+      type: "sniffer-push",
+      item: {
+        url: s.url,
+        filename: pageTitle() + ".mp4",
+        referer: location.href,
+        cookie: document.cookie || undefined,
+        source: "playerbtn",
+        kind: s.kind,
+      },
+    });
+    if (res && res.ok) {
+      setTip("已推送给 ZDM：后端会取分片并合并成 mp4");
+      closePanel();
+    } else {
+      setTip("推送失败，请确认 ZDM 正在运行", true);
+    }
+  }
+
   async function act(what) {
     if (busy) return;
     busy = true;
     try {
-      if (what === "resolve") {
+      if (what === "hls") {
+        await pushStream();
+      } else if (what === "resolve") {
         await resolveAndPush();
       } else if (what === "direct") {
         const url = directUrl(media);
         if (!url) {
-          setTip("这个播放器用加密串流（MSE），拿不到直链，请用「解析此页面」", true);
+          setTip("这个播放器用加密串流（MSE），拿不到直链，请用上面的「流媒体」或「解析此页面」", true);
           return;
         }
         const isAudio = media.tagName === "AUDIO";

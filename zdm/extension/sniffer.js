@@ -587,6 +587,36 @@
     return out.slice(0, MAX_ROWS);
   }
 
+  /* 图片的体积只能问桌面端：DOM 扫描拿不到 Content-Length，而
+     performance 的 encodedBodySize 对跨域资源是 0（除非对方返回
+     Timing-Allow-Origin）。桌面端不受 CORS 限制，能问到真实大小。 */
+  async function probeImageSizes() {
+    const need = imgItems
+      .filter((x) => !x.size && /^https?:\/\//i.test(x.url))
+      .slice(0, 12);
+    if (!need.length) return;
+    let r = null;
+    try {
+      r = await send({ type: "sniffer-probe-sizes", urls: need.map((x) => x.url) });
+    } catch (_) {
+      r = null;
+    }
+    const sizes = (r && r.sizes) || {};
+    let changed = 0;
+    for (const it of imgItems) {
+      if (it.size) continue;
+      const n = sizes[it.url];
+      if (n > 0) {
+        it.size = n;
+        changed++;
+      }
+    }
+    if (changed) {
+      renderList();
+      renderFab();
+    }
+  }
+
   function addImages() {
     const found = scanImages();
     let added = 0;
@@ -599,6 +629,8 @@
     }
     renderFab();
     renderList();
+    // 体积问桌面端要（跨域资源浏览器这边量不出来）
+    if (added) probeImageSizes();
     return added;
   }
 
