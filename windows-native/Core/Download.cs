@@ -631,6 +631,17 @@ public sealed class Download
                 if (Headers.Count > 0)
                     foreach (var kv in Headers)
                         client.DefaultRequestHeaders.TryAddWithoutValidation(kv.Key, kv.Value);
+                // B站 / YouTube 的 CDN 没有 Referer 直接 403。扩展推送时
+                // 任务头里一定带着页面地址，走不到下面这段；这是给
+                // zdm:// 协议、桌面端粘贴这类不带 Referer 的入口兜底。
+                if (!Headers.Any(k => string.Equals(k.Key, "Referer", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var audioHost = (Uri.TryCreate(AudioUrl, UriKind.Absolute, out var au) ? au.Host : "") ?? "";
+                    if (audioHost.Contains("bilivideo") || audioHost.Contains("bilibili"))
+                        client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
+                    else if (audioHost.Contains("googlevideo") || audioHost.Contains("youtube"))
+                        client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
+                }
                 client.Timeout = Timeout;
                 using var resp = client.GetAsync(AudioUrl).GetAwaiter().GetResult();
                 if (!resp.IsSuccessStatusCode) return false;

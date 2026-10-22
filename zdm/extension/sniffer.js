@@ -68,7 +68,8 @@
     }
     name = name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
     if (!name || !/\.[a-z0-9]{2,5}$/i.test(name)) {
-      name = (name || "media") + (kind === "audio" ? ".mp3" : ".mp4");
+      const ext = kind === "audio" ? ".mp3" : kind === "image" ? ".jpg" : ".mp4";
+      name = (name || "media") + ext;
     }
     return name;
   }
@@ -145,18 +146,23 @@
      下一次刷新又会把它带回来。这里在本地记一笔，让推过的别再冒出来。 */
   const pushed = new Set();
 
+  /* 按需扫出来的图片单独放一份：网络嗅探刻意不收图片（否则每个页面的
+     图标、头像、广告图会把列表淹掉），只有用户点「扫图片」才有。 */
+  const imgItems = [];
+
   /* 条目身份。YouTube 的阶梯行每一条都指向同一个页面地址（清晰度在选择器
      里），只看 url 会把 2160/1080/720 合成一条；带 key 的用 key。 */
   const keyOf = (it) => (it && (it.key || it.url)) || "";
 
-  function merge(network, dom, keepLocal) {
+  function merge(network, dom, local) {
     const seen = new Map(); // key -> 已收录的那条
     const out = [];
     // background 的网络嗅探结果优先（带 Content-Type / 大小），
     // DOM 扫描的结果补充在后面（首屏直链媒体在 webRequest 之前就加载完了）。
-    // keepLocal=false 时以 background 的列表为权威：换页之后它已经清了，
-    // 若还把本地旧条目拼回来，新页面会继承上一个页面的媒体。
-    const src = keepLocal ? (network || []).concat(dom || []).concat(items) : (network || []).concat(dom || []);
+    // local 是「只在内容脚本这一侧的条目」——按需扫出来的图片。
+    // 换页之后 background 的列表已经清了，所以 local 必须由调用方决定
+    // 要不要拼回来，不能无条件拼（否则新页面会继承上一个页面的媒体）。
+    const src = (network || []).concat(dom || []).concat(local || []);
     for (const it of src) {
       if (!it || !it.url || pushed.has(keyOf(it))) continue;
       const k = keyOf(it);
@@ -231,7 +237,19 @@
         .go:hover{background:#1d4fd8}
         .go[disabled]{background:#e2e8f0;color:#94a3b8;cursor:default}
         .ft{padding:9px 13px;border-top:1px solid #eef1f5;font-size:11px;color:#94a3b8;
-          background:#fafbfc}
+          background:#fafbfc;display:flex;align-items:center;gap:8px}
+        .ft .sp{flex:1;min-width:0}
+        .ftbtn{all:initial;cursor:pointer;border:none;border-radius:6px;background:#eef2ff;
+          color:#3730a3;font:600 11px/1 -apple-system,sans-serif;padding:5px 8px;font-family:inherit}
+        .ftbtn:hover{background:#e0e7ff}
+        .ftbtn[disabled]{background:#f1f5f9;color:#cbd5e1;cursor:default}
+        .hd .imgb{all:initial;cursor:pointer;border:none;border-radius:6px;
+          background:#eef2ff;color:#3730a3;font:600 11px/1 -apple-system,sans-serif;
+          padding:5px 9px;font-family:inherit}
+        .hd .imgb:hover{background:#e0e7ff}
+        .cb{all:initial;flex:none;width:15px;height:15px;cursor:pointer;accent-color:#2563eb}
+        .thumb{all:initial;width:30px;height:30px;border-radius:6px;object-fit:cover;
+          background:#eef2f7;flex:none}
         .empty{padding:26px 16px;text-align:center;color:#94a3b8;font-size:12.5px}
         @media (prefers-color-scheme: dark){
           .panel{background:#1e293b;border-color:#334155;color:#e2e8f0}
@@ -254,9 +272,14 @@
       </button>
       <div class="panel" hidden>
         <div class="hd"><span class="dot"></span><span class="t">检测到媒体</span>
+          <button class="imgb" type="button" title="扫描页面里的大图（图库/壁纸/漫画站）">扫图片</button>
           <button class="x" type="button" title="关闭">✕</button></div>
         <ul class="list"></ul>
-        <div class="ft">由 ZDM 浏览器扩展提供 · HLS / DASH 自适应流将在后续版本支持</div>
+        <div class="ft">
+          <span class="sp">HLS / DASH 自适应流请用「解析此页面」</span>
+          <button class="ftbtn" type="button" data-act="all" hidden>全选</button>
+          <button class="ftbtn" type="button" data-act="sel" hidden>下载所选 0</button>
+        </div>
       </div>`;
     (document.documentElement || document.body).appendChild(host);
     fab = shadow.querySelector(".fab");
@@ -297,32 +320,66 @@
     if (titleEl) titleEl.textContent = n ? `检测到 ${n} 个媒体` : "暂无媒体";
   }
 
+  const KIND_LABEL = { video: "视频", audio: "音频", image: "图片" };
+  const KIND_ICON = {
+    video:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m10 8 6 4-6 4V8z"/><rect x="2" y="4" width="20" height="16" rx="2"/></svg>',
+    audio:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>',
+    image:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>',
+  };
+
+  /* 已勾选的条目（按 key 记，刷新后 key 不变的还能留着） */
+  const selected = new Set();
+
   function renderList() {
     if (!listEl) return;
     if (!items.length) {
       listEl.innerHTML =
-        '<div class="empty">还没有嗅探到媒体<br>播放或刷新页面后会自动出现</div>';
+        '<div class="empty">还没有嗅探到媒体<br>播放或刷新页面后会自动出现<br>图库站可以点右上角「扫图片」</div>';
+      syncBatch();
       return;
     }
     listEl.innerHTML = items
       .map(
         (it, i) => `
         <li class="row">
-          <span class="ico">${
-            it.kind === "audio"
-              ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>'
-              : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m10 8 6 4-6 4V8z"/><rect x="2" y="4" width="20" height="16" rx="2"/></svg>'
-          }</span>
+          <input class="cb" type="checkbox" data-i="${i}" ${
+          selected.has(keyOf(it)) ? "checked" : ""
+        } title="勾选后可批量下载">
+          ${
+            it.kind === "image"
+              ? `<img class="thumb" src="${esc(it.url)}" loading="lazy" alt="" referrerpolicy="no-referrer">`
+              : `<span class="ico">${KIND_ICON[it.kind] || KIND_ICON.video}</span>`
+          }
           <span class="meta">
             <span class="nm">${esc(it.name || guessName(it.url, it.kind))}</span>
-            <span class="sub">${esc(it.kind === "audio" ? "音频" : "视频")} · ${esc(
-          fmtSize(it.size, it.approx)
-        )}</span>
+            <span class="sub">${esc(
+          it.kind === "image" && it.from === "dom-img"
+            ? "图片 · 本页扫描"
+            : KIND_LABEL[it.kind] || "媒体"
+        )} · ${esc(fmtSize(it.size, it.approx))}</span>
           </span>
           <button class="go" type="button" data-i="${i}">推送</button>
         </li>`
       )
       .join("");
+    syncBatch();
+  }
+
+  /* 底部批量按钮的显隐与计数。图片站一页几百张，逐条点「推送」不现实。 */
+  function syncBatch() {
+    const sel = shadow && shadow.querySelector('.ftbtn[data-act="sel"]');
+    const all = shadow && shadow.querySelector('.ftbtn[data-act="all"]');
+    if (!sel || !all) return;
+    const n = selected.size;
+    sel.hidden = n === 0;
+    sel.textContent = `下载所选 ${n}`;
+    sel.disabled = false;
+    all.hidden = items.length === 0;
+    all.textContent =
+      n > 0 && n === items.length ? "取消全选" : `全选 ${items.length}`;
   }
 
   const listClick = (e) => {
@@ -337,6 +394,7 @@
         b.textContent = ok ? "已推送" : "失败";
         if (ok) {
           pushed.add(keyOf(it)); // 别再让下一次刷新把它带回来
+          selected.delete(keyOf(it));
           const i = items.indexOf(it);
           if (i >= 0) items.splice(i, 1);
           setTimeout(renderList, 700);
@@ -351,6 +409,46 @@
         b.textContent = "重试";
       });
   };
+
+  /* 勾选/取消勾选：只改 selected，不重绘整张列表（图库站一页几百行，
+     每点一次复选框就重建 DOM 会丢焦点、也会让图片重新加载）。 */
+  const listChange = (e) => {
+    const cb = e.target.closest("input.cb");
+    if (!cb) return;
+    const it = items[Number(cb.dataset.i)];
+    if (!it) return;
+    if (cb.checked) selected.add(keyOf(it));
+    else selected.delete(keyOf(it));
+    syncBatch();
+  };
+
+  /* 批量推送。串行而不是 Promise.all：ZDM 那边是单线程队列，
+     一口气灌几十条既没必要，也会把唤醒流程反复触发。 */
+  async function pushSelected() {
+    const sel = shadow && shadow.querySelector('.ftbtn[data-act="sel"]');
+    const picked = items.filter((it) => selected.has(keyOf(it)));
+    if (!picked.length) return;
+    if (sel) {
+      sel.disabled = true;
+      sel.textContent = `推送中 0/${picked.length}`;
+    }
+    let done = 0;
+    for (const it of picked) {
+      const ok = await pushOne(it).catch(() => false);
+      done++;
+      if (ok) {
+        pushed.add(keyOf(it));
+        selected.delete(keyOf(it));
+        const i = items.indexOf(it);
+        if (i >= 0) items.splice(i, 1);
+      }
+      if (sel) sel.textContent = `推送中 ${done}/${picked.length}`;
+    }
+    renderList();
+    renderFab();
+    if (sel) sel.disabled = false;
+    syncBatch();
+  }
 
   async function pushOne(it) {
     const page = location.href;
@@ -374,10 +472,95 @@
   async function refresh(forceDom) {
     const dom = scanDomThrottled(forceDom);
     const r = await send({ type: "sniffer-list" });
-    // keepLocal=false：background 的列表是权威，别把本地旧条目拼回来
-    merge((r && r.items) || [], dom, false);
+    // local 只传按需扫出来的图片：background 的列表是权威，别把本地旧条目拼回来
+    merge((r && r.items) || [], dom, imgItems);
     renderFab();
     if (panelOpen) renderList();
+  }
+
+  /* 按需扫图片。图库/壁纸/漫画/商品详情页一页几百张，全部交给 webRequest
+     会把列表淹掉（而且大半是图标和头像），所以只在用户点了「扫图片」时扫。
+     判据：渲染面积足够大；懒加载还没拿到尺寸的（naturalWidth=0）保留，
+     那种多半是原图，让用户自己判断。 */
+  const IMG_NAME_SKIP =
+    /(favicon|sprite|icon|logo|avatar|badge|emoji|loading|placeholder|spacer|pixel|beacon|qr|arrow|close|menu|search)/i;
+  function scanImages() {
+    const page = location.href;
+    const out = [];
+    const seen = new Set();
+    const add = (raw, el) => {
+      let abs;
+      try {
+        abs = new URL(raw, page).href;
+      } catch (_) {
+        return;
+      }
+      if (!/^https?:/i.test(abs) || seen.has(abs)) return;
+      seen.add(abs);
+      let name = "";
+      try {
+        name = decodeURIComponent(new URL(abs).pathname.split("/").filter(Boolean).pop() || "");
+      } catch (_) {
+        /* ignore */
+      }
+      if (IMG_NAME_SKIP.test(name)) return;
+      const w = el ? el.naturalWidth || Number(el.getAttribute("width")) || 0 : 0;
+      const h = el ? el.naturalHeight || Number(el.getAttribute("height")) || 0 : 0;
+      const rect = el ? el.getBoundingClientRect() : null;
+      const shown = rect ? Math.min(rect.width, 480) * Math.min(rect.height, 480) : 0;
+      if (w && h && w < 200 && h < 200 && shown < 160 * 160) return;
+      out.push({
+        url: abs,
+        kind: "image",
+        size: 0,
+        name: (name || "image").replace(/[\\/:*?"<>|]/g, "_").slice(0, 120),
+        from: "dom-img",
+      });
+    };
+    document.querySelectorAll("img").forEach((el) => {
+      const src =
+        el.getAttribute("src") ||
+        el.getAttribute("data-src") ||
+        el.getAttribute("data-original") ||
+        "";
+      if (src && !/^(data|blob):/i.test(src)) add(src, el);
+      const ss = el.getAttribute("srcset") || "";
+      if (ss) {
+        // srcset 里挑描述宽度最大的那一张（通常是原图）
+        let best = "";
+        let bestW = -1;
+        for (const part of ss.split(",")) {
+          const seg = part.trim().split(/\s+/);
+          if (!seg[0]) continue;
+          const w = seg[1] ? parseFloat(seg[1]) : 0;
+          if (w >= bestW) {
+            bestW = w;
+            best = seg[0];
+          }
+        }
+        if (best) add(best, el);
+      }
+    });
+    // 直接链到原图的 <a href="*.jpg">：图库站的「查看原图」多是这种
+    document
+      .querySelectorAll('a[href$=".jpg"],a[href$=".jpeg"],a[href$=".png"],a[href$=".webp"],a[href$=".gif"],a[href$=".avif"]')
+      .forEach((a) => add(a.getAttribute("href"), null));
+    return out.slice(0, MAX_ROWS);
+  }
+
+  function addImages() {
+    const found = scanImages();
+    let added = 0;
+    for (const it of found) {
+      if (pushed.has(keyOf(it))) continue;
+      if (imgItems.some((x) => x.url === it.url)) continue;
+      if (items.some((x) => x.url === it.url)) continue;
+      imgItems.push(it);
+      added++;
+    }
+    renderFab();
+    renderList();
+    return added;
   }
 
   function observe() {
@@ -401,10 +584,60 @@
       return;
     }
     build();
-    if (listEl) listEl.addEventListener("click", listClick);
+    if (listEl) {
+      listEl.addEventListener("click", listClick);
+      listEl.addEventListener("change", listChange);
+    }
+    const panel = shadow.querySelector(".panel");
+    const imgb = shadow.querySelector(".hd .imgb");
+    if (imgb) {
+      imgb.addEventListener("click", () => {
+        const n = addImages();
+        panelOpen = true;
+        panel.hidden = false;
+        renderList();
+        imgb.textContent = n ? `图片 +${n}` : "无新图片";
+        setTimeout(() => {
+          imgb.textContent = "扫图片";
+        }, 1600);
+      });
+    }
+    const btnAll = shadow.querySelector('.ftbtn[data-act="all"]');
+    const btnSel = shadow.querySelector('.ftbtn[data-act="sel"]');
+    if (btnAll) {
+      btnAll.addEventListener("click", () => {
+        if (selected.size && selected.size === items.length) selected.clear();
+        else items.forEach((it) => selected.add(keyOf(it)));
+        renderList();
+      });
+    }
+    if (btnSel) {
+      btnSel.addEventListener("click", () => {
+        pushSelected().catch(() => {});
+      });
+    }
     renderFab();
     refresh(true);
     observe();
+
+    /* 给通用播放器按钮（playerbtn.js）用：它要读当前嗅探列表来配对音轨、
+       也要能把面板调出来。两个文件是同一批 content script，同在 isolated
+       world，直接挂 window 上最省事（不用再走一遍消息往返）。 */
+    window.__zdmSniffer = {
+      items: () => items.slice(),
+      images: () => imgItems.slice(),
+      open: () => {
+        panelOpen = true;
+        panel.hidden = false;
+        renderList();
+      },
+      close: () => {
+        panelOpen = false;
+        panel.hidden = true;
+      },
+      refresh: () => refresh(true).catch(() => {}),
+      scanImages: () => addImages(),
+    };
 
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === "sniffer-update") {
@@ -412,16 +645,20 @@
         // <video>/<audio>（首屏直链媒体，webRequest 可能压根没经过）是我们自己
         // 扫 DOM 得到的。所以这里只能「合并」，不能整体覆盖——直接
         // items = msg.items 会把 DOM 扫描到的首屏媒体全部冲掉。
-        if (msg.reset) items = [];
+        if (msg.reset) {
+          items = [];
+          imgItems.length = 0;
+          selected.clear();
+        }
         // 非 reset 的推送是「有新发现」的增量通知，msg.items 是完整列表，
         // 但 DOM 扫到的那部分只在本地 —— 所以保留本地条目一起合并。
-        merge(msg.items || [], scanDomThrottled(false), true);
+        merge(msg.items || [], scanDomThrottled(false), items.concat(imgItems));
         renderFab();
         if (panelOpen) renderList();
       }
       if (msg && msg.type === "sniffer-ping") {
         send({ type: "sniffer-list" }).then((r) => {
-          merge((r && r.items) || [], scanDomThrottled(true), false);
+          merge((r && r.items) || [], scanDomThrottled(true), items.concat(imgItems));
           renderFab();
           if (panelOpen) renderList();
         });
