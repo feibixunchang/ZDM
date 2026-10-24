@@ -429,8 +429,18 @@
 :host(.on-player.menu) {
   z-index: 2147483001;
 }
-:host(.on-player) .btn { opacity: .92; pointer-events: auto; }
+/* host 是 0 尺寸的 fixed 容器：里面用 right:8px 定位会把按钮甩到 host 原点
+   左边（宽度都丢掉），按钮/菜单整体左偏、菜单飞到一边。
+   播放器上的按钮/菜单改用 left:0 —— 此时「host 原点 = 内容左缘」，
+   placePlayer / placePlayerMenu 里减宽度的坐标才成立。卡片按钮仍用
+   right:8px（卡片 host 在 position:relative 的卡片内，正常）。 */
+:host(.on-player) .btn { opacity: .92; pointer-events: auto; top: 0; left: 0; right: auto; }
 :host(.on-player) .btn:hover { opacity: 1; background: rgba(0,0,0, .95); }
+/* 播放器菜单：host 已被 placePlayerMenu 钉在按钮正下方（top=按钮底+6,
+   left=按钮右-菜单宽，右缘与按钮对齐）。菜单直接铺在 host 原点即可。
+   若仍用 right:8px 会在 0 宽 host 里把菜单甩到左边（「面板飞到一边」）。
+   卡片菜单的 host 没有 on-player，走 .menu 默认的 top:40px/right:8px，正常。 */
+:host(.on-player.menu) .menu { top: 0; left: 0; right: auto; }
 .btn:hover { background: rgba(0,0,0, .92); }
 .btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .btn.busy { opacity: 1; pointer-events: auto; }
@@ -682,6 +692,10 @@
       row.addEventListener("click", (ev) => onPick(info, row, ev));
       menu.appendChild(row);
     }
+    // 播放器菜单：内容（尤其清晰度行）渲染进来后菜单会变宽，open 时
+    // placePlayerMenu 用的是「读取中」的窄宽，右缘会偏离按钮。重排一次
+    // 让右边缘重新对齐按钮右缘（left = 按钮右 - 当前菜单宽）。
+    if (openMenu && openMenu.onPlayer && openMenu.place) openMenu.place();
   }
 
   /* 点某一行。重试也走这里 —— 以前失败分支会再挂一个 listener，
