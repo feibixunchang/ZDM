@@ -298,11 +298,14 @@ def download(
         args += ["--proxy", proxy]
     if ratelimit:
         args += ["--limit-rate", str(int(ratelimit))]
-    else:
-        # 未登录/无 PO token 的 YouTube 直链常被限速到几百 KB/s。yt-dlp 探测到
-        # 这种异常低速会换一个客户端重新取直链，速度通常明显回升。用户自己
-        # 设了限速时不加 —— 否则会把「主动限速」误判成「被限速」而反复重取。
-        args += ["--throttled-rate", "100K"]
+    # 这里曾经默认加 `--throttled-rate 100K`（低速就重新取直链），实测是毒药：
+    # yt-dlp 对这个参数的处理是「重新提取 → 从头重下」，而 YouTube 现在的限速
+    # 是**按 IP / 按时段**的（同一时刻换任何客户端、换任何直链都只有 20~30KB/s），
+    # 于是任务变成 下载一点 → 被判低速 → 重取 → 从头再来，永远到不了 100%。
+    # 用户看到的就是「挂了半小时、进度反而退回去、文件被删掉重下」。
+    # 慢但能跑完 >> 快但永远重来；而且每次重取都是一次新的页面请求，还会把
+    # 出口 IP 更快推进人机验证名单。换客户端只在**失败**时做（见 core._run_ytdlp
+    # 的重试链），不在低速时做。
     for k, v in (headers or {}).items():
         if v:
             args += ["--add-header", f"{k}:{v}"]
