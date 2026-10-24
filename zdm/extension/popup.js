@@ -75,6 +75,13 @@ $("#wake").onclick = async (e) => {
   }, 2500);
 };
 $("#openUi").onclick = () => send({ type: "open-ui" });
+$("#updateExt").onclick = () => {
+  // 重新加载整个扩展，从磁盘加载新版 background/content scripts。
+  // Windows 上扩展是随 ZDM 安装目录一起升级的，但 Chrome 不会自动感知磁盘
+  // 变化，必须手动 reload（等价于 chrome://extensions 里点「刷新」）。
+  // 这之后整个扩展上下文会被回收，弹窗随之关闭 —— 属正常表现。
+  chrome.runtime.reload();
+};
 $("#openOpts").onclick = () => chrome.runtime.openOptionsPage();
 
 load();

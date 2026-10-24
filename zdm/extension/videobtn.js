@@ -951,7 +951,9 @@
       // YouTube 走页面地址（后端用 yt-dlp 下）；其它站点用直链
       url: f.url || ytPage,
       filename: buildName(info, f),
-      referer: info.pageUrl,
+      // referer 兜底到当前页：播放器路径 info.pageUrl 已等于 location.href，
+      // 但嗅探/卡片等路径若缺 pageUrl，留空会让后端少一个关键请求头。
+      referer: info.pageUrl || location.href,
       // 从播放界面的「下载此视频」推的，和嗅探面板里点「推送」不是一回事。
       // 以前这里也写 sniffer，任务列表里全标成「嗅探」，排查时就被带偏了。
       source: "player",
@@ -964,8 +966,11 @@
     // YouTube：把页面地址和想要的高度一起交给后端，由它用 yt-dlp 下载。
     // 直链只能从头顺序读一小段（Google 的分段签名限制），分块引擎下不动，
     // 所以真正干活的是后端的 yt-dlp 通道。
+    // 注意：这里必须用带 location.href 兜底的 ytPage，而不是裸 info.pageUrl ——
+    // 一旦 info.pageUrl 为空，page_url 就会是 undefined，后端退回内置顺序引擎，
+    // 在带 TUN 代理的机器上会被 googlevideo 的 302 反复打断，吞吐暴跌到十几 KB/s。
     if (info.site === "youtube" && f.height) {
-      body.page_url = info.pageUrl;
+      body.page_url = ytPage;
       body.height = f.height;
     }
     // DASH 的视频轨没有声音。优先用后端（yt-dlp）已经配好的 audio_url，
