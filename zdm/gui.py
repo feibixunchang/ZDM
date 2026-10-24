@@ -2189,6 +2189,14 @@ class MainWindow(QMainWindow):
             self._open_url(info.get("url") or update.PROJECT_URL)
             return
         dest = os.path.join(os.path.expanduser("~/Downloads"), asset["name"])
+        # 下载目录里已经有这个版本的完整安装包（上次装失败/取消后关过程序）：
+        # 直接进安装流程。GitHub 的 100MB+ 包在弱网下要几分钟，重下一遍纯属
+        # 折磨；尺寸对得上就认为完整（同时下下来的 digest 仍然会在真正下载时校验）。
+        want = int(asset.get("size") or 0)
+        if want and os.path.isfile(dest) and os.path.getsize(dest) == want:
+            self._status("安装包已存在且完整，跳过下载…", hold=6)
+            self._on_update_downloaded(dest, info)
+            return
         proxy = str((self.config or {}).get("proxy") or "")
         self.update_download_btn.setEnabled(False)
         self.update_download_btn.setText("测速中…")
@@ -2287,7 +2295,16 @@ class MainWindow(QMainWindow):
             self._status("正在打开系统安装器…", hold=10)
             if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
                 self._status("已打开系统安装器，请按提示完成安装；ZDM 即将关闭", hold=15)
-                QTimer.singleShot(2000, QApplication.quit)
+                if self.tray is not None:
+                    try:
+                        self.tray.showMessage(
+                            "安装器已打开",
+                            "按提示完成安装；ZDM 会自动退出，装完重新打开即可。",
+                            QSystemTrayIcon.Information, 6000,
+                        )
+                    except Exception:
+                        pass
+                QTimer.singleShot(3500, QApplication.quit)
                 return
             # 极端情况下没有 xdg handler：再退回 pkexec/dpkg。
             self._background(
@@ -2301,7 +2318,9 @@ class MainWindow(QMainWindow):
         self._message(
             "更新已就绪",
             f"安装包已保存到：\n{path}\n\n"
-            "已为你打开：把 ZDM 拖进“应用程序”即可覆盖旧版本。",
+            "已为你打开这个安装包：把里面的 ZDM 拖进「应用程序」并确认「替换」。\n\n"
+            "替换完成后请退出 ZDM 再重新打开（托盘/菜单栏图标 → 退出），"
+            "新版本才会生效。",
         )
 
     def _on_linux_installed(self, res, path):
