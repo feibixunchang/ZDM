@@ -580,6 +580,33 @@ def _effective_connections(url: str, connections: int) -> int:
         return 1
     return max(1, int(connections))
 
+
+# googlevideo 直链任务的速度看门狗。推送时没带页面地址的任务（旧版扩展、
+# 重载前打开的标签页、嗅探面板路径）会掉进内置顺序引擎：googlevideo 的
+# mid-file Range 在部分网络（TUN/Fake-IP）下被 302 打断，吞吐只有几 KB/s
+# （实测 720P 百十 KB、144P 3 KB/s）。Referer 里就有 YouTube 页面地址，
+# 持续低速就地把任务切去 yt-dlp 通道 —— 引擎侧的「自动寻找最快下载渠道」。
+_YT_SLOW_BPS = 96 * 1024      # 5 秒滚动速度低于此值算「慢」
+_YT_SLOW_WINDOW = 40.0        # 持续慢这么久才切（避开起速/短暂抖动）
+_YT_PAGE_RE = _re.compile(
+    r"^https?://(www\.|m\.)?youtube(-nocookie)?\.com/(watch\?|shorts/)", _re.I
+)
+
+
+def yt_page_from_headers(headers: Optional[Dict[str, str]]) -> str:
+    """从请求头里找 YouTube 页面地址（Referer）。
+
+    扩展推送时总会带 `referer: location.href`，YouTube 页面上它就是
+    watch 地址 —— 服务端推导、看门狗切换都靠它拿到页面链接。
+    """
+    for k, v in (headers or {}).items():
+        if str(k).lower() == "referer":
+            s = str(v or "").strip()
+            if s and _YT_PAGE_RE.match(s):
+                return s
+    return ""
+
+
 class _YTAbort(Exception):
     """内部信号：进度回调发现用户暂停/取消，用来立刻中断 yt-dlp。
 
@@ -667,6 +694,9 @@ class Download:
 
         self._stop = threading.Event()
         self._pause = threading.Event()
+        # 看门狗正在把任务切去 yt-dlp 通道（见 _upgrade_to_ytdlp）。
+        # 置位期间 start() 的主循环必须安静退出，否则会和看门狗抢任务。
+        self._yt_switching = threading.Event()
         self._threads: List[threading.Thread] = []
         self._fd: Optional[int] = None
         self._on_event: Optional[Callable[[str, "Download"], None]] = None
@@ -957,13 +987,26 @@ class Download:
         self.meter.reset()
         self._emit("started")
 
+        # googlevideo 直链 + Referer 是 YouTube 页面 → 挂速度看门狗。
+        # 持续低速（内置顺序引擎在部分网络下被 302 反复打断）就地把任务
+        # 切去 yt-dlp 通道。yt_page 已在头的任务本来就走的 yt-dlp，不挂。
+        if not self.yt_page and needs_sequential(self.url):
+            if yt_page_from_headers(self.headers):
+                self._arm_yt_slow_guard()
+
         if self.size and self.supports_range:
             self._run_segmented()
         else:
             self._run_single()
 
         while True:
+            if self._yt_switching.is_set():
+                # 看门狗正在切去 yt-dlp 通道：它已接管收尾（关 fd、清文件、
+                # 重跑下载），主循环这里安静退出，别去走暂停/重试分支。
+                return
             if self._stop.is_set():
+                if self._yt_switching.is_set():
+                    return
                 # a pause that landed after the last byte still has to finalize
                 if self.segmenter and self.segmenter.is_complete() and self.size:
                     self._finish()
@@ -987,6 +1030,8 @@ class Download:
                 self._emit("error")
                 return
             if self._threads and all(not t.is_alive() for t in self._threads):
+                if self._yt_switching.is_set():
+                    return
                 # every connection exited without finishing
                 if self.segmenter and self.segmenter.downloaded() < self.size:
                     self.retries += 1
@@ -1106,6 +1151,99 @@ class Download:
                 self._emit("error")
                 return True
             time.sleep(0.2)
+
+    # ---------- YouTube：慢速直链任务自动切去 yt-dlp 通道 ----------
+    def _arm_yt_slow_guard(self) -> None:
+        """启动速度看门狗（daemon 线程，任务结束/暂停时一起退）。"""
+        t = threading.Thread(target=self._watch_yt_slow, daemon=True)
+        t.start()
+
+    def _watch_yt_slow(self) -> None:
+        """盯着 googlevideo 直链任务的速度，持续低速就升级下载通道。
+
+        判定用 SpeedMeter 的 5 秒滚动速度连续 _YT_SLOW_WINDOW 秒低于
+        _YT_SLOW_BPS —— 40 秒的窗口足以越过起速抖动和一次 302 重试，
+        又不会让用户干等太久。等待用 `self._stop.wait(5)`：暂停/取消时
+        看门狗和工作线程一起退，不会变成野线程。
+        """
+        slow_since: Optional[float] = None
+        while not self._stop.wait(5.0):
+            if self._yt_switching.is_set():
+                return
+            if self.status not in ("downloading", "queued"):
+                return
+            if self.segmenter and self.segmenter.is_complete():
+                return
+            now = time.time()
+            if self.meter.speed() < _YT_SLOW_BPS:
+                if slow_since is None:
+                    slow_since = now
+                elif now - slow_since >= _YT_SLOW_WINDOW:
+                    self._upgrade_to_ytdlp()
+                    return
+            else:
+                slow_since = None
+
+    def _upgrade_to_ytdlp(self) -> bool:
+        """把慢速的 googlevideo 直链任务**原地**切去 yt-dlp 通道。
+
+        和 `_yt_fallback_direct` 是反方向：那边是 yt-dlp 被 SABR 拦死时
+        退回直链，这边是直链慢到没法用（几 KB/s）时改走 yt-dlp。页面地址
+        从 Referer 拿（扩展推送必带）。yt-dlp 自己下载+合流；万一它也被拦，
+        它内部还会再退回这条直链，最坏情况等于升级前的行为。
+        """
+        page = yt_page_from_headers(self.headers)
+        if not page:
+            return False
+        # 随包 yt-dlp 不在（破损安装）时不升级：慢总比直接报错好。
+        try:
+            from . import ytdlp_bin
+
+            if not ytdlp_bin.binary_path():
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+        self._yt_switching.set()
+        try:
+            self._stop.set()
+            # 35s > 传输层最大读超时（默认 30s），保证工作线程一定退干净了
+            # 再动 fd 和文件 —— 否则残留线程会把删掉的 .part 重新创建出来。
+            if not self._join_workers(timeout=35.0):
+                # 极端情况：线程卡死。放弃升级，退回暂停态让用户手动重来
+                #（resume 会重新挂上看门狗）。
+                self._yt_switching.clear()
+                self._close_fd()
+                self._save_meta()
+                self.status = "paused"
+                self._emit("paused")
+                return False
+            self._close_fd()
+            # meta 里是旧的 chunks/直链状态，留着会让后续 _prepare 恢复错乱
+            for p in (self.meta_path, self.part_path):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+            # yt-dlp 从头下自己的文件，旧进度统计作废（几 KB/s 爬出来的
+            # 那几个 MB 不要也罢，yt-dlp 通道几十秒就下完了）。
+            self.yt_page = page
+            self.segmenter = None
+            self._yt_bytes = 0
+            self._yt_completed = 0
+            self._yt_speed = 0.0
+            self.retries = 0
+            self.meter.reset()
+            self._stop.clear()
+            self._pause.clear()
+            self.status = "downloading"
+            self.error = None
+            self.mux_error = None
+            self._emit("progress")
+            self._run_ytdlp()
+        finally:
+            self._yt_switching.clear()
+        return True
 
     def _start_ytdlp(self) -> None:
         self.status = "downloading"

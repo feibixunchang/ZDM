@@ -115,13 +115,27 @@ def _extra_bin_dirs() -> List[str]:
 
 
 def child_env() -> Dict[str, str]:
-    """给子进程补齐 PATH。
+    """给子进程补齐 PATH、剥掉代理环境变量。
 
     ZDM 的桌面进程不继承用户 shell 的 PATH，而 yt-dlp 要靠那里的 deno/node
     解 YouTube 的 JS 挑战、靠那里的 ffmpeg 合流。缺任何一个都会失败，所以
     在唯一的入口处补全，而不是每个调用点各补一次。
+
+    代理**只认 config 里的显式设置**（_run_ytdlp 用 --proxy 传给 yt-dlp），
+    环境变量一律剥掉：app 可能被从带代理的终端/沙箱里启动（`open -a` 会
+    继承调用方环境），子进程留着 http_proxy 就会把 YouTube 的页面请求送进
+    代理，拿到 consent/错误页 —— 表现为解析报
+    `KeyError('INNERTUBE_CONTEXT')`，且换 yt-dlp 版本、换客户端都没用。
+    内置下载通道早就以 `proxy=""` 绕过环境变量，这里对齐同一语义。
     """
     env = dict(os.environ)
+    for k in (
+        "http_proxy", "https_proxy", "all_proxy", "ftp_proxy",
+        "no_proxy",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY",
+        "NO_PROXY",
+    ):
+        env.pop(k, None)
     extra = _extra_bin_dirs() + [
         "/usr/local/bin",
         "/usr/bin",

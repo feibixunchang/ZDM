@@ -421,22 +421,27 @@ def _host_of(url: str) -> str:
 
 
 def _cookie_domains(host: str) -> List[str]:
-    """目标站点该铺哪些 Netscape 域。
+    """目标站点该铺哪个 Netscape 域。
 
-    Netscape 格式里 domain 带前导点 = 「本域及其所有子域都带这份 cookie」，
-    不带点 = 只有该 host 本身。所以要铺成 ".douyin.com" 才能覆盖
-    www.douyin.com；铺成 "douyin.com" 则只对 douyin.com 本身生效。
+    **绝不能返回互相嵌套的两个域**（如 .www.youtube.com + .youtube.com）：
+    http.cookiejar 对二者都 match，同名 cookie 会被发送两遍，
+    YouTube 直接返回一张没有 ytcfg 的页面 → yt-dlp 报
+    KeyError('INNERTUBE_CONTEXT')；抖音等站点则是 "Fresh cookies are needed"。
+    注册域一个条目即可覆盖所有子域，是唯一安全的基础写法。
+
+    YouTube 额外补 ".google.com"：登录态/人机验证（SAPISIDHASH）横跨
+    这两个域，只带 .youtube.com 会触发 "Sign in to confirm you're not a bot"。
+    两个域互不嵌套，不会重名。
     """
     h = (host or "").strip().lower().lstrip(".")
     if not h:
         # 不知道目标站点时保持旧行为（YouTube / Google 登录态）
         return [".youtube.com", ".google.com"]
-    doms = ["." + h]
     parts = h.split(".")
-    if len(parts) >= 2:
-        parent = ".".join(parts[-2:])
-        if "." + parent not in doms:
-            doms.append("." + parent)
+    reg = "." + (".".join(parts[-2:]) if len(parts) >= 2 else h)
+    doms = [reg]
+    if reg in (".youtube.com", ".youtube-nocookie.com") and ".google.com" not in doms:
+        doms.append(".google.com")
     return doms
 
 

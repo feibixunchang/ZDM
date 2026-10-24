@@ -443,6 +443,23 @@ class Handler(BaseHTTPRequestHandler):
                     body["kind"] = "video"
                     if not (body.get("filename") or body.get("name")):
                         body["filename"] = video_page_filename(url)
+            # 扩展推的是**媒体直链**（googlevideo…）且带 kind，上面的页面
+            # 链接推导（要求 not kind）不会命中 —— 但 Referer 里就有
+            # YouTube 页面地址。直链只能顺序读，部分网络（TUN/Fake-IP）下
+            # mid-file Range 被 302 打断，吞吐只有几 KB/s；带上页面地址让
+            # 任务走 yt-dlp 通道（自己解挑战、按段重取、下完合流），被拦时
+            # 还会自动退回这条直链。这是入口侧兜底：不管扩展新旧、标签页
+            # 是否重载过，推送都能走对通道。
+            if (
+                not body.get("yt_page")
+                and not body.get("page_url")
+                and "googlevideo.com/" in (url or "")
+            ):
+                from .core import yt_page_from_headers
+
+                page = yt_page_from_headers(headers)
+                if page:
+                    body["yt_page"] = page
             # A caller that resolved the page itself (desktop GUI, browser
             # extension) sends yt_page but often no kind; mark it here so the
             # list renders it as a video and not as an ordinary file.
