@@ -384,19 +384,38 @@ def _silent_kwargs() -> dict:
     return {}
 
 
-def install_windows(setup_path: str, relaunch_exe: str = "") -> bool:
-    """Windows：静默升级，装完把新版重新拉起来。返回是否成功拉起安装器。
+def install_windows(setup_path: str, relaunch_exe: str = "", silent: bool = False) -> bool:
+    """Windows：启动安装程序。返回是否成功拉起。
 
-    为什么不用 Inno 的 ``[Run]`` + ``Check: WizardSilent`` 来做重启：静默安装时
-    那条**真的会执行**，Setup 会一直等被拉起的 GUI 进程退出，安装器于是永不返回
-    （CI 的 Install and verify 就这么卡了 20 分钟，日志里只剩一句
-    "Terminate orphan process: pid (9100) (Zdm)"）。
+    **默认走可见向导**（silent=False）。历史版本用的是 ``/SILENT``，用户点
+    「下载并安装」后看到的是：ZDM 所有窗口/托盘一起消失，然后什么都没有 ——
+    静默安装既没有界面也没有「装完了」的反馈，装失败时更是彻底黑箱，用户只能
+    自己去下载目录把安装包翻出来双击。那套「一键静默升级」在真实机器上收益
+    很低（省掉一次点「下一步」），代价却是更新失败时完全不可诊断。
 
-    所以改成：退出前起一个游离的 powershell —— 先等安装器结束，再启动新版，
-    与应用自身的生命周期彻底解耦。调用方拿到 True 后应该立刻退出进程。
+    可见向导下：Setup 自己在 ``ssInstall`` 阶段 taskkill 掉 ZDM.exe（见
+    installer.iss::KillRunningZdm），装完的完成页自带「立即启动 ZDM」勾选项
+    （``[Run] ... postinstall skipifsilent``），所以调用方**不需要**再安排重启，
+    也不应该急着 quit —— 让用户看着向导走完，体验才对。
+
+    ``silent=True`` 保留给无人值守场景（CI/脚本），走 /SILENT 并起一个游离的
+    powershell 在装完后拉起新版；那条路径**不要**在交互式更新里用。
     """
-    if os.name != "nt" or not setup_path:
+    if os.name != "nt" or not setup_path or not os.path.isfile(setup_path):
         return False
+
+    if not silent:
+        try:
+            # DETACHED_PROCESS：与本进程彻底解耦，GUI 退出/被杀都不影响向导。
+            subprocess.Popen(
+                [setup_path, "/CLOSEAPPLICATIONS", "/NORESTART"],
+                creationflags=0x00000008,
+                close_fds=True,
+            )
+            return True
+        except Exception:  # noqa: BLE001 - 交付给调用方处理（提示手动安装）
+            return False
+
     exe = relaunch_exe or sys.executable
     if not exe:
         return False
@@ -427,32 +446,57 @@ def install_windows(setup_path: str, relaunch_exe: str = "") -> bool:
         return False
 
 
-# --------------------------------------------------------------------------- ignore list
+# --------------------------------------------------------------------------- local state
 def _conf_path() -> str:
     from .manager import config_dir
 
     return os.path.join(config_dir(), "update.json")
 
 
-def load_ignored() -> str:
-    """Version the user asked to skip ('忽略此版本')."""
+def _load_conf() -> dict:
     try:
         with open(_conf_path(), "r", encoding="utf-8") as f:
-            return str(json.load(f).get("ignored") or "")
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return ""
+        return {}
 
 
-def save_ignored(version: str) -> None:
+def _save_conf(data: dict) -> None:
     try:
-        data = {}
-        try:
-            with open(_conf_path(), "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-        except Exception:
-            data = {}
-        data["ignored"] = str(version or "")
-        with open(_conf_path(), "w", encoding="utf-8") as f:
+        path = _conf_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def load_ignored() -> str:
+    """Version the user asked to skip ('忽略此版本')."""
+    return str(_load_conf().get("ignored") or "")
+
+
+def save_ignored(version: str) -> None:
+    data = _load_conf()
+    data["ignored"] = str(version or "")
+    _save_conf(data)
+
+
+def load_last_check() -> float:
+    """上次成功问到「最新版本是多少」的时间戳（0 = 从没查过）。
+
+    用途：桌面端是常驻托盘的，一天可能重启七八次。没有这个记录就只能
+    「每次启动都打一次 api.github.com」，未登录限流 60 次/小时，很快 403，
+    然后用户看到的就是「检查更新永远连不上」。
+    """
+    try:
+        return float(_load_conf().get("last_check") or 0)
+    except Exception:
+        return 0.0
+
+
+def save_last_check(ts: Optional[float] = None) -> None:
+    data = _load_conf()
+    data["last_check"] = float(ts if ts is not None else time.time())
+    _save_conf(data)

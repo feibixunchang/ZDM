@@ -24,6 +24,17 @@ from zdm import autostart, desktop, runtime, update  # noqa: E402
 from zdm.videopage import is_video_page, is_youtube  # noqa: E402
 import theme as _theme  # noqa: E402
 
+# ---- 自动检查更新的节奏 -----------------------------------------------------
+# 桌面端是常驻托盘的，用户可能几天不重启一次；只在「启动后 2 秒」查一次，
+# 等于发版之后永远没人知道 —— 用户的实际感受就是「得亲手点一下检查更新」。
+# 改成：启动时查一次 + 后台每 4 小时复查；失败按 10min → 30min → 1h 退避
+# （api.github.com 未登录限流 60 次/小时，不能失败就立刻重试）。
+UPDATE_RECHECK_INTERVAL = 4 * 3600.0    # 成功问到版本后的下次检查间隔
+UPDATE_STARTUP_GAP = 20 * 60.0          # 启动时距上次检查不足此值就先跳过
+UPDATE_RETRY_MIN = 10 * 60.0            # 首次失败后的重试间隔
+UPDATE_RETRY_MAX = 60 * 60.0            # 退避上限
+UPDATE_TICK_MS = 5 * 60 * 1000          # 后台 tick（只判断「到期没有」）
+
 # Global theme manager. Created lazily in main() (it needs the QApplication),
 # but these helpers let widgets pull the active palette without depending on it.
 _THEME_MANAGER = None
@@ -1306,6 +1317,12 @@ class MainWindow(QMainWindow):
 
         self._update_info = None
         self._update_checking = False
+        # 下次允许自动检查的时间戳 / 失败退避当前值 / 后台 tick 定时器
+        self._update_next_at = 0.0
+        self._update_retry = UPDATE_RETRY_MIN
+        self._update_timer = None
+        self._update_notified = ""
+        self._downloaded_update = None
         self._suppress_restore_until = 0.0
 
         self._build_ui()
@@ -2035,8 +2052,45 @@ class MainWindow(QMainWindow):
         w.start()
 
     def _auto_check_update(self):
-        """Silent startup check (only when enabled in Settings)."""
+        """启动时安排第一次静默检查，并启动「后台定期复查」定时器。
+
+        以前这里只是一次 ``_check_update(silent=True)``：查完就再也不查了。
+        常驻托盘的用户几周不重启一次 GUI，发版之后自然永远看不到提示。
+        现在改成 tick 模型 —— 每 5 分钟判一次「到期没有」，真正的间隔由
+        ``_update_next_at`` 决定（成功 4 小时、失败 10min→30min→1h 退避）。
+        """
+        if self._update_timer is None:
+            self._update_timer = QTimer(self)
+            self._update_timer.setInterval(UPDATE_TICK_MS)
+            self._update_timer.timeout.connect(self._update_tick)
+            self._update_timer.start()
+        now = time.time()
+        last = update.load_last_check()
+        if last <= 0:
+            # 从没查过（首次安装 / 1.15.23 之前的老客户端）：启动就查。
+            self._update_next_at = now
+        elif last + UPDATE_STARTUP_GAP > now:
+            # 刚查过（刚重启过）：等到期再说，别拿 API 限额去撞墙。
+            self._update_next_at = last + UPDATE_STARTUP_GAP
+        else:
+            # 隔了很久（常驻几天后重启）：留 20 秒给网络/配置就绪。
+            self._update_next_at = now + 20.0
+        _dlog("[update] timer armed: last_check=%s, next_in=%ds" % (
+            "never" if last <= 0 else f"{int(now - last)}s ago",
+            int(self._update_next_at - now),
+        ))
+        if self._update_next_at <= now + 60.0:
+            # 距上次检查已经很久（或从没查过）：启动这次就查，不必再等。
+            self._update_next_at = now
+            self._update_tick()
+
+    def _update_tick(self):
+        """后台定时器：到点了才真正发起一次静默检查。"""
+        if self._update_checking:
+            return
         if not (self.config or {}).get("check_updates", True):
+            return
+        if time.time() < self._update_next_at:
             return
         self._check_update(silent=True)
 
@@ -2053,15 +2107,34 @@ class MainWindow(QMainWindow):
             quiet=silent,
         )
 
+    def _schedule_next_check(self, ok: bool):
+        """排下一次自动检查：成功 4 小时后，失败按指数退避（上限 1 小时）。"""
+        now = time.time()
+        if ok:
+            self._update_retry = UPDATE_RETRY_MIN
+            self._update_next_at = now + UPDATE_RECHECK_INTERVAL
+        else:
+            self._update_next_at = now + self._update_retry
+            self._update_retry = min(UPDATE_RETRY_MAX, self._update_retry * 3.0)
+
     def _on_update_checked(self, info, silent: bool):
         self._update_checking = False
         cur = VERSION
         if not info or not info.get("version"):
+            # 网络/代理/API 限流。静默检查不能就这么放弃 —— 以前正是这里
+            # return 掉，导致「启动那一次失败 = 这辈子不再提示」。
+            self._schedule_next_check(ok=False)
+            _dlog(f"[update] check failed (silent={silent}), retry in "
+                  f"{int(self._update_next_at - time.time())}s")
             if not silent:
                 self._message("检查更新",
                               "暂时连不上更新服务器（可能是网络或代理问题），请稍后再试。")
             return
         latest = info["version"]
+        update.save_last_check()
+        self._schedule_next_check(ok=True)
+        _dlog(f"[update] latest={latest} current={cur} newer="
+              f"{update.is_newer(latest, cur)} silent={silent}")
         if not update.is_newer(latest, cur):
             if not silent:
                 self._message("检查更新", f"当前已是最新版本 v{cur}。")
@@ -2072,18 +2145,44 @@ class MainWindow(QMainWindow):
         self._update_info = info
         self.update_label.setText(f"发现新版本 v{latest}（当前 v{cur}）")
         self.update_bar.setVisible(True)
-        if silent and self.tray is not None:
+        if self.tray is not None:
             try:
-                self.tray.showMessage(
-                    "ZDM 有新版本",
-                    f"v{latest} 已发布，点“下载并安装”即可更新。",
-                    QSystemTrayIcon.Information, 4000,
-                )
+                self.tray.setToolTip(f"ZDM 下载管理器 v{cur} · 有新版 v{latest}")
+            except Exception:
+                pass
+        # 「自动弹出提示」：同一版本只提示一次，避免每次复查都骚扰。
+        if silent and self._update_notified != latest:
+            self._update_notified = latest
+            if self.tray is not None:
+                try:
+                    self.tray.showMessage(
+                        "ZDM 有新版本",
+                        f"v{latest} 已发布，点“下载并安装”即可更新。",
+                        QSystemTrayIcon.Information, 6000,
+                    )
+                except Exception:
+                    pass
+            # 托盘气泡会被 Windows 通知中心/专注助手吞掉，任务栏闪一下更保险。
+            try:
+                QApplication.alert(self, 8000)
             except Exception:
                 pass
 
     def _download_update(self):
         info = self._update_info or {}
+        # 已经下过同一个版本的安装包就直接进安装流程：用户上次可能关掉了
+        # 向导/装到一半失败，不该再让他等 120MB 重下一遍，更不该让他自己去
+        # 下载目录里翻安装包（这是上一版最招骂的点）。
+        cached = self._downloaded_update or {}
+        if (
+            cached.get("version")
+            and cached.get("version") == info.get("version")
+            and cached.get("path")
+            and os.path.isfile(cached["path"])
+        ):
+            self._status("安装包已下载，正在打开安装向导…", hold=8)
+            self._on_update_downloaded(cached["path"], info)
+            return
         asset = update.pick_asset(info.get("assets") or [])
         if not asset:
             # No installer for this platform: send the user to the release page.
@@ -2140,16 +2239,45 @@ class MainWindow(QMainWindow):
             ):
                 self._open_url((info or {}).get("url") or update.PROJECT_URL)
             return
+        # 记住这份安装包：用户取消过向导/装到一半失败后，再点按钮直接进安装，
+        # 不必重下 120MB，也不必自己去下载目录里翻 exe。
+        ver = str((info or {}).get("version") or "")
+        self._downloaded_update = {"version": ver, "path": path}
+        self.update_download_btn.setText("开始安装")
+        if ver:
+            self.update_label.setText(f"v{ver} 安装包已就绪（已存到下载目录）")
         # 点「下载并安装」就是授权：下载完直接交给系统安装器，不再弹第二次确认。
         if sys.platform == "win32" and path.lower().endswith(".exe"):
+            running = [t for t in self.tasks if t.get("status") == "downloading"]
+            if running and not self._message_yes_no(
+                "开始安装",
+                f"安装期间 ZDM 会被关闭，正在进行的 {len(running)} 个下载会中断。\n"
+                "装完新版会自动启动，未完成的任务会从断点继续。\n\n"
+                f"安装包：{path}\n\n现在开始安装？",
+            ):
+                self._status(f"安装包已下载：{path}（随时可再点“下载并安装”）", hold=12)
+                return
             if not update.install_windows(path):
                 self._message(
                     "更新未能启动",
                     "没能启动安装程序，请手动运行：\n" + path,
                 )
                 return
-            self._status("正在安装更新…", hold=10)
-            QApplication.quit()
+            # 可见向导已经起来了，用户能看到「下一步」。
+            # **不要**在这里 QApplication.quit()：主动退出会先留下一段空白，
+            # 用户以为装崩了（这正是上一版 /SILENT 的观感）。向导走到 ssInstall
+            # 时 Inno 自己会 taskkill 掉 ZDM.exe，完成页还能勾选「立即启动」。
+            # 提示条保持可见：用户在向导里点了「取消」后，还能再点「开始安装」。
+            self._status("安装向导已打开，按提示点「下一步」即可", hold=20)
+            if self.tray is not None:
+                try:
+                    self.tray.showMessage(
+                        "安装向导已打开",
+                        "按提示点「下一步」；安装程序会自动关闭本程序，装完自动启动新版。",
+                        QSystemTrayIcon.Information, 6000,
+                    )
+                except Exception:
+                    pass
             return
         if sys.platform.startswith("linux") and path.lower().endswith(".deb"):
             # 用 GUI 自己的会话打开 .deb：QDesktopServices 走 Qt 的 xdg/DDE
@@ -2547,8 +2675,12 @@ class MainWindow(QMainWindow):
         autostart_cb.setChecked(autostart.is_enabled())
         auto_gui_cb = QCheckBox("下载时自动打开桌面端（未运行时）")
         auto_gui_cb.setChecked(bool(cfg.get("auto_show_gui", True)))
-        update_cb = QCheckBox("启动时自动检查更新")
+        update_cb = QCheckBox("自动检查更新（启动时 + 后台每 4 小时）")
         update_cb.setChecked(bool(cfg.get("check_updates", True)))
+        update_cb.setToolTip(
+            "开启后：ZDM 启动时查一次，运行期间每 4 小时自动复查；\n"
+            "发现新版本会在窗口顶部显示提示条，并弹系统通知。"
+        )
         close_tray_cb = QCheckBox("关闭窗口时最小化到托盘（不退出程序）")
         close_tray_cb.setChecked(bool(_gui_cfg("close_to_tray", False)))
         # ---- appearance: follow the OS appearance by default ----

@@ -123,8 +123,11 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\c
 ; 只有交互安装才拉起界面。**不要**再加一条 `Check: WizardSilent` 的自动重启：
 ; 静默安装（应用内一键更新就是 /VERYSILENT，CI 也是）时那条会真的执行，
 ; Setup 会一直等这个 GUI 进程退出，装完永远不返回。
-; 升级后的重启由应用自己在退出前安排（见 gui.py::_relaunch_after_update）。
-Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+;
+; **必须带 gui 参数**（与 [Icons] 同理）：裸 ZDM.exe 在 CLI 里等于 `start`，
+; 1.15.x 以前这里漏了 Parameters，用户装完勾选「立即启动」看到的是浏览器
+; 里的网页版，桌面窗口根本没起来 —— 反馈就是「更新完界面没了」。
+Filename: "{app}\{#AppExeName}"; Parameters: "gui"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
