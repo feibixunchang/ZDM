@@ -1505,42 +1505,66 @@
       } catch (_) {
         players = [];
       }
-      // 只保留不被其它候选包含的元素（最里层），再按面积升序取最小的那个 ——
-      // 这才是真正的播放器，而不是包着它的整页/整列容器。
+      // 只保留不被其它候选包含的元素（最里层）—— 这才是真正的播放器，
+      // 而不是包着它的整页/整列容器。
       players = players.filter((p) => !players.some((q) => q !== p && p.contains(q)));
-      players.sort((a, b) => {
-        const ra = a.getBoundingClientRect();
-        const rb = b.getBoundingClientRect();
-        return ra.width * ra.height - rb.width * rb.height;
-      });
-      const player = players[0];
-      // 不变式：整页只保留一个播放器按钮。扫描选中的播放器变了（SPA 软导航
-      // /影院模式切换会换容器元素），旧的那个立即连按钮一起移除；
-      // 元素已脱离文档的更是如此。以前旧的从不回收，切换几次就攒几个
-      // 钉在过时位置的多余按钮。
+      const rectOf = (el) => {
+        try {
+          return el.getBoundingClientRect();
+        } catch (_) {
+          return { width: 0, height: 0, top: 0, right: 0 };
+        }
+      };
+      const bigEnough = (el) => {
+        const r = rectOf(el);
+        return r.width >= 40 && r.height >= 40;
+      };
+      const tracked = trackedPlayers.size ? trackedPlayers.keys().next().value : null;
+      // 已跟踪的播放器只要还匹配选择器、还在文档里、尺寸正常，就绝不动它。
+      // 原因：YT_PLAYER 同时命中好几个元素（含隐藏的 0 尺寸模板），若每次
+      // 都按「面积最小」重选，隐藏模板（面积 0）必赢 —— 按钮钉在看不见的
+      // 元素上永远 hidden（1.5.30 「按钮彻底消失」的根因）；而 1.5.28 之前
+      // 从不回收，第一个撞大运选中的按钮才一直留在屏上（多余按钮的根因）。
+      const player =
+        tracked && tracked.isConnected && players.includes(tracked) && bigEnough(tracked)
+          ? tracked
+          : null;
+      let fresh = null;
+      if (!player) {
+        // 只在「当前有有效尺寸」的候选里选，隐藏元素（面积 0）没有资格。
+        fresh = players.filter(bigEnough);
+        fresh.sort((a, b) => {
+          const ra = rectOf(a);
+          const rb = rectOf(b);
+          return ra.width * ra.height - rb.width * rb.height;
+        });
+      }
+      const chosen = player || fresh[0] || null;
+      // 不变式：整页只保留一个播放器按钮。选中的播放器变了（SPA 软导航 /
+      // 影院模式切换会换容器元素），旧的那个连按钮一起移除。
       for (const [p, t] of Array.from(trackedPlayers)) {
-        if (!p.isConnected || (player && p !== player)) {
+        if (!p.isConnected || (chosen && p !== chosen)) {
           if (t.host && t.host.parentNode) t.host.parentNode.removeChild(t.host);
           delete p.__zdmBtn;
           delete p.__zdmBtnHost;
           trackedPlayers.delete(p);
         }
       }
-      // 兜底清扫：body 上所有按钮 host 的主人若已不在文档里，一并移除。
+      // 兜底清扫：body 上按钮 host 的主人已不在文档里的，一并移除。
       // （覆盖 trackedPlayers 之外的漏网之鱼，比如旧版本运行期留下的。）
       document.querySelectorAll("body > [" + MARK + '="btn"]').forEach((h) => {
         const owner = h.__zdmOwner;
         if (!owner || !owner.isConnected) h.remove();
       });
-      if (player && !trackedPlayers.has(player)) {
-        player.__zdmIsPlayer = true;
-        ensureButton(player);
-        const host = player.__zdmBtnHost;
-        const btn = player.__zdmBtn;
+      if (chosen && !trackedPlayers.has(chosen)) {
+        chosen.__zdmIsPlayer = true;
+        ensureButton(chosen);
+        const host = chosen.__zdmBtnHost;
+        const btn = chosen.__zdmBtn;
         if (host) {
           host.style.visibility = "hidden"; // 定位有效前先藏好
-          trackedPlayers.set(player, { host, btn, shown: false, top: 0, left: 0 });
-          placePlayer(player, trackedPlayers.get(player));
+          trackedPlayers.set(chosen, { host, btn, shown: false, top: 0, left: 0 });
+          placePlayer(chosen, trackedPlayers.get(chosen));
           schedulePositionLoop();
         }
       }
