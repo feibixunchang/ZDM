@@ -1127,17 +1127,20 @@ async function pingPresence() {
       headers: { "X-ZDM-Extension": chrome.runtime.id },
     });
     const j = await r.json().catch(() => null);
-    if (j && j.version) {
-      // 桌面端升级后自动 reload 扩展，从磁盘加载新的 background/content
-      // scripts；不用用户关闭并重开浏览器。
-      const key = "zdmAppVersion";
+    if (j && j.ext_version) {
+      // 服务端报的是「磁盘上随包扩展」的 manifest version。扩展更新跟着
+      // 安装包走：装包把新 extension/ 落盘，这里一比版本号就 reload 自己，
+      // 从磁盘加载新文件——不用用户重开浏览器，桌面端也不必跟着跳版本。
+      // 只认 ext_version：老服务只报桌面端版本号（1.15.x 号段），拿它和
+      // 1.5.x 比永远不等，会陷入每分钟一次的无限 reload。
+      const key = "zdmExtVersion";
       const prev = (await chrome.storage.local.get(key))[key] || "";
-      if (prev && prev !== j.version) {
-        await chrome.storage.local.set({ [key]: j.version });
+      if (prev && prev !== j.ext_version) {
+        await chrome.storage.local.set({ [key]: j.ext_version });
         chrome.runtime.reload();
         return;
       }
-      if (!prev) await chrome.storage.local.set({ [key]: j.version });
+      if (!prev) await chrome.storage.local.set({ [key]: j.ext_version });
     }
   } catch (_) {
     /* 服务没开：静默。桌面端自然显示「未检测到」。 */

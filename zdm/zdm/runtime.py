@@ -103,6 +103,16 @@ def _manifest_version(path: str) -> str:
         return ""
 
 
+def bundled_extension_version() -> str:
+    """磁盘上随包扩展的 manifest version；读不到返回空串。
+
+    给 /api/extension/ping 用：扩展拿它和自己运行中的 manifest.version
+    对比，不一致就 reload 自己。这是「扩展跟着安装包走」链路的最后一环
+    ——安装包把新 extension/ 落盘，服务把新版本号报出去，扩展自动重载。
+    """
+    return _manifest_version(extension_dir())
+
+
 def sync_extension_to_data_dir() -> str:
     """把随包扩展同步到数据目录（仅 macOS 有此问题）。
 

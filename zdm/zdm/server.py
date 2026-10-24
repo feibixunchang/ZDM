@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from . import __version__ as VERSION
 from . import desktop
 from . import presence
+from . import runtime
 from .manager import Manager
 from .videopage import video_page_filename, video_page_url
 
@@ -294,9 +295,20 @@ class Handler(BaseHTTPRequestHandler):
                 # 东西），否则 token 校验会把最需要这条信号的新装机用户挡在
                 # 门外。返回体里也不带任何路径信息。
                 presence.note_seen()
-                # 扩展靠 version 判断桌面端是否刚升级：变了就自动 reload
-                # 自己（从磁盘加载新 extension/），不用用户重开浏览器。
-                return self._json({"ok": True, "version": VERSION})
+                # 扩展靠版本号判断磁盘上有没有更新的扩展文件：不一致就自动
+                # reload 自己（从磁盘加载新 extension/），不用用户重开浏览器。
+                # 这里报**随包扩展**的 manifest version（读不到才退回桌面端
+                # 版本号）——扩展更新跟着安装包走，不必为两行 JS 逼桌面端
+                # 整体跳版本；老版扩展读 version 字段也能触发同一机制。
+                ext_v = runtime.bundled_extension_version() or VERSION
+                return self._json(
+                    {
+                        "ok": True,
+                        "version": ext_v,
+                        "ext_version": ext_v,
+                        "app_version": VERSION,
+                    }
+                )
             if not self._auth_ok():
                 return self._error(401, "invalid token")
             return self._api_get(parts[1:])

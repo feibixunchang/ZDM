@@ -136,6 +136,45 @@ public sealed class ApiServer : IDisposable
             ["version"] = Version,
         }));
 
+        // ---------------- extension presence ping ----------------
+        // The extension pings this every minute, unauthenticated (same as the
+        // Python build). It compares `ext_version` — the version of the
+        // extension folder the installer dropped on disk — with its own
+        // running manifest version and reloads itself when they differ. That
+        // is the whole extension-update story: an installer update replaces
+        // {app}\extension, the next ping sees the new version, the extension
+        // reloads from disk. No browser restart, no app-version bump needed.
+        // (This route was missing entirely before: the ping fell through to
+        // the static fallback, the JSON parse failed, and the auto-reload —
+        // and the "extension connected" presence — never worked here.)
+        app.MapGet("/api/extension/ping", () =>
+        {
+            string extVersion = "";
+            try
+            {
+                var manifest = Path.Combine(AppContext.BaseDirectory, "extension", "manifest.json");
+                if (File.Exists(manifest))
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(manifest));
+                    if (doc.RootElement.TryGetProperty("version", out var v))
+                        extVersion = v.GetString() ?? "";
+                }
+            }
+            catch
+            {
+                // Broken/unreadable manifest — report the app version so the
+                // extension at least sees a stable value instead of crashing.
+            }
+            if (string.IsNullOrEmpty(extVersion)) extVersion = Version;
+            return Results.Json(new JsonObject
+            {
+                ["ok"] = true,
+                ["version"] = extVersion,
+                ["ext_version"] = extVersion,
+                ["app_version"] = Version,
+            });
+        });
+
         app.MapGet("/api/state", () =>
         {
             var arr = new JsonArray(manager.List()
