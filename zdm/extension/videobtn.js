@@ -728,12 +728,9 @@
       host.classList.add("on-player", "menu");
       host.style.visibility = "hidden";
       document.body.appendChild(host);
-      const place = () => {
-        const r = card.getBoundingClientRect();
-        const w = btn ? btn.getBoundingClientRect().width : 98;
-        host.style.top = Math.round(r.top + 44) + "px";
-        host.style.left = Math.round(r.right - w - 56) + "px";
-      };
+      // 定位统一走 placePlayerMenu：菜单钉在按钮正下方（按钮现在悬在
+      // 播放窗口上方，菜单仍然要落回窗口内，不能飘进页面标题栏）。
+      const place = () => placePlayerMenu(openMenu);
       openMenu = { card, host, root, btn, place, onPlayer: true, at: Date.now() };
       place();
       host.style.visibility = "visible";
@@ -1438,7 +1435,14 @@
   function positionTick() {
     rafScheduled = false;
     for (const [p, t] of trackedPlayers) {
-      if (!t.host || !t.host.isConnected) {
+      // 回收条件是「播放器元素脱离文档」，不是「按钮脱离文档」——
+      // 按钮挂在 body 上永远连着，以前只查按钮，SPA 一换播放器容器
+      // 就留下一个钉在过时位置、点不开菜单的僵尸按钮
+      // （「页面上出现两三个下载按钮，只有最新那个好使」的元凶）。
+      if (!t.host || !t.host.isConnected || !p.isConnected) {
+        if (t.host && t.host.parentNode) t.host.parentNode.removeChild(t.host);
+        delete p.__zdmBtn;
+        delete p.__zdmBtnHost;
         trackedPlayers.delete(p);
         continue;
       }
@@ -1454,8 +1458,18 @@
     const r = p.getBoundingClientRect();
     if (r.width < 40 || r.height < 40) return; // 还没布局好
     const w = t.btn && t.btn.isConnected ? t.btn.getBoundingClientRect().width : 98;
-    const top = Math.round(r.top + 10);
-    const left = Math.round(r.right - w - 56); // 让开右上角自带控件
+    // 用户第四轮反馈：学 Ghost Download，把按钮钉在播放窗口右上角的**上方**
+    // （窗口外的页面留白里），不遮视频内容。窗口贴着视口顶（全屏/影院模式
+    // 顶到屏幕上沿）没有留白时，退回窗口内右上角。
+    let top;
+    if (r.top >= 40) {
+      top = Math.round(r.top - 34); // 按钮高约 22px + 12px 间距
+      t.above = true;
+    } else {
+      top = Math.round(r.top + 10);
+      t.above = false;
+    }
+    const left = Math.round(r.right - w - 8);
     if (top !== t.top || left !== t.left) {
       t.host.style.top = top + "px";
       t.host.style.left = left + "px";
@@ -1471,6 +1485,16 @@
   function placePlayerMenu(om) {
     const card = om.card;
     if (!card) return;
+    // 菜单钉在按钮正下方、右边缘与按钮对齐（按钮在窗口上方时菜单
+    // 仍然落在窗口内，不会飘到页面标题栏上）。
+    const br = om.btn && om.btn.isConnected ? om.btn.getBoundingClientRect() : null;
+    if (br) {
+      const menuEl = om.root ? om.root.querySelector(".menu") : null;
+      const mw = menuEl ? menuEl.getBoundingClientRect().width : 224;
+      om.host.style.top = Math.round(br.bottom + 6) + "px";
+      om.host.style.left = Math.round(Math.max(8, br.right - mw)) + "px";
+      return;
+    }
     const r = card.getBoundingClientRect();
     const w = om.btn && om.btn.isConnected ? om.btn.getBoundingClientRect().width : 98;
     om.host.style.top = Math.round(r.top + 44) + "px";
@@ -1497,6 +1521,24 @@
         return ra.width * ra.height - rb.width * rb.height;
       });
       const player = players[0];
+      // 不变式：整页只保留一个播放器按钮。扫描选中的播放器变了（SPA 软导航
+      // /影院模式切换会换容器元素），旧的那个立即连按钮一起移除；
+      // 元素已脱离文档的更是如此。以前旧的从不回收，切换几次就攒几个
+      // 钉在过时位置的多余按钮。
+      for (const [p, t] of Array.from(trackedPlayers)) {
+        if (!p.isConnected || (player && p !== player)) {
+          if (t.host && t.host.parentNode) t.host.parentNode.removeChild(t.host);
+          delete p.__zdmBtn;
+          delete p.__zdmBtnHost;
+          trackedPlayers.delete(p);
+        }
+      }
+      // 兜底清扫：body 上所有按钮 host 的主人若已不在文档里，一并移除。
+      // （覆盖 trackedPlayers 之外的漏网之鱼，比如旧版本运行期留下的。）
+      document.querySelectorAll("body > [" + MARK + '="btn"]').forEach((h) => {
+        const owner = h.__zdmOwner;
+        if (!owner || !owner.isConnected) h.remove();
+      });
       if (player && !trackedPlayers.has(player)) {
         player.__zdmIsPlayer = true;
         ensureButton(player);
