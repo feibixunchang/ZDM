@@ -403,6 +403,24 @@
     return location.href;
   }
 
+  /* YouTube 页面判断。播放器按钮的几条推送路径，在 YouTube 上一律带
+     page_url，让后端走 yt-dlp 通道：
+     - 嗅探直链（googlevideo）只能从头顺序读，mid-file Range 在
+       TUN/Fake-IP 网络下会被 302 打断，内置顺序引擎反复从头重试，
+       吞吐只有十几 KB/s；yt-dlp 通道实测 MB/s 级（2160P 1.5MB/s）。
+     - 以前「刻意不传」是怕单行 cookie 铺错域（抖音登录态发不出），
+       该顾虑已由 background 的 siteCookieText 完整导出解决，不成立。
+     非 YouTube 站点返回 undefined，行为与以前完全一致。 */
+  function ytPageUrl() {
+    try {
+      return /(^|\.)youtube(-nocookie)?\.com$/.test(location.hostname)
+        ? location.href
+        : undefined;
+    } catch (_) {
+      return undefined;
+    }
+  }
+
   async function resolveAndPush() {
     const height = Number(shadow.querySelector(".h").value) || 1080;
     setTip("正在解析页面…");
@@ -451,11 +469,9 @@
         kind: isAudioPick ? "audio" : isStreamPick ? pick.kind : "video",
         // DASH 站点：yt-dlp 已经把配套音轨配好了，不带就下成无声
         audio_url: isAudioPick ? undefined : pick.audio_url || undefined,
-        // 刻意**不传** page_url：带了它后端会改走 yt-dlp 通道重新解析一遍，
-        // 而那条通道要的是 Netscape 原文（带域信息）；我们这里给的是压成
-        // 单行的 header 形式，旧版客户端会把它铺到 .youtube.com 域上，
-        // 抖音的登录态就发不出去。已经解析好的直链直接下、后端 ffmpeg
-        // 合流即可，不需要再解析一次。
+        // YouTube：带 page_url 让后端走 yt-dlp 通道（理由见 ytPageUrl）。
+        // 非 YouTube 站点为 undefined，与以前行为一致。
+        page_url: ytPageUrl(),
         height: Number(pick.height) || height,
       },
     });
@@ -586,6 +602,9 @@
         // X（Twitter）的音频是另一份播放列表（/pl/mp4a/…），带上让
         // 后端两份各拉一遍再合流，不然「有画面没声音」。
         audio_url: s.audioUrl || undefined,
+        // YouTube：带页面地址 + 嗅探到的高度，走后端 yt-dlp 通道。
+        page_url: ytPageUrl(),
+        height: s.height || undefined,
       },
     });
     if (res && res.ok) {
@@ -681,6 +700,8 @@
         cookie: document.cookie || undefined,
         source: "playerbtn",
         kind: pk || "video",
+        // YouTube：带 page_url 走后端 yt-dlp 通道（理由见 ytPageUrl）。
+        page_url: ytPageUrl(),
       },
     });
     if (res && res.ok) {
@@ -722,6 +743,8 @@
             cookie: document.cookie || undefined,
             source: "playerbtn",
             kind: isAudio ? "audio" : pk || "video",
+            // YouTube：带 page_url 走后端 yt-dlp 通道（理由见 ytPageUrl）。
+            page_url: ytPageUrl(),
           },
         });
         setTip(
@@ -752,6 +775,8 @@
             source: "playerbtn",
             kind: "video",
             audio_url: audio,
+            // YouTube：带 page_url 走后端 yt-dlp 通道（理由见 ytPageUrl）。
+            page_url: ytPageUrl(),
           },
         });
         setTip(res && res.ok ? "已推送，音视频将合流" : "推送失败", !(res && res.ok));
