@@ -495,6 +495,33 @@
     return { host, root };
   }
 
+  /* body 上只留一个播放器按钮（keep 是即将挂上去的那个）。
+     卡片按钮的 host 挂在卡片内部，不会是 body 的直接子元素；菜单 host 的
+     MARK 是 "menu" —— 两者都不会被这里误伤。 */
+  function sweepPlayerButtons(keep) {
+    let removed = 0;
+    document.querySelectorAll('body > [' + MARK + '="btn"]').forEach((h) => {
+      if (h === keep) return;
+      if (!h.classList || !h.classList.contains("on-player")) return;
+      const owner = h.__zdmOwner;
+      if (owner) {
+        delete owner.__zdmBtn;
+        delete owner.__zdmBtnHost;
+        if (trackedPlayers.has(owner)) trackedPlayers.delete(owner);
+      }
+      if (h.parentNode) h.parentNode.removeChild(h);
+      removed++;
+    });
+    // 菜单 host 一样会残留（扩展热更新前打开的、或 SPA 换容器时丢下的）。
+    // 只保留当前正在显示的那一个；它是 fixed 定位的，残留在页面上会一直
+    // 飘在那儿，点了还会读到旧的回调。
+    document.querySelectorAll('body > [' + MARK + '="menu"]').forEach((h) => {
+      if (openMenu && openMenu.host === h) return;
+      if (h.parentNode) h.parentNode.removeChild(h);
+    });
+    return removed;
+  }
+
   function ensureButton(card) {
     const existing = btnOf(card);
     if (existing) return existing;
@@ -518,6 +545,10 @@
       // （.bili-mini-mask），播放器本身在遮罩之下 —— 按钮挂在播放器里就永远
       // 点不到。挂到 body 上才能压过遮罩层。
       host.classList.add("on-player");
+      // 不变式：整页只允许一个播放器按钮。挂上去之前先把别的清干净 ——
+      // 覆盖三种情况：SPA 换容器后旧元素还在、扩展热更新后旧脚本留下的 host、
+      // 以及旧代码从 mouseover 现造出来的野按钮。谁留谁清，绝不能两个。
+      sweepPlayerButtons(host);
       document.body.appendChild(host);
     } else {
       card.appendChild(host);
@@ -1318,6 +1349,12 @@
     }
     // 菜单自己占位，别把 hover 状态抢走
     if (openMenu && openMenu.card === card) return;
+    // 播放器的按钮常显、坐标由 scan()/positionTick 算，绝不在这里现造：
+    // 这里造的 host 不进 trackedPlayers，就是一个钉在页面左上角不动的第二按钮。
+    if (card.__zdmIsPlayer) {
+      if (!card.__zdmBtn) scheduleScan(); // 万一 scan 还没跑到，催它一次
+      return;
+    }
     const btn = ensureButton(card);
     if (btn && card.__zdmBtnHost) card.__zdmBtnHost.classList.add("hover");
   }
@@ -1350,7 +1387,16 @@
     return card;
   }
 
-  /* 事件目标是否落在播放页的播放器上。 */
+  /* 事件目标是否落在播放页的播放器上。
+
+     **只认 scan() 正在追踪的那个元素**。closest(S.player) 命中哪个元素取决于
+     鼠标当时压在谁身上：video 在 #movie_player 里，命令栏在 .html5-video-player
+     里，软导航后还可能命中外层 ytd-player —— 而 scan() 选中的是另一个。
+     只要不是同一个对象，get 到的就是「另一个 player」：它没有 __zdmBtn，
+     于是 onMouseMove 会现造一个按钮（挂 body、fixed、无 top/left、不进
+     trackedPlayers）—— 这就是「播放页出现两个下载按钮、都能点开面板」的根因
+     （第二个按钮永远钉在页面左上角不动，因为没人给它算坐标）。
+     返回 null 时交给上层：按钮一律由 scan() 创建与定位。 */
   function playerOf(el) {
     if (!el || !el.closest || !S.player) return null;
     let p = null;
@@ -1360,6 +1406,8 @@
       return null;
     }
     if (!p) return null;
+    // 已经选好播放器之后，别的候选一概不认（scan 还没跑过时放行）
+    if (trackedPlayers.size && !trackedPlayers.has(p)) return null;
     if (!p.__zdmIsPlayer) {
       p.__zdmIsPlayer = true;
       p.__zdmPlayer = true;
@@ -1477,10 +1525,20 @@
     const r = p.getBoundingClientRect();
     if (r.width < 40 || r.height < 40) return; // 还没布局好
     const w = t.btn && t.btn.isConnected ? t.btn.getBoundingClientRect().width : 98;
+    const bh = t.btn && t.btn.isConnected ? t.btn.getBoundingClientRect().height : 26;
     // 钉在播放窗口自己的右上角内侧（与 Ghost Download 一致）：
     // 视频内容上方的那一小条、贴右边。绝不放进播放窗口「上方」的页面留白 ——
     // 那里是站点顶栏（YouTube masthead）的地盘，按钮会被它盖住而看不见。
-    const top = Math.round(r.top + 8);
+    //
+    // YouTube 例外：它的播放窗口右上角在鼠标移入时会冒出一列原生按钮
+    // （播放列表、分享、稍后观看…）。我们的按钮常显、位置固定，正好压在那个
+    // 播放列表按钮上，用户点不到它。所以 YouTube 往下让 44px 落到那一列下面，
+    // 仍在播放窗口右上区内，谁也不挡谁。
+    const gapTop = siteName === "youtube" ? 44 : 8;
+    let top = Math.round(r.top + gapTop);
+    // 小窗兜底：底部约 56px 是控制栏（进度条 + 按钮），别压上去
+    const maxTop = Math.round(r.bottom - 56 - bh);
+    if (top > maxTop) top = Math.max(Math.round(r.top + 8), maxTop);
     const left = Math.round(r.right - w - 8);
     if (top !== t.top || left !== t.left) {
       t.host.style.top = top + "px";
@@ -1538,21 +1596,40 @@
         const r = rectOf(el);
         return r.width >= 40 && r.height >= 40;
       };
+      // 「这一层真的装着视频」——YouTube 上 ytd-player / #movie_player /
+      // .html5-video-player 层层嵌套，只有最里层那个才是画面本身。
+      // 选中外层时按钮会落在黑边/留白上，鼠标事件命中的却是里层，
+      // 于是又冒出一个「另一个 player」的按钮。
+      const hasVideo = (el) => {
+        try {
+          return !!el.querySelector("video");
+        } catch (_) {
+          return false;
+        }
+      };
       const tracked = trackedPlayers.size ? trackedPlayers.keys().next().value : null;
       // 已跟踪的播放器只要还匹配选择器、还在文档里、尺寸正常，就绝不动它。
       // 原因：YT_PLAYER 同时命中好几个元素（含隐藏的 0 尺寸模板），若每次
       // 都按「面积最小」重选，隐藏模板（面积 0）必赢 —— 按钮钉在看不见的
       // 元素上永远 hidden（1.5.30 「按钮彻底消失」的根因）；而 1.5.28 之前
       // 从不回收，第一个撞大运选中的按钮才一直留在屏上（多余按钮的根因）。
-      const player =
+      let player =
         tracked && tracked.isConnected && players.includes(tracked) && bigEnough(tracked)
           ? tracked
           : null;
+      // 唯一例外：已跟踪的是外层容器（自己不装 video、只有子元素装），
+      // 而里层有更贴合的候选 —— 换成里层，否则按钮与鼠标的「主人」永久错位。
+      if (player && !hasVideo(player) && players.some((p) => p !== player && player.contains(p) && bigEnough(p) && hasVideo(p))) {
+        player = null;
+      }
       let fresh = null;
       if (!player) {
         // 只在「当前有有效尺寸」的候选里选，隐藏元素（面积 0）没有资格。
         fresh = players.filter(bigEnough);
         fresh.sort((a, b) => {
+          const ha = hasVideo(a) ? 0 : 1;
+          const hb = hasVideo(b) ? 0 : 1;
+          if (ha !== hb) return ha - hb; // 装着 <video> 的那层优先
           const ra = rectOf(a);
           const rb = rectOf(b);
           return ra.width * ra.height - rb.width * rb.height;
@@ -1569,12 +1646,14 @@
           trackedPlayers.delete(p);
         }
       }
-      // 兜底清扫：body 上按钮 host 的主人已不在文档里的，一并移除。
-      // （覆盖 trackedPlayers 之外的漏网之鱼，比如旧版本运行期留下的。）
-      document.querySelectorAll("body > [" + MARK + '="btn"]').forEach((h) => {
-        const owner = h.__zdmOwner;
-        if (!owner || !owner.isConnected) h.remove();
-      });
+      // 兜底清扫：body 上除了「当前追踪的那一个」，其它播放器按钮一律移除。
+      // 覆盖三类漏网之鱼：旧版本运行期留下的、扩展热更新前留下的、以及
+      // 旧代码从 mousemove 里现造出来的野按钮（它们没有 owner 也没有坐标，
+      // 会永远钉在页面角落 —— 用户看到的就是「两个下载按钮」）。
+      const liveHost = trackedPlayers.size
+        ? trackedPlayers.values().next().value.host
+        : null;
+      sweepPlayerButtons(liveHost);
       if (chosen && !trackedPlayers.has(chosen)) {
         chosen.__zdmIsPlayer = true;
         ensureButton(chosen);
@@ -1608,6 +1687,19 @@
   }
 
   let started = false;
+  let scanTimer = null;
+  /* 统一入口：任何「该重新扫一遍」的信号都走这里，避免多套定时器打架。 */
+  function scheduleScan(delay) {
+    if (scanTimer) clearTimeout(scanTimer);
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      try {
+        scan();
+      } catch (e) {
+        __err("scan: " + e);
+      }
+    }, delay == null ? 400 : delay);
+  }
 
   function start() {
     if (started) return; // boot() 可能被调用两次（轮询 + 事件）
@@ -1626,11 +1718,7 @@
     scan();
 
     // 列表页会懒加载，DOM 变化很频繁，节流扫描
-    let timer = null;
-    const mo = new MutationObserver(() => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(scan, 600);
-    });
+    const mo = new MutationObserver(() => scheduleScan(600));
     try {
       mo.observe(document.documentElement, {
         childList: true,
@@ -1639,9 +1727,6 @@
     } catch (_) {
       /* 忽略 */
     }
-    window.addEventListener("scroll", () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(scan, 400);
-    }, { passive: true });
+    window.addEventListener("scroll", () => scheduleScan(400), { passive: true });
   }
 })();
