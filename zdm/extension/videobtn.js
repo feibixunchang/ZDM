@@ -1458,17 +1458,10 @@
     const r = p.getBoundingClientRect();
     if (r.width < 40 || r.height < 40) return; // 还没布局好
     const w = t.btn && t.btn.isConnected ? t.btn.getBoundingClientRect().width : 98;
-    // 用户第四轮反馈：学 Ghost Download，把按钮钉在播放窗口右上角的**上方**
-    // （窗口外的页面留白里），不遮视频内容。窗口贴着视口顶（全屏/影院模式
-    // 顶到屏幕上沿）没有留白时，退回窗口内右上角。
-    let top;
-    if (r.top >= 40) {
-      top = Math.round(r.top - 34); // 按钮高约 22px + 12px 间距
-      t.above = true;
-    } else {
-      top = Math.round(r.top + 10);
-      t.above = false;
-    }
+    // 钉在播放窗口自己的右上角内侧（与 Ghost Download 一致）：
+    // 视频内容上方的那一小条、贴右边。绝不放进播放窗口「上方」的页面留白 ——
+    // 那里是站点顶栏（YouTube masthead）的地盘，按钮会被它盖住而看不见。
+    const top = Math.round(r.top + 8);
     const left = Math.round(r.right - w - 8);
     if (top !== t.top || left !== t.left) {
       t.host.style.top = top + "px";
