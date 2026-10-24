@@ -105,6 +105,32 @@ def _get_json(url: str, timeout: float = 8.0, proxy: str = "") -> Optional[dict]
 
 
 # --------------------------------------------------------------------------- release
+def _assets_from_html(tag: str, timeout: float = 8.0, proxy: str = "") -> List[dict]:
+    """从 ``releases/expanded_assets/<tag>`` 的纯 HTML 片段里刮资产列表。
+
+    GitHub 的这个端点不需要 API 配额，但它是**第二个请求**：第一个请求
+    （``releases/latest`` 的 302）通了、这一个超时/重置时，调用方就只有
+    版本号没有资产 —— 老代码在这种情况下会把「下载并安装」直接变成
+    「打开网页」（用户 1.15.24 → 1.15.25 踩到的就是这个）。
+    所以把它单独抽出来，下载前还能再要一次。
+    """
+    assets: List[dict] = []
+    if not tag:
+        return assets
+    try:
+        with _open(f"{PROJECT_URL}/releases/expanded_assets/{tag}", timeout, proxy) as r:
+            html = r.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return assets
+    for href in re.findall(r'href="([^"]*?/releases/download/[^"]+)"', html):
+        path = href if href.startswith("/") else "/" + href.lstrip("/")
+        url = f"https://github.com{path}" if path.startswith("/") else path
+        name = path.rsplit("/", 1)[-1]
+        if name and not any(a["name"] == name for a in assets):
+            assets.append({"name": name, "url": url, "size": 0})
+    return assets
+
+
 def _latest_from_html(timeout: float = 8.0, proxy: str = "") -> Optional[dict]:
     """api.github.com 被限流/被墙时的兜底：走 github.com 普通网页。
 
@@ -126,19 +152,7 @@ def _latest_from_html(timeout: float = 8.0, proxy: str = "") -> Optional[dict]:
     if not version:
         return None
 
-    assets: List[dict] = []
-    try:
-        with _open(f"{PROJECT_URL}/releases/expanded_assets/{tag}", timeout, proxy) as r:
-            html = r.read().decode("utf-8", "replace")
-        for href in re.findall(r'href="([^"]*?/releases/download/[^"]+)"', html):
-            path = href if href.startswith("/") else "/" + href.lstrip("/")
-            url = f"https://github.com{path}" if path.startswith("/") else path
-            name = path.rsplit("/", 1)[-1]
-            if name and not any(a["name"] == name for a in assets):
-                assets.append({"name": name, "url": url, "size": 0})
-    except Exception:  # noqa: BLE001
-        pass  # 资产拿不到没关系 —— 版本号已经到手，「有新版」的提示照常弹
-
+    assets = _assets_from_html(tag, timeout, proxy)
     return {
         "version": version,
         "tag": tag,
@@ -170,6 +184,10 @@ def latest_release(timeout: float = 8.0, proxy: str = "") -> Optional[dict]:
                 "size": int(a.get("size") or 0),
                 "digest": str(a.get("digest") or ""),
             })
+    if not assets:
+        # API 正常但资产为空（很少见：Release 刚创建、资产还没传完）。补一次
+        # HTML，让「下载并安装」在 banner 阶段就有地址可用。
+        assets = _assets_from_html(tag, timeout, proxy)
     return {
         "version": version,
         "tag": tag,
@@ -219,6 +237,112 @@ def pick_asset(assets, platform: str = "") -> Optional[dict]:
         or first(lambda n: n.endswith(".tar.gz"))
         or first(lambda n: "linux" in n and n.endswith(".zip"))
     )
+
+
+def _expected_asset_names(version: str, platform: str = "") -> List[str]:
+    """本项目的产物命名是固定的，猜名字比「让用户自己去网页找」靠谱。
+
+    只在「拿不到资产列表」时用作兜底，调用方会用 Range 请求验证真的存在。
+    """
+    v = str(version or "").strip().lstrip("vV")
+    if not v:
+        return []
+    plat = platform or sys.platform
+    if plat == "darwin":
+        return [f"ZDM-{v}.dmg"]
+    if plat in ("win32", "cygwin"):
+        # 新包叫 ZDM-Setup-*；ZDM-PyQt5-Setup-* 是旧命名，只有在没有新包时才试。
+        return [f"ZDM-Setup-{v}.exe", f"ZDM-PyQt5-Setup-{v}.exe"]
+    import platform as _plat
+
+    arch = "arm64" if _plat.machine().lower() in ("aarch64", "arm64") else "amd64"
+    return [f"zdm_{v}_{arch}.deb", "zdm-linux-amd64.tar.gz"]
+
+
+def _url_exists(url: str, proxy: str = "", timeout: float = 6.0) -> bool:
+    """Range 探活：能拿到 200/206 才算这个安装包真的在。"""
+    try:
+        with _open(url, timeout, proxy, {"Range": "bytes=0-0"}) as r:
+            return int(getattr(r, "status", 200) or 200) in (200, 206)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_asset(info, proxy: str = "") -> Optional[dict]:
+    """把「有新版本」变成「一个可以点的下载地址」，三层兜底。
+
+    用户点「下载并安装」时最不能接受的就是被丢到 Releases 网页上自己找 ——
+    尤其是他明明看到过「直接下载 + 进度条」的老版本行为。所以这里不允许
+    「资产列表为空 ⇒ 直接打开网页」，必须尽力造出一个真实存在的下载地址：
+
+    1. info 里自带资产（API 路径正常时就是这条）；
+    2. 再向 ``expanded_assets`` 要一次（HTML 兜底上次可能只求到了版本号）；
+    3. 按本项目固定的产物命名拼地址，并用 Range 请求逐个探活。
+
+    三步都失败（连版本号都没有）才返回 None，交给 GUI 明确告知用户
+    （而不是静默跳站）。
+    """
+    info = info or {}
+    asset = pick_asset(info.get("assets") or [])
+    if asset and asset.get("url"):
+        return asset
+
+    version = str(info.get("version") or "").strip().lstrip("vV")
+    tag = str(info.get("tag") or "").strip()
+    if not tag and version:
+        tag = "v" + version
+
+    if tag:
+        asset = pick_asset(_assets_from_html(tag, proxy=proxy))
+        if asset and asset.get("url"):
+            return asset
+
+    names = _expected_asset_names(version)
+    if not tag or not names:
+        return None
+    for name in names:
+        url = f"{PROJECT_URL}/releases/download/{tag}/{name}"
+        if _url_exists(url, proxy):
+            return {"name": name, "url": url, "size": 0, "digest": ""}
+    # 探活全失败（可能只是这一次超时/被限流）：仍然把首选地址交给下载器 ——
+    # 它还有「直连 + 3 个加速镜像」四次机会，比在这里直接认输强。真 404 时
+    # 会很快失败并明确提示，不会静默跳站。
+    return {
+        "name": names[0],
+        "url": f"{PROJECT_URL}/releases/download/{tag}/{names[0]}",
+        "size": 0,
+        "digest": "",
+    }
+
+
+def downloads_dir() -> str:
+    """系统的「下载」目录。
+
+    Windows 上``~/Downloads``经常被 OneDrive 重定向到
+    ``%USERPROFILE%\\OneDrive\\Downloads``；硬编码会在 C 盘凭空建一个空目录，
+    安装包下到那里、用户在资源管理器里根本看不到（表现为「装完界面没了，
+    还得自己去找安装包」）。有注册表就读注册表，读不到再猜。
+    """
+    home = os.path.expanduser("~")
+    if os.name == "nt":
+        try:
+            import winreg  # type: ignore[import-not-found]
+
+            key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                val, _ = winreg.QueryValueEx(
+                    k, "{374DE290-123F-4565-9164-39C4925E467B}"
+                )
+            val = os.path.expandvars(str(val or ""))
+            if val and os.path.isdir(val):
+                return val
+        except Exception:  # noqa: BLE001
+            pass
+    for name in ("Downloads", "下载"):
+        p = os.path.join(home, name)
+        if os.path.isdir(p):
+            return p
+    return os.path.join(home, "Downloads")
 
 
 def _asset_urls(url: str) -> List[str]:

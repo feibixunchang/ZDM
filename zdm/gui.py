@@ -2183,22 +2183,45 @@ class MainWindow(QMainWindow):
             self._status("安装包已下载，正在打开安装向导…", hold=8)
             self._on_update_downloaded(cached["path"], info)
             return
-        asset = update.pick_asset(info.get("assets") or [])
-        if not asset:
-            # No installer for this platform: send the user to the release page.
-            self._open_url(info.get("url") or update.PROJECT_URL)
-            return
-        dest = os.path.join(os.path.expanduser("~/Downloads"), asset["name"])
-        # 下载目录里已经有这个版本的完整安装包（上次装失败/取消后关过程序）：
-        # 直接进安装流程。GitHub 的 100MB+ 包在弱网下要几分钟，重下一遍纯属
-        # 折磨；尺寸对得上就认为完整（同时下下来的 digest 仍然会在真正下载时校验）。
-        want = int(asset.get("size") or 0)
-        if want and os.path.isfile(dest) and os.path.getsize(dest) == want:
-            self._status("安装包已存在且完整，跳过下载…", hold=6)
-            self._on_update_downloaded(dest, info)
-            return
         proxy = str((self.config or {}).get("proxy") or "")
+        # 定位安装包可能要发网络请求（资产列表缺失时要再讨一次/探活），
+        # 必须放后台线程 —— 以前这一步在主线程里同步做，弱网下界面会假死。
         self.update_download_btn.setEnabled(False)
+        self.update_download_btn.setText("准备下载…")
+        self._status("正在定位安装包…", hold=60)
+        self._background(
+            lambda: update.resolve_asset(info, proxy=proxy),
+            lambda asset: self._begin_update_download(asset, info, proxy),
+        )
+
+    def _begin_update_download(self, asset, info, proxy):
+        """拿到（或造出）下载地址后真正开始下载。asset 为 None 才是真没辙。"""
+        if not asset:
+            self.update_download_btn.setEnabled(True)
+            self.update_download_btn.setText("下载并安装")
+            ver = str((info or {}).get("version") or "")
+            # 明确问一句，绝不静默把用户丢到网页上（1.15.24 的行为）。
+            if self._message_yes_no(
+                "拿不到安装包",
+                f"没能确定 v{ver} 的安装包地址。\n"
+                "可能是网络受限（GitHub 访问不通）或该版本资产还没上传完。\n\n"
+                "要打开 Releases 页面手动下载吗？",
+            ):
+                self._open_url((info or {}).get("url") or update.PROJECT_URL)
+            else:
+                self._status("已取消", hold=6)
+            return
+        dest = os.path.join(update.downloads_dir(), asset["name"])
+        # 下载目录里已经有这个版本的安装包（上次装失败/取消后关过程序）：
+        # 直接进安装流程。GitHub 的 100MB+ 包在弱网下要几分钟，重下一遍纯属
+        # 折磨；装包要么是 .part 被 rename 上来的（说明下完了），要么尺寸对得上。
+        want = int(asset.get("size") or 0)
+        if os.path.isfile(dest):
+            got = os.path.getsize(dest)
+            if (want and got == want) or (not want and got > 20 * 1048576):
+                self._status("安装包已存在且完整，跳过下载…", hold=6)
+                self._on_update_downloaded(dest, info)
+                return
         self.update_download_btn.setText("测速中…")
         self._status("正在选择最快的下载线路…", hold=60)
         # 进度：update.download 在工作线程回调，这里只记数字；
@@ -2233,6 +2256,11 @@ class MainWindow(QMainWindow):
                 f"正在下载更新… {pct}%（{done // 1048576}/{total // 1048576} MB）",
                 hold=60,
             )
+        elif done > 0:
+            # 资产列表是猜出来的（size 未知）或服务器没给 Content-Length：
+            # 没有百分比也要让用户看见「在动」，否则看着像卡死。
+            self.update_download_btn.setText(f"下载中… {done // 1048576} MB")
+            self._status(f"正在下载更新… 已下载 {done // 1048576} MB", hold=60)
 
     def _on_update_downloaded(self, path, info):
         t = getattr(self, "_dl_timer", None)
@@ -2243,9 +2271,14 @@ class MainWindow(QMainWindow):
         if not path:
             if self._message_yes_no(
                 "下载失败",
-                "安装包下载失败（网络或代理问题）。要打开 Releases 页面手动下载吗？",
+                "安装包没能下载下来。\n\n"
+                "已依次尝试 GitHub 直连和 3 个公共加速线路，全部失败 ——\n"
+                "通常是网络/代理问题（或该版本资产还没上传完）。\n\n"
+                "要打开 Releases 页面用浏览器手动下载吗？",
             ):
                 self._open_url((info or {}).get("url") or update.PROJECT_URL)
+            else:
+                self._status("已取消，稍后可再点「下载并安装」重试", hold=8)
             return
         # 记住这份安装包：用户取消过向导/装到一半失败后，再点按钮直接进安装，
         # 不必重下 120MB，也不必自己去下载目录里翻 exe。
