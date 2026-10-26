@@ -12,7 +12,7 @@ import time
 import uuid
 from typing import Dict, List, Optional
 
-from .core import Chunk, Download, RateLimiter, Segmenter
+from .core import MAX_CONNECTIONS, Chunk, Download, RateLimiter, Segmenter
 from .videopage import is_video_page
 
 APP_NAME = "zdm"
@@ -33,6 +33,39 @@ def to_bool(value, name: str = "配置项") -> bool:
             return True
         raise ValueError(f"{name} 需要 true/false（收到 {value!r}）")
     return bool(value)
+
+
+# 优先级只在排序里用（-priority, created_at），但界面把它渲染成 P±n 徽标，
+# 网页版/桌面端/命令行都按 ±99 约束；服务端兜住同一个区间，扩展或 curl 传
+# 999999 时才不至于把名字列撑坏。
+MAX_PRIORITY = 99
+
+
+def to_int(value, name: str, default: int = 0) -> int:
+    """数字型参数统一在这里换算：裸 int() 抛的是「int() with base 10: 'abc'」，
+    用户看不出是哪一个字段写错了。"""
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name}需要整数（收到 {value!r}）") from e
+
+
+def to_priority(value, name: str = "优先级") -> int:
+    return max(-MAX_PRIORITY, min(MAX_PRIORITY, to_int(value, name, 0)))
+
+
+def to_connections(value, default: int, name: str = "连接数") -> int:
+    """任务级连接数：0/空 = 用设置里的默认，其余夹进 1~MAX_CONNECTIONS。"""
+    if value in (None, "", 0, "0"):
+        num = int(default or DEFAULT_CONFIG["connections"])
+    else:
+        num = to_int(value, name)
+        if num < 1:
+            raise ValueError(f"{name}至少 1（收到 {value!r}）")
+    # 上限必须夹：_run_segmented 按连接数直接开线程，几千个会把机器拖死。
+    return max(1, min(MAX_CONNECTIONS, num))
 
 
 IS_WIN = sys.platform == "win32"
@@ -205,21 +238,21 @@ class Manager:
             url=url,
             directory=directory or str(cfg["download_dir"]),
             filename=filename,
-            connections=int(connections or cfg["connections"]),
+            connections=to_connections(connections, int(cfg["connections"])),
             headers=headers,
             proxy=proxy if proxy is not None else (str(cfg["proxy"]) or None),
             max_retries=int(cfg["max_retries"]),  # type: ignore[arg-type]
             timeout=float(cfg["timeout"]),  # type: ignore[arg-type]
-            speed_limit=int(speed_limit or 0),
+            speed_limit=max(0, to_int(speed_limit, "限速", 0)),
             source=source or "manual",
             kind=kind or "",
             audio_url=audio_url or "",
             audio_only=bool(audio_only),
             # 有页面地址就走 yt-dlp 通道（YouTube 直链不能分块下载）
             yt_page=(yt_page or "") if str(yt_page or "").startswith("http") else "",
-            yt_height=int(yt_height or 0),
+            yt_height=to_int(yt_height, "清晰度", 0),
             section=str(section or ""),
-            priority=int(priority or 0),
+            priority=to_priority(priority),
             start_at=float(start_at or 0),
             original_url=original_url,
         )
@@ -339,11 +372,11 @@ class Manager:
         elif headers is not None or proxy is not None or section is not None:
             d.retarget(headers=headers, proxy=proxy, section=section)
         if connections:
-            d.connections = max(1, min(32, int(connections)))
+            d.connections = to_connections(connections, d.connections)
             if d.segmenter is not None:
                 d.segmenter.balance(d.connections)
         if priority is not None:
-            d.priority = int(priority)
+            d.priority = to_priority(priority)
         if start_at is not None:
             d.start_at = max(0.0, float(start_at or 0))
         # 正在跑 / 出错的任务编辑完直接回队列，别让用户再点一次「继续」。
@@ -556,7 +589,7 @@ class Manager:
     # Number('') === 0，以前会连着存进去：连接数 0 让下载悄悄退化成单线程，
     # max_active 0 会把队列卡死，端口 0 则服务根本起不来。
     CONFIG_RANGES = {
-        "connections": (1, 32),
+        "connections": (1, MAX_CONNECTIONS),
         "max_active": (1, 32),
         "max_retries": (0, 50),
         "speed_limit": (0, None),

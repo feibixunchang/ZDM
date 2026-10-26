@@ -134,6 +134,12 @@ MIN_SPLIT = 1 << 20  # 1 MiB: minimum remaining size to justify splitting
 HAS_PWRITE = hasattr(os, "pwrite")
 O_BINARY = getattr(os, "O_BINARY", 0)  # Windows: without it files open in text mode
 
+# 单个任务的连接数上限。_run_segmented 是 `for i in range(self.connections)`
+# 直接开线程的，没有上限时 `zdm add -c 9999`（或旧 state.json 里的大值）会让
+# 一个任务开出几千个线程和几千条 HTTP 连接，机器直接卡死。设置项那一侧
+# （manager.CONFIG_RANGES）早就限制成 1~32，引擎这边必须用同一个数字。
+MAX_CONNECTIONS = 32
+
 # 有些 CDN（尤其 B站音轨）没有 UA/Referer 就直接 403。
 DEFAULT_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -581,7 +587,9 @@ def _effective_connections(url: str, connections: int) -> int:
     """按地址特性收敛连接数（目前只有 YouTube 直链需要单连接）。"""
     if needs_sequential(url):
         return 1
-    return max(1, int(connections))
+    # 上限在这里兜住：新建任务、从 state.json 恢复、retarget 换地址都会经过
+    # 这个函数，任何一条路径传进来的大数都不该变成几千个线程。
+    return max(1, min(MAX_CONNECTIONS, int(connections)))
 
 
 # googlevideo 直链任务的速度看门狗。推送时没带页面地址的任务（旧版扩展、

@@ -639,7 +639,7 @@ class Handler(BaseHTTPRequestHandler):
                     yt_page=body.get("yt_page") or body.get("page_url"),
                     yt_height=body.get("yt_height") or body.get("height"),
                     section=section,
-                    priority=int(body.get("priority") or 0),
+                    priority=body.get("priority"),
                     start_at=_parse_start_at(body.get("start_at")),
                 )
             except (ValueError, TypeError) as e:
@@ -682,8 +682,10 @@ class Handler(BaseHTTPRequestHandler):
                         if "start_at" in body
                         else None
                     )
+                    # 数字字段原样传下去，由 manager 换算：裸 int() 抛的是
+                    # 「int() with base 10: 'abc'」，看不出是哪个字段写错了。
                     priority = (
-                        int(body.get("priority"))
+                        body.get("priority")
                         if body.get("priority") not in (None, "")
                         else None
                     )
@@ -702,7 +704,7 @@ class Handler(BaseHTTPRequestHandler):
                         priority=priority,
                         section=section,
                         connections=(
-                            int(conns) if conns not in (None, "") else None
+                            conns if conns not in (None, "") else None
                         ),
                     )
                 except (ValueError, TypeError) as e:

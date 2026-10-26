@@ -138,7 +138,8 @@ zdm start --daemon                       # 后台启动
 zdm status                               # 服务与任务状态
 zdm add "https://example.com/a.iso" -c 16 -o ~/Downloads
 zdm add URL -H "Referer: https://site/page" -H "Cookie: k=v"
-zdm add URL -p 10                     # 优先级：数字越大越先下载
+zdm add URL -p 10                     # 优先级：数字越大越先下载（±99 之外按边界夹取）
+zdm add URL -c 16                     # 连接数 1~32；越界会被夹到边界并在回执里写明
 zdm add URL --start-at 2026-10-27T02:00:00   # 定时开始（也接受 Unix 时间戳）
 zdm add "https://www.bilibili.com/video/BV..." --section 00:01:00-00:05:00
                                        # --section 只适用于视频页面链接，普通文件会被拒绝

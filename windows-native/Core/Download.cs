@@ -31,6 +31,11 @@ public sealed class Download
     /// </summary>
     private CancellationToken CurrentToken => _stop.Token;
 
+    /// <summary>单个任务的连接数上限。RunSegmented 按连接数直接开线程，
+    /// 没有上限时一个请求就能开出几千条连接。和 Python 端
+    /// zdm/core.py 的 MAX_CONNECTIONS、设置项区间保持同一个数字。</summary>
+    public const int MaxConnections = 32;
+
     public string Id { get; }
     public string Url { get; set; }
     public string FinalUrl { get; set; }
@@ -94,7 +99,7 @@ public sealed class Download
         FinalUrl = url;
         Directory = directory;
         Filename = string.IsNullOrWhiteSpace(filename) ? "download" : filename;
-        Connections = Math.Max(1, connections);
+        Connections = Math.Clamp(connections, 1, MaxConnections);
         Headers = headers ?? new Dictionary<string, string>();
         Proxy = proxy;
         MaxRetries = Math.Max(0, maxRetries);
@@ -218,7 +223,7 @@ public sealed class Download
         if (data.TryGetProperty("final_url", out var fu)) FinalUrl = fu.GetString() ?? Url;
         if (data.TryGetProperty("filename", out var fn)) Filename = fn.GetString() ?? Filename;
         if (data.TryGetProperty("size", out var sz)) Size = sz.GetInt64();
-        if (data.TryGetProperty("connections", out var cn)) Connections = Math.Max(1, cn.GetInt32());
+        if (data.TryGetProperty("connections", out var cn)) Connections = Math.Clamp(cn.GetInt32(), 1, MaxConnections);
         if (data.TryGetProperty("supports_range", out var sr)) SupportsRange = sr.GetBoolean();
         if (data.TryGetProperty("speed_limit", out var sl)) SpeedLimit = sl.GetInt64();
         if (data.TryGetProperty("proxy", out var px)) Proxy = px.GetString();

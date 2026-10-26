@@ -190,7 +190,15 @@ def cmd_add(args) -> int:
     if not r.get("ok"):
         print(f"error: {r.get('error')}")
         return 1
-    print(f"queued {r['id']}: {args.url}")
+    task = r.get("task") or {}
+    note = ""
+    # 服务端会把越界值夹到区间内（连接数 1~32、优先级 ±99）。不吭一声的话，
+    # 用户以为自己真的开了 9999 条连接。
+    if args.connections and task.get("connections") not in (None, int(args.connections)):
+        note += f"（连接数按上限 {task['connections']}）"
+    if args.priority and task.get("priority") not in (None, int(args.priority)):
+        note += f"（优先级按上限 {task['priority']}）"
+    print(f"queued {r['id']}: {args.url}{note}")
     # Make sure the user actually sees the download: open the desktop client if
     # it is not running (the service already does this for extension requests;
     # the CLI talks to the same API but with auto_show_gui it would be a no-op
