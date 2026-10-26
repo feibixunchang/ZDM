@@ -387,7 +387,19 @@ class Handler(BaseHTTPRequestHandler):
                         "app_version": VERSION,
                     }
                 )
+            if parts == ["api"]:
+                # 存活/版本探测，故意不鉴权：安装器、CI 和启动器只需要知道
+                # 「服务起来了」，这里不暴露任何任务或配置。
+                return self._json({"ok": True, "version": VERSION})
             if not self._auth_ok():
+                if parts == ["api", "state"]:
+                    # 安装器与 CI（build-windows）直接 GET /api/state 且不带
+                    # token；以前这里回 401，健康检查就永远等不到 200，Windows
+                    # 安装包因此一直没能挂上 Release。只回最小存活信息，
+                    # 真正的任务列表仍然必须鉴权。
+                    return self._json(
+                        {"ok": True, "version": VERSION, "auth_required": True}
+                    )
                 return self._error(401, "invalid token")
             return self._api_get(parts[1:])
         if parts[0] == "events":
@@ -838,6 +850,10 @@ def ping(host: str = "127.0.0.1", port: int = 9000) -> Optional[dict]:
     except Exception:
         return None
     if not isinstance(data, dict):
+        return None
+    # 未鉴权时会拿到最小存活响应；它证明「有个 ZDM 在跑」，但不能证明是
+    # **我们这个用户的** ZDM（token 不一致），所以不能当成自己。
+    if data.get("auth_required") is True:
         return None
     # /api/state answers {"ok": true, "config": ..., "tasks": [...]}; /api
     # answers {"ok": true, "version": ...}. Anything else is a foreign service.
