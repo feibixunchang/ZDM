@@ -135,7 +135,10 @@ jobs:
           Write-Host "api: $ver"
           # 装完的这一版要真的带上新配置项：三端读的是同一份 state.json，
           # 老包升级后没有 stream_engine 的话，设置里那一项会静默落空。
-          $state = (Invoke-WebRequest 'http://127.0.0.1:9000/api/state' -TimeoutSec 4 -UseBasicParsing).Content | ConvertFrom-Json
+          # 必须带 token：/api/state 在不鉴权时只回 {ok, version, auth_required}
+          # （批次A 为了让健康检查过而开的最小存活响应），拿不到 config 不是缺配置项。
+          $tok = (Get-Content (Join-Path $env:APPDATA "ZDM\api-token") -Raw).Trim()
+          $state = (Invoke-WebRequest 'http://127.0.0.1:9000/api/state' -Headers @{ 'X-ZDM-Token' = $tok } -TimeoutSec 4 -UseBasicParsing).Content | ConvertFrom-Json
           if (-not ($state.config.PSObject.Properties.Name -contains 'stream_engine')) {
             throw "安装后的 /api/state 里没有 stream_engine 配置项"
           }
