@@ -1446,11 +1446,14 @@ async function taskExists(url, since) {
   try {
     const s = await api("state", null, "GET");
     const items = (s && s.tasks) || [];
-    return items.some(
-      (t) =>
-        t.url === url &&
-        (since == null || (t.created_at || 0) >= since)
-    );
+    // 开了「镜像加速」时后端把 url 换成了镜像地址，浏览器给的原始地址存在
+    // original_url 里。只比 url 的话冷启动交接永远查不到，扩展会再 POST 一次
+    // ——同一个文件下两遍，浏览器那边还以为是 ZDM 接手了。
+    const hit = (t) => {
+      const created = since == null || (t.created_at || 0) >= since;
+      return created && (t.url === url || t.original_url === url);
+    };
+    return items.some(hit);
   } catch (_) {
     return false;
   }

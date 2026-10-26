@@ -173,14 +173,34 @@ const fmtTime = s => {
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const statusText = {queued:'排队中',downloading:'下载中',paused:'已暂停',completed:'已完成',error:'失败',canceled:'已取消',merging:'合并中'};
 
+let stateWarn = '';
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2200); }
 
 async function api(method, path, body){
-  const r = await fetch('/api/' + path, {
-    method, headers:{'Content-Type':'application/json'},
-    body: body ? JSON.stringify(body) : undefined });
-  return r.json();
+  // fetch 断连、服务没起、返回 HTML（端口被别的程序占了）都会让这里抛异常；
+  // 以前调用方一律 await api(...) 后读 r.ok，异常直接变成「点了没反应」。
+  // 统一回一个 {ok:false,error:...}，界面上的每个按钮才有得可显示。
+  let r;
+  try {
+    r = await fetch('/api/' + path, {
+      method, headers:{'Content-Type':'application/json'},
+      body: body ? JSON.stringify(body) : undefined });
+  } catch (e) {
+    return { ok:false, error:'连不上本地服务：' + ((e && e.message) || e) };
+  }
+  let d;
+  try { d = await r.json(); } catch (_) { d = null; }
+  if (!d || typeof d !== 'object') {
+    // 200 但正文不是 JSON：端口被别的程序占了，或返回的是 HTML 错误页。
+    // 以前这里当作「成功但没数据」透传，界面显示「操作完成」而任务没变化。
+    if (r.ok) return { ok:false, error:'服务返回 HTTP ' + r.status + '，但响应不是 JSON' };
+    d = {};
+  }
+  if (!r.ok || d.ok === false) {
+    return { ...d, ok:false, error: d.error || ('服务返回 HTTP ' + r.status) };
+  }
+  return d;
 }
 
 function render(){
@@ -245,6 +265,8 @@ async function refresh(){
   try{
     const st = await (await fetch('/api/state')).json();
     tasks = st.tasks || []; config = st.config || {};
+    // 服务端把「历史文件读坏了 / 设置没写进磁盘」放在 warning 里；同一条只提醒一次。
+    if (st.warning && st.warning !== stateWarn){ stateWarn = st.warning; toast(st.warning); }
     $('#svc').textContent = '本地服务已连接 · 端口 ' + (config.port || 9000);
     render();
   }catch(e){ $('#svc').textContent = '服务未连接'; }
@@ -279,9 +301,18 @@ document.querySelectorAll('.tab').forEach(el => el.onclick = () => {
   el.classList.add('active'); filter = el.dataset.f; render();
 });
 
-$('#btnPauseAll').onclick = async () => { await api('POST','action',{action:'pause_all'}); refresh(); };
-$('#btnResumeAll').onclick = async () => { await api('POST','action',{action:'resume_all'}); refresh(); };
-$('#btnClear').onclick = async () => { await api('POST','action',{action:'clear_finished'}); refresh(); };
+const bulk = (action, doing, none) => async () => {
+  const r = await api('POST','action',{action});
+  if (!r.ok) return toast(r.error || '操作失败');
+  // changed 是服务端真正改动的任务数：全部已经暂停了再点「全部暂停」，
+  // 以前也提示成功，现在说清楚「本来就没有可暂停的任务」。
+  const n = Number(r.changed || 0);
+  toast(n ? doing.replace('{n}', n) : none);
+  refresh();
+};
+$('#btnPauseAll').onclick = bulk('pause_all', '已暂停 {n} 个任务', '没有正在下载的任务');
+$('#btnResumeAll').onclick = bulk('resume_all', '已开始 {n} 个任务', '没有等待开始的任务');
+$('#btnClear').onclick = bulk('clear_finished', '已清除 {n} 条记录', '没有已完成的任务');
 
 $('#btnSettings').onclick = () => {
   $('#cfgDir').value = config.download_dir || '';
@@ -319,10 +350,15 @@ $('#btnSaveCfg').onclick = async () => {
     port: port,
     auto_resume: $('#cfgAuto').checked,
   });
-  if (r.ok){ toast('已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }
+  if (r.ok){ toast(r.warning || '已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }
   else toast(r.error || '保存失败');
 };
-$('#btnOpenDir').onclick = () => api('POST','open',{path:$('#cfgDir').value.trim()});
+$('#btnOpenDir').onclick = async () => {
+  const dir = $('#cfgDir').value.trim();
+  if (!dir) return toast('请先填写目录');
+  const r = await api('POST','open',{path:dir});
+  if (!r.ok) toast(r.error || '打开目录失败');
+};
 
 let es;
 function connectEvents(){

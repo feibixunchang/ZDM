@@ -359,15 +359,27 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, code: int, msg: str) -> None:
         self._json({"ok": False, "error": msg}, code)
 
+    def _open_why(self, path) -> str:
+        """打开位置失败的解释：把「路径根本不存在」和「系统没响应」分清。"""
+        text = str(path or "")
+        if text and not os.path.exists(os.path.expanduser(text)):
+            return f"没能打开 {text}：路径不存在（文件还没下完？）"
+        return f"没能打开 {text or '这个位置'}：系统没有响应（桌面端是否在运行？）"
+
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
             return {}
         raw = self.rfile.read(length)
         try:
-            return json.loads(raw.decode("utf-8"))
-        except Exception:
-            return {}
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            # 以前坏 JSON 回 {}：POST /api/config 带一个残缺请求体就等于「改了
+            # 一个空补丁」，服务端回 ok:true，用户以为设置已经保存了。
+            raise ValueError(f"请求体不是合法的 JSON（{type(e).__name__}）") from e
+        if not isinstance(data, dict):
+            raise ValueError("请求体需要是 JSON 对象")
+        return data
 
     def _path_parts(self):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -464,9 +476,12 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["tasks"]:
             return self._json({"ok": True, "tasks": self.manager.list()})
         if parts == ["state"]:
-            return self._json(
-                {"ok": True, "config": self.manager.config, "tasks": self.manager.list()}
-            )
+            reply = {"ok": True, "config": self.manager.config, "tasks": self.manager.list()}
+            # 历史文件读坏了、或者最近一次设置没写进磁盘：只写在 download-errors.log
+            # 里没人会去看，界面必须第一时间说清楚，否则用户以为记录还在。
+            if self.manager.state_error:
+                reply["warning"] = self.manager.state_error
+            return self._json(reply)
         if parts == ["config"]:
             return self._json({"ok": True, "config": self.manager.config})
         if parts == ["extension"]:
@@ -549,7 +564,10 @@ class Handler(BaseHTTPRequestHandler):
         return headers
 
     def _api_post(self, parts):
-        body = self._body()
+        try:
+            body = self._body()
+        except ValueError as e:
+            return self._error(400, str(e))
 
         if parts == ["tasks"]:
             url = (body.get("url") or "").strip()
@@ -658,7 +676,11 @@ class Handler(BaseHTTPRequestHandler):
                     args=([], int(self.manager.config.get("port") or 9000)),
                     daemon=True,
                 ).start()
-            return self._json({"ok": True, "id": d.id, "task": d.to_dict()})
+            reply = {"ok": True, "id": d.id, "task": d.to_dict()}
+            if self.manager.state_error:
+                # 任务已经在跑，但这条记录没能写进 state.json：重启后它会消失。
+                reply["warning"] = "任务已开始，但记录没能写入磁盘：" + self.manager.state_error
+            return self._json(reply)
 
         if len(parts) == 3 and parts[0] == "tasks":
             tid, action = parts[1], parts[2]
@@ -712,25 +734,40 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(400, str(e))
                 return self._json({"ok": True, **info, "task": d.to_dict()})
             if action == "pause":
-                self.manager.pause(tid)
+                if not self.manager.pause(tid):
+                    return self._error(409, f"当前状态（{d.status}）不能暂停")
             elif action == "resume":
-                self.manager.resume(tid)
+                if not self.manager.resume(tid):
+                    return self._error(409, f"当前状态（{d.status}）不能继续下载")
             elif action == "restart":
-                self.manager.restart(tid)
+                if not self.manager.restart(tid):
+                    return self._error(409, "重下没有执行（任务已不在列表里）")
             elif action == "cancel":
-                self.manager.cancel(tid, remove_files=body.get("files", True))
+                if not self.manager.cancel(tid, remove_files=body.get("files", True)):
+                    return self._error(409, "取消没有执行（任务已不在列表里）")
             elif action == "open":
                 # "打开" means open the downloaded file itself (a .dmg brings up
                 # the installer), not its folder. Unfinished tasks have no file
                 # yet, so those reveal the download directory instead.
-                if d.status == "completed":
+                opened = (
                     self.manager.open_file(d.target_path)
-                else:
-                    self.manager.open_path(d.directory)
+                    if d.status == "completed"
+                    else self.manager.open_path(d.directory)
+                )
+                if not opened:
+                    return self._error(
+                        500,
+                        self._open_why(
+                            d.target_path if d.status == "completed" else d.directory
+                        ),
+                    )
             elif action == "reveal":
-                self.manager.reveal_path(
+                reveal_target = (
                     d.target_path if d.status == "completed" else d.directory
                 )
+                shown = self.manager.reveal_path(reveal_target)
+                if not shown:
+                    return self._error(500, self._open_why(reveal_target))
             else:
                 return self._error(400, f"unknown action {action}")
             return self._json({"ok": True, "task": d.to_dict()})
@@ -738,21 +775,26 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["action"]:
             act = body.get("action")
             if act == "pause_all":
-                self.manager.pause_all()
+                changed = self.manager.pause_all()
             elif act == "resume_all":
-                self.manager.resume_all()
+                changed = self.manager.resume_all()
             elif act == "clear_finished":
-                self.manager.clear_finished()
+                changed = self.manager.clear_finished()
             elif act == "open_folder":
                 path = body.get("path") or str(self.manager.config["download_dir"])
                 if not self.manager.can_open_path(path):
                     return self._error(403, "path outside download directories")
-                self.manager.open_path(path)
+                if not self.manager.open_path(path):
+                    return self._error(500, self._open_why(path))
+                changed = 1
             elif act == "shutdown":
                 threading.Timer(0.6, self.server.shutdown).start()
+                changed = 1
             else:
                 return self._error(400, f"unknown action {act}")
-            return self._json({"ok": True})
+            # 0 也要如实回：以前「全部暂停」点了没反应（没有可暂停的任务）和
+            # 「已经暂停好了」在界面上长得一模一样。
+            return self._json({"ok": True, "changed": int(changed)})
 
         if parts == ["config"]:
             try:
@@ -760,7 +802,12 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError) as e:
                 # 端口/连接数写了字母、开关写了 "maybe"：说清楚比默默什么都不改好。
                 return self._error(400, f"配置项无效：{e}")
-            return self._json({"ok": True, "config": self.manager.config})
+            reply = {"ok": True, "config": self.manager.config}
+            # 设置当场生效了，但可能没写进磁盘（目录只读、磁盘满）：不说的话
+            # 用户要到下次重启才发现全丢了。
+            if self.manager.state_error:
+                reply["warning"] = "设置已生效，但没能写入磁盘：" + self.manager.state_error
+            return self._json(reply)
 
         if parts == ["open"]:
             path = body.get("path") or str(self.manager.config["download_dir"])
@@ -773,7 +820,11 @@ class Handler(BaseHTTPRequestHandler):
                 ok = self.manager.reveal_path(path)
             else:
                 ok = self.manager.open_path(path)
-            return self._json({"ok": ok})
+            # 桌面端没在运行时 xdg-open/Start-Process 会静静失败；回 200 +
+            # ok:false 又不给原因，界面只能显示「点了没反应」。
+            if not ok:
+                return self._error(500, self._open_why(path))
+            return self._json({"ok": True})
 
         # 嗅探面板的「大小未知」补全：扩展把拿不到长度的直链发过来，
         # 桌面端用 2 字节 Range 问出真实总大小（浏览器侧被 CORS 卡死，

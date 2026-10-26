@@ -199,6 +199,8 @@ def cmd_add(args) -> int:
     if args.priority and task.get("priority") not in (None, int(args.priority)):
         note += f"（优先级按上限 {task['priority']}）"
     print(f"queued {r['id']}: {args.url}{note}")
+    if r.get("warning"):
+        print("warning: " + str(r["warning"]), file=sys.stderr)
     # Make sure the user actually sees the download: open the desktop client if
     # it is not running (the service already does this for extension requests;
     # the CLI talks to the same API but with auto_show_gui it would be a no-op
@@ -270,6 +272,9 @@ def cmd_config(args) -> int:
             print(f"error: {r.get('error')}")
             return 1
         print(json.dumps(r.get("config", {}), ensure_ascii=False, indent=2))
+        # 生效但没落盘（磁盘满 / 目录没权限）：不打印的话下次重启才发现设置全丢。
+        if r.get("warning"):
+            print("warning: " + str(r["warning"]), file=sys.stderr)
         return 0
     print(json.dumps(load_config(), ensure_ascii=False, indent=2))
     return 0
@@ -474,12 +479,18 @@ def _handle_protocol_url(target: str) -> int:
                 body[key] = v
         if headers:
             body["headers"] = headers
-        try:
-            _api("POST", "tasks", body, port=port)
-        except Exception:
-            pass
+        # _api 自己把所有异常都变成了 {"ok": false}，所以这里只需要看结果。
+        # 以前失败被整个丢掉、照样退出 0：坏链接（400）、服务没起、token 不对
+        # 都表现为「双击链接什么都没发生」。
+        res = _api("POST", "tasks", body, port=port)
+        failed = "" if res.get("ok") else str(res.get("error") or "服务拒绝了这次添加")
+    else:
+        failed = ""
     desktop._last_launch = 0.0
     desktop.ensure_desktop([], int(load_config().get("port") or 9000))
+    if failed:
+        print(f"error: 添加任务失败：{failed}", file=sys.stderr)
+        return 1
     return 0
 
 

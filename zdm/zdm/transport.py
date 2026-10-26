@@ -162,6 +162,16 @@ class CurlTransport(Transport):
             status = int(status_s)
         except ValueError:
             status = 0
+        # curl 连不上（DNS 失败、TLS 断、拒绝连接）时仍然会输出 -w 模板，
+        # http_code 是 "000"：以前这被当成一次正常探测（status<400 直接放行），
+        # 任务于是带着 size=0 / 不支持 Range 排队空转一轮，报错还很晚才出现。
+        # returncode 才是 curl 的真实答案；有真实 HTTP 响应时（哪怕 curl 因为
+        # 传输中断返回 18）保留探测结果，那比重新探测更有价值。
+        if out.returncode != 0 and status == 0:
+            raise ConnectionError(
+                f"curl probe failed ({out.returncode}): "
+                f"{out.stderr.decode('utf-8', 'replace')[:200]}"
+            )
         hdrs = _parse_header_block(head)
         size, supports = _parse_size(hdrs, status)
         return {

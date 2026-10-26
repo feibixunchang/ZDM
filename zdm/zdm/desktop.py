@@ -135,6 +135,29 @@ def _python_with_qt(code: str) -> str:
     return ""
 
 
+def _exited_badly(p, what: str) -> bool:
+    """True when the child process clearly died right away (non-zero exit).
+
+    "Popen did not throw" is not success: a broken argv (e.g. the frozen binary
+    re-execing itself under the CLI name) or a damaged bundle makes the child
+    exit within milliseconds, and ensure_desktop used to report it as launched
+    anyway. A single-instance wake-up also exits fast - but with code 0 - so only
+    a non-zero exit counts as failure. Still running after the grace period means
+    it handed off to a real window.
+    """
+    global _last_error
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        rc = p.poll()
+        if rc is not None:
+            if rc == 0:
+                return False
+            _last_error = f"{what} exited with code {rc}"
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _spawn_python_gui(urls, port: int) -> bool:
     """Fallback: re-run the desktop client with a PyQt5-capable runtime.
 
@@ -179,20 +202,8 @@ def _spawn_python_gui(urls, port: int) -> bool:
         global _last_error
         _last_error = f"{type(e).__name__}: {e}"
         return False
-    # "Popen did not throw" is not success: a broken argv (e.g. the frozen
-    # binary re-execing itself under the CLI name) makes the child exit within
-    # milliseconds, and ensure_desktop used to report it as launched anyway.
-    # A single-instance wake-up also exits fast - but with code 0 - so only a
-    # non-zero exit counts as failure.
-    deadline = time.time() + 2.5
-    while time.time() < deadline:
-        rc = p.poll()
-        if rc is not None:
-            if rc == 0:
-                return True  # woke an existing window and exited cleanly
-            _last_error = f"desktop client exited with code {rc} (see {log_path})"
-            return False
-        time.sleep(0.1)
+    if _exited_badly(p, f"desktop client (see {log_path})"):
+        return False
     return True
 
 
@@ -383,10 +394,14 @@ def ensure_desktop(urls=None, port: int = 9000) -> bool:
                 cmd = ["open", bundle]
                 if urls:
                     cmd += ["--args"] + urls
-                subprocess.Popen(
+                p = subprocess.Popen(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
-                return True
+                # `open` exits on its own: a damaged bundle (or a launcher that
+                # re-execs into the CLI) exits non-zero in milliseconds, and
+                # returning True here used to print "桌面端已启动" for nothing.
+                if not _exited_badly(p, f"open {bundle}"):
+                    return True
         elif IS_WIN:
             exe = _win_exe()
             if exe:
@@ -398,10 +413,11 @@ def ensure_desktop(urls=None, port: int = 9000) -> bool:
                 #   表层就是「Failed to load Python DLL / 内存资源不足」；
                 #   urls 非空 → 落进 CLI 分支被 argparse 拒掉，窗口照样不出。
                 # macOS 走 open bundle、Linux 走 zdm-gui 启动器，都没这条死路。
-                subprocess.Popen(
+                p = subprocess.Popen(
                     [exe, "--gui", str(port)] + list(urls), **_detached()
                 )
-                return True
+                if not _exited_badly(p, exe):
+                    return True
         else:
             # Prefer the source-install launcher / our own gui.py. Falling back
             # to a "zdm-desktop" found on PATH used to pick an old system-wide
@@ -409,8 +425,9 @@ def ensure_desktop(urls=None, port: int = 9000) -> bool:
             # lacks ~/.local/bin - the window then ran the previous version.
             launcher = shutil.which("zdm-gui")
             if launcher:
-                subprocess.Popen([launcher] + urls, **_detached())
-                return True
+                p = subprocess.Popen([launcher] + urls, **_detached())
+                if not _exited_badly(p, launcher):
+                    return True
         return _spawn_python_gui(urls, port)
     except Exception as e:  # noqa: BLE001
         _last_error = f"{type(e).__name__}: {e}"

@@ -7,6 +7,7 @@ Run directly with any python3 that has PyQt5:
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -272,9 +273,18 @@ def _num(v, default: float = 0.0) -> float:
     但旧版客户端或写坏的状态文件可能塞了字符串，float() 会直接抛
     ValueError 把整个表格渲染带崩。"""
     try:
-        return float(v)
+        n = float(v)
     except (TypeError, ValueError):
         return default
+    # "nan"/"inf" 能被 float() 接受，却会让后面的比较和进度条计算全乱套。
+    return n if math.isfinite(n) else default
+
+
+def _int(v, default: int = 0) -> int:
+    """取整数字段，语义和 `int(x or default)` 一致（缺失/0/坏值都回落默认）。
+    以前编辑对话框、设置对话框直接写 int(t.get("connections") or 8)：状态文件
+    里存了 "8" 以外的脏东西（"", null 之外的字符串、bool）就整页打不开。"""
+    return int(_num(v, float(default))) or default
 
 
 def fmt_size(n) -> str:
@@ -1815,6 +1825,11 @@ class MainWindow(QMainWindow):
     def _on_state(self, st: dict):
         self.config = st.get("config") or {}
         self.tasks = st.get("tasks") or []
+        warn = str(st.get("warning") or "")
+        # 同一条只提醒一次：轮询每 0.8 秒跑一遍，反复弹同一条反而会让人忽略它。
+        if warn and warn != getattr(self, "_state_warning_shown", ""):
+            self._state_warning_shown = warn
+            self._status("数据提醒：" + warn, hold=10.0)
         self._render()
         self._notify_failures()
         # Don't clobber a transient message ("正在检查更新…", "设置已保存", …)
@@ -2258,6 +2273,9 @@ class MainWindow(QMainWindow):
         if status == "err" or (isinstance(res, dict) and not res.get("ok")):
             msg = str(res) if status == "err" else res.get("error", "操作失败")
             self._status(f"操作失败：{msg}")
+        elif isinstance(res, dict) and res.get("warning"):
+            # 「生效了但没写进磁盘」：不说的话用户要到下次重启才发现设置全丢。
+            self._status(str(res["warning"]), hold=10.0)
 
     # ---------------- updates ----------------
     def _background(self, fn, on_done, *args, quiet: bool = False):
@@ -2963,17 +2981,17 @@ class MainWindow(QMainWindow):
         ua = QLineEdit(hget("User-Agent"))
         conns = QSpinBox()
         conns.setRange(1, 32)
-        conns.setValue(int(t.get("connections") or 8))
+        conns.setValue(_int(t.get("connections"), 8))
         proxy = QLineEdit(t.get("proxy") or "")
         proxy.setPlaceholderText("留空则使用全局设置")
         prio = QSpinBox()
         prio.setRange(-99, 99)
-        prio.setValue(int(t.get("priority") or 0))
+        prio.setValue(_int(t.get("priority"), 0))
         start_cb = QCheckBox("定时开始")
         start_edit = QDateTimeEdit()
         start_edit.setCalendarPopup(True)
         start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
-        start_at = float(t.get("start_at") or 0)
+        start_at = _num(t.get("start_at"))
         if start_at:
             start_edit.setDateTime(QDateTime.fromSecsSinceEpoch(int(start_at)))
             start_cb.setChecked(True)
@@ -3210,21 +3228,21 @@ class MainWindow(QMainWindow):
         rh.addWidget(btn_dir)
         conns = QSpinBox()
         conns.setRange(1, 32)
-        conns.setValue(int(cfg.get("connections") or 8))
+        conns.setValue(_int(cfg.get("connections"), 8))
         active = QSpinBox()
         active.setRange(1, 16)
-        active.setValue(int(cfg.get("max_active") or 3))
+        active.setValue(_int(cfg.get("max_active"), 3))
         limit = QSpinBox()
         limit.setRange(0, 1000000)
         limit.setSuffix(" KB/s")
-        limit.setValue(int(int(cfg.get("speed_limit") or 0) / 1024))
+        limit.setValue(int(_num(cfg.get("speed_limit")) / 1024))
         limit.setSpecialValueText("不限速")
         proxy = QLineEdit(str(cfg.get("proxy") or ""))
         proxy.setPlaceholderText("留空则使用系统环境变量代理")
         _zh_standard_menu(proxy)
         port = QSpinBox()
         port.setRange(1024, 65535)
-        port.setValue(int(cfg.get("port") or 9000))
+        port.setValue(_int(cfg.get("port"), 9000))
         auto = QCheckBox("重启后自动继续未完成任务")
         auto.setChecked(bool(cfg.get("auto_resume", True)))
         autostart_cb = QCheckBox("开机自动启动 ZDM 服务")
@@ -3342,10 +3360,15 @@ class MainWindow(QMainWindow):
             if chosen and chosen != tm.mode:
                 tm.set_mode(chosen)
             tm.prime()
+        # 自启失败要有原因可看：enable() 只写 plist/注册表，真正生效要靠
+        # launchd/注册表加载，加载被拒时以前只是勾上又自己弹回去。
+        autostart_err = ""
         try:
-            autostart.set_enabled(autostart_cb.isChecked())
+            ok, reason = autostart.set_enabled(autostart_cb.isChecked())
+            if not ok:
+                autostart_err = reason or "系统没有接受这个开机自启设置"
         except Exception as e:
-            self._status(f"开机自启设置失败：{e}")
+            autostart_err = str(e)
         self._run(self.api.set_config, {
             "download_dir": directory.text().strip() or cfg.get("download_dir"),
             "connections": conns.value(),
@@ -3364,9 +3387,11 @@ class MainWindow(QMainWindow):
             },
         })
         _gui_cfg_set(close_to_tray=close_tray_cb.isChecked())
-        if getattr(self, "autostart_action", None) is not None:
-            self.autostart_action.setChecked(autostart.is_enabled())
-        self._status("设置已保存")
+        self._sync_autostart_check()
+        if autostart_err:
+            self._status("设置已保存；但开机自启没能开启：" + autostart_err, hold=8.0)
+        else:
+            self._status("设置已保存")
 
     def _preview_theme(self, mode: str):
         """Live-preview an appearance without persisting it (Settings dialog)."""
@@ -3595,14 +3620,31 @@ class MainWindow(QMainWindow):
 
     def _toggle_autostart(self, checked: bool):
         try:
-            autostart.set_enabled(checked)
-            ok = autostart.is_enabled() == checked
-            self._status(
-                "开机自启：" + ("已开启" if checked else "已关闭")
-                + ("" if ok else "（无法写入，可能需要管理员/登录权限）")
-            )
+            ok, reason = autostart.set_enabled(checked)
         except Exception as e:
-            self._status(f"开机自启设置失败：{e}")
+            self._status(f"开机自启设置失败：{e}", hold=8.0)
+            self._sync_autostart_check()
+            return
+        if ok:
+            self._status("开机自启：" + ("已开启" if checked else "已关闭"))
+        else:
+            # 菜单项是 checkable 的，点一下就会打勾；没写成功必须自己撤回，
+            # 否则下次进来 is_enabled() 又是 False，用户看到「已开启」却不自启。
+            self._status(
+                "开机自启" + ("开启" if checked else "关闭") + "失败：" + (reason or "系统没有接受这次修改"),
+                hold=8.0,
+            )
+            self._sync_autostart_check()
+
+    def _sync_autostart_check(self):
+        """让托盘菜单的勾和系统里真实的状态保持一致（失败回滚用）。"""
+        act = getattr(self, "autostart_action", None)
+        if act is None:
+            return
+        # blockSignals：只是回滚显示，不能再触发一次 triggered -> _toggle_autostart。
+        act.blockSignals(True)
+        act.setChecked(autostart.is_enabled())
+        act.blockSignals(False)
 
 
 def _zh_standard_menu(edit) -> None:
@@ -3754,7 +3796,10 @@ def main(argv=None) -> int:
     rest = []
     for a in argv:
         if a.isdigit() and len(rest) == 0:
-            port = int(a)
+            # 这个参数是被服务/快捷方式拼出来的，"0"、"99999" 以前会原样带进
+            # 连接地址：界面起来了却连不上任何端口，看起来像「闪退后没反应」。
+            p = int(a)
+            port = int(clamp_config_number("port", p)) if p > 0 else port
         else:
             rest.append(a)
 

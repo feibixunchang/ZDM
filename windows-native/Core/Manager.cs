@@ -314,16 +314,21 @@ public sealed class Manager
         foreach (var p in paths) TryDelete(p);
     }
 
-    public async Task PauseAllAsync()
+    public async Task<int> PauseAllAsync()
     {
+        // 返回真正改动的条数：界面要能区分「暂停好了」和「本来就没有可暂停的任务」。
+        var n = 0;
         foreach (var d in All().Where(x => x.Status is TaskStatus.Downloading or TaskStatus.Queued))
-            await PauseAsync(d.Id);
+            if (await PauseAsync(d.Id)) n++;
+        return n;
     }
 
-    public async Task ResumeAllAsync()
+    public async Task<int> ResumeAllAsync()
     {
+        var n = 0;
         foreach (var d in All().Where(x => x.Status is TaskStatus.Paused or TaskStatus.Error))
-            await ResumeAsync(d.Id);
+            if (await ResumeAsync(d.Id)) n++;
+        return n;
     }
 
     public int ClearFinished()
@@ -578,8 +583,27 @@ public sealed class Manager
         return text.Length > 40 ? text[..40] + "…" : text;
     }
 
+    // Assign() 认识的键；不在表里的键名在严格模式（POST /api/config）要报错。
+    // 静默过滤的话客户端照样收到 ok:true，用户看到「保存成功」却什么都没改
+    // （`conenctions` 打错一个字母就是这种）。
+    private static readonly HashSet<string> KnownConfigKeys = new(StringComparer.Ordinal)
+    {
+        "download_dir", "proxy", "connections", "max_active", "max_retries", "port",
+        "history_limit", "speed_limit", "timeout", "auto_resume", "intercept_browser",
+        "auto_show_gui", "check_updates",
+    };
+
     public AppConfig SetConfig(JsonNode patch)
     {
+        if (patch is JsonObject obj)
+        {
+            var unknown = obj.Where(kv => !KnownConfigKeys.Contains(kv.Key))
+                             .Select(kv => kv.Key)
+                             .OrderBy(x => x, StringComparer.Ordinal)
+                             .ToList();
+            if (unknown.Count > 0)
+                throw new FormatException("未知配置项：" + string.Join("、", unknown));
+        }
         lock (_gate)
         {
             var scratch = Config.Clone();
@@ -657,11 +681,43 @@ public sealed class Manager
                 File.WriteAllText(tmp, root.ToJsonString());
                 File.Move(tmp, _stateFile, overwrite: true);
             }
-            catch
+            catch (Exception e)
             {
-                // persistence is best effort
+                // 磁盘满 / 目录没权限：以前整段被吞掉，POST /api/config 照样回
+                // ok:true，用户下次重启才发现设置全丢。留痕并交给界面显示。
+                _stateError = LogStateIssue("state_save_failed", e.GetType().Name + ": " + e.Message);
+                return;
             }
+            _stateError = "";
         }
+    }
+
+    private string _stateError = "";
+
+    /// <summary>最近一次 state 读写失败的原因（空串 = 正常）；界面用它把
+    /// 「设置没落盘 / 历史读不回来」说给用户，而不是静默丢掉。</summary>
+    public string StateError => _stateError;
+
+    private string LogStateIssue(string kind, string detail)
+    {
+        var note = kind + "：" + (detail.Length > 300 ? detail[..300] : detail);
+        try
+        {
+            var dir = Path.GetDirectoryName(_stateFile);
+            if (string.IsNullOrEmpty(dir)) return note;
+            var line = new JsonObject
+            {
+                ["ts"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                ["status"] = kind,
+                ["detail"] = detail.Length > 500 ? detail[..500] : detail,
+            };
+            File.AppendAllText(Path.Combine(dir, "download-errors.log"), line.ToJsonString() + "\n");
+        }
+        catch
+        {
+            // 日志本身写不进去（磁盘满）不能反过来拖垮下载主流程
+        }
+        return note;
     }
 
     private void LoadState()
@@ -689,9 +745,25 @@ public sealed class Manager
                 }
             }
         }
-        catch
+        catch (Exception e)
         {
-            // corrupt state: start clean
+            // 整份文件坏了（手改、断电写了一半）。不能只「当没有历史」：随后任何
+            // 一次 SaveState 会把空列表覆盖回去，历史就此永久消失。先挪个副本，
+            // 再按默认配置继续启动，并把原因交给界面显示。
+            string backup;
+            try
+            {
+                backup = _stateFile + ".bad-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                File.Move(_stateFile, backup, overwrite: true);
+            }
+            catch
+            {
+                backup = "";
+            }
+            _stateError = LogStateIssue(
+                "state_unreadable",
+                e.GetType().Name + ": " + e.Message
+                + (backup.Length > 0 ? $"；原件已备份到 {backup}" : "；备份失败，原件仍在原路径"));
         }
     }
 

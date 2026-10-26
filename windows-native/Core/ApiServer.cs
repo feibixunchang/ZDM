@@ -179,12 +179,16 @@ public sealed class ApiServer : IDisposable
         {
             var arr = new JsonArray(manager.List()
                 .Select(t => JsonSerializer.SerializeToNode(t)).ToArray());
-            return Results.Json(new JsonObject
+            var state = new JsonObject
             {
                 ["ok"] = true,
                 ["config"] = JsonSerializer.SerializeToNode(manager.Config),
                 ["tasks"] = arr,
-            });
+            };
+            // 历史文件读坏了、或最近一次设置没写进磁盘：只写在
+            // download-errors.log 里没人会去看，界面得先知道。
+            if (manager.StateError.Length > 0) state["warning"] = manager.StateError;
+            return Results.Json(state);
         });
 
         app.MapGet("/api/tasks", () =>
@@ -257,12 +261,16 @@ public sealed class ApiServer : IDisposable
                     // DASH video tracks need the matching audio to be muxed in.
                     audioUrl: Str("audio_url"));
 
-                return Results.Json(new JsonObject
+                var created = new JsonObject
                 {
                     ["ok"] = true,
                     ["id"] = d.Id,
                     ["task"] = JsonSerializer.SerializeToNode(d.Snapshot()),
-                });
+                };
+                // 任务已经在跑了，但记录没落盘：下次重启就找不到它了。
+                if (manager.StateError.Length > 0)
+                    created["warning"] = "任务已开始，但记录没能写入磁盘：" + manager.StateError;
+                return Results.Json(created);
             }
             catch (ArgumentException ex)
             {
@@ -279,31 +287,36 @@ public sealed class ApiServer : IDisposable
             switch (action)
             {
                 case "pause":
-                    await manager.PauseAsync(id);
+                    if (!await manager.PauseAsync(id))
+                        return Fail(409, $"当前状态（{d.Status.ToString().ToLowerInvariant()}）不能暂停");
                     break;
                 case "resume":
-                    await manager.ResumeAsync(id);
+                    if (!await manager.ResumeAsync(id))
+                        return Fail(409, $"当前状态（{d.Status.ToString().ToLowerInvariant()}）不能继续下载");
                     break;
                 case "restart":
-                    await manager.RestartAsync(id);
+                    if (!await manager.RestartAsync(id))
+                        return Fail(409, "重下没有执行（任务已不在列表里）");
                     break;
                 case "cancel":
                 {
                     var body = await ReadJsonAsync(ctx);
-                    await manager.CancelAsync(id, body?["files"]?.GetValue<bool?>() ?? true);
+                    if (!await manager.CancelAsync(id, body?["files"]?.GetValue<bool?>() ?? true))
+                        return Fail(409, "取消没有执行（任务已不在列表里）");
                     break;
                 }
                 case "open":
                     // Parity with the Python server: a finished task opens the
                     // file itself (a .dmg starts the installer); an unfinished
                     // one has no file yet, so it reveals the directory.
-                    if (d.Status == TaskStatus.Completed)
-                        Human.OpenFile(d.TargetPath);
-                    else
-                        Human.OpenInExplorer(d.Directory);
+                    var shown = d.Status == TaskStatus.Completed
+                        ? Human.OpenFile(d.TargetPath)
+                        : Human.OpenInExplorer(d.Directory);
+                    if (!shown) return Fail(500, "系统没有打开这个位置");
                     break;
                 case "reveal":
-                    Human.OpenInExplorer(d.Status == TaskStatus.Completed ? d.TargetPath : d.Directory);
+                    if (!Human.OpenInExplorer(d.Status == TaskStatus.Completed ? d.TargetPath : d.Directory))
+                        return Fail(500, "系统没有打开文件管理器");
                     break;
                 default:
                     return Fail(400, $"unknown action {action}");
@@ -331,19 +344,21 @@ public sealed class ApiServer : IDisposable
         app.MapPost("/api/action", async Task<IResult> (HttpContext ctx) =>
         {
             var body = await ReadJsonAsync(ctx);
+            int changed;
             switch (body?["action"]?.GetValue<string>())
             {
                 case "pause_all":
-                    await manager.PauseAllAsync();
+                    changed = await manager.PauseAllAsync();
                     break;
                 case "resume_all":
-                    await manager.ResumeAllAsync();
+                    changed = await manager.ResumeAllAsync();
                     break;
                 case "clear_finished":
-                    manager.ClearFinished();
+                    changed = manager.ClearFinished();
                     break;
                 case "open_folder":
-                    Human.OpenInExplorer(body?["path"]?.GetValue<string>() ?? manager.Config.DownloadDir);
+                    changed = Human.OpenInExplorer(body?["path"]?.GetValue<string>() ?? manager.Config.DownloadDir) ? 1 : 0;
+                    if (changed == 0) return Fail(500, "系统没有打开下载目录");
                     break;
                 case "shutdown":
                     _ = Task.Run(async () =>
@@ -351,11 +366,14 @@ public sealed class ApiServer : IDisposable
                         await Task.Delay(600);
                         await ShutdownAsync();
                     });
+                    changed = 1;
                     break;
                 default:
                     return Fail(400, $"unknown action {body?["action"]?.GetValue<string>()}");
             }
-            return Results.Json(new JsonObject { ["ok"] = true });
+            // 0 也要如实回：以前「全部暂停」点了没反应（没有可暂停的任务）和
+            // 「已经暂停好了」在界面上长得一模一样。
+            return Results.Json(new JsonObject { ["ok"] = true, ["changed"] = changed });
         });
 
         app.MapPost("/api/config", async Task<IResult> (HttpContext ctx) =>
@@ -373,11 +391,16 @@ public sealed class ApiServer : IDisposable
                 // 端口/连接数写了字母、开关写了 "maybe"：说清楚比默默什么都不改好。
                 return Fail(400, $"配置项无效：{e.Message}");
             }
-            return Results.Json(new JsonObject
+            var reply = new JsonObject
             {
                 ["ok"] = true,
                 ["config"] = JsonSerializer.SerializeToNode(cfg),
-            });
+            };
+            // 设置当场生效了，但可能没写进磁盘（目录没权限、磁盘满）：不说的话
+            // 用户要到下次重启才发现全丢了。
+            if (manager.StateError.Length > 0)
+                reply["warning"] = "设置已生效，但没能写入磁盘：" + manager.StateError;
+            return Results.Json(reply);
         });
 
         app.MapPost("/api/open", async Task<IResult> (HttpContext ctx) =>
@@ -393,7 +416,9 @@ public sealed class ApiServer : IDisposable
                 "reveal" => Human.OpenInExplorer(path),
                 _ => Human.OpenInExplorer(path),
             };
-            return Results.Json(new JsonObject { ["ok"] = ok });
+            // 打不开就给原因：回 200 + ok:false 界面只能说「点了没反应」。
+            if (!ok) return Fail(500, "系统没有打开这个位置");
+            return Results.Json(new JsonObject { ["ok"] = true });
         });
 
         try

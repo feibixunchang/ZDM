@@ -40,22 +40,41 @@ public static class AutoStart
         }
     }
 
-    public static bool SetEnabled(bool on)
+    public static bool SetEnabled(bool on) => TrySetEnabled(on, out _);
+
+    /// <summary>
+    /// 写注册表 ≠ 真的生效：键被组策略禁用、ACL 拒绝时 SetValue 有时也不抛异常。
+    /// 写完回读一次确认，并把失败原因交给调用方显示（与 Python 端
+    /// autostart.enable() 返回 (ok, reason) 对齐）——否则菜单勾上了，下次开机
+    /// 什么都没有，用户只能自己猜。
+    /// </summary>
+    public static bool TrySetEnabled(bool on, out string reason)
     {
+        reason = "";
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RunKey);
-            if (key is null) return false;
+            if (key is null)
+            {
+                reason = "打不开 HKCU 启动项注册表键";
+                return false;
+            }
             if (on)
                 key.SetValue(ValueName, Command);
             else
                 key.DeleteValue(ValueName, throwOnMissingValue: false);
-            return true;
         }
-        catch
+        catch (Exception e)
         {
+            reason = "注册表写入失败：" + e.Message;
             return false;
         }
+        if (IsEnabled() != on)
+        {
+            reason = "写入后回读不一致（可能被组策略或安全软件拦截）";
+            return false;
+        }
+        return true;
     }
 
     /// <summary>

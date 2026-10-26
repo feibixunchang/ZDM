@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from typing import Tuple
 
 from . import runtime
 
@@ -111,18 +112,33 @@ def _mac_log_path() -> str:
     return os.path.join(d, "zdm.log")
 
 
-def _mac_load(p: str) -> None:
-    """Load the agent with the modern bootstrap API, falling back to load(8)."""
+def _mac_load(p: str) -> Tuple[bool, str]:
+    """Load the agent with the modern bootstrap API, falling back to load(8).
+
+    两个命令的退出码以前都不查：launchd 拒了这个 job（plist 校验不过、域里
+    已有同名服务且状态坏掉），enable() 照样什么都不回，界面只看 plist 文件在不在，
+    于是复选框显示「开机自启：已开」，下次登录服务却不会起来。
+    """
     domain = f"gui/{os.getuid()}"
     r = subprocess.run(["launchctl", "bootstrap", domain, p], capture_output=True)
+    err = (r.stderr or b"").decode("utf-8", "replace").strip()
     if r.returncode == 0:
         subprocess.run(
             ["launchctl", "kickstart", "-k", f"{domain}/com.zdm.service"],
             capture_output=True,
         )
-        return
-    # Already loaded, or an older macOS without bootstrap.
-    subprocess.run(["launchctl", "load", "-w", p], capture_output=True)
+        return True, ""
+    if "already" in err.lower():
+        # 已经 bootstrap 过（重复开启）：这本来就是想要的状态，不算失败。
+        return True, ""
+    # Older macOS has no bootstrap subcommand.
+    r2 = subprocess.run(["launchctl", "load", "-w", p], capture_output=True)
+    if r2.returncode == 0 or "already" in (r2.stderr or b"").decode("utf-8", "replace").lower():
+        return True, ""
+    return False, (
+        "launchd 没有接受这个启动项"
+        f"（bootstrap：{err or r.returncode}；load：{(r2.stderr or b'').decode('utf-8', 'replace').strip() or r2.returncode}）"
+    )
 
 
 def _mac_unload(p: str) -> None:
@@ -131,7 +147,7 @@ def _mac_unload(p: str) -> None:
     subprocess.run(["launchctl", "unload", "-w", p], capture_output=True)
 
 
-def _mac_enable(app_dir: str, py: str) -> None:
+def _mac_enable(app_dir: str, py: str) -> Tuple[bool, str]:
     p = _mac_plist_path()
     # The bundle has no zdm.py on disk; runtime.cli_cmd() already collapses the
     # interpreter + script pair into the bundle executable when frozen.
@@ -144,7 +160,7 @@ def _mac_enable(app_dir: str, py: str) -> None:
                 program_args=program_args, log_path=_mac_log_path()
             )
         )
-    _mac_load(p)
+    return _mac_load(p)
 
 
 def _mac_disable() -> None:
@@ -255,27 +271,40 @@ def is_enabled() -> bool:
     return os.path.exists(_linux_path())
 
 
-def enable() -> None:
+def enable() -> Tuple[bool, str]:
+    """打开开机自启，回 (是否成功, 失败原因)。
+
+    调用方（桌面端复选框、托盘菜单）需要这句原因：只看「配置文件/注册表在不在」
+    会把「launchd 根本没接受」显示成已开启。
+    """
     app_dir, py = _app_dir(), _python()
-    if IS_WIN:
-        _win_enable(app_dir, py)
-    elif IS_MAC:
-        _mac_enable(app_dir, py)
-    else:
-        _linux_enable(app_dir, py)
+    try:
+        if IS_WIN:
+            _win_enable(app_dir, py)
+        elif IS_MAC:
+            ok, reason = _mac_enable(app_dir, py)
+            if not ok:
+                return False, reason
+        else:
+            _linux_enable(app_dir, py)
+    except OSError as e:
+        return False, f"自启配置没能写入：{getattr(e, 'strerror', None) or e}"
+    if not is_enabled():
+        return False, "自启配置没能写入（权限不足或目录不可写）"
+    return True, ""
 
 
-def disable() -> None:
+def disable() -> Tuple[bool, str]:
     if IS_WIN:
         _win_disable()
     elif IS_MAC:
         _mac_disable()
     else:
         _linux_disable()
+    if is_enabled():
+        return False, "取消失败：自启项仍然存在（可能被其它程序重新写回）"
+    return True, ""
 
 
-def set_enabled(on: bool) -> None:
-    if on:
-        enable()
-    else:
-        disable()
+def set_enabled(on: bool) -> Tuple[bool, str]:
+    return enable() if on else disable()

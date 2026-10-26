@@ -237,7 +237,11 @@ public partial class SettingsDialog : Window
 
         // Written to HKCU\...\Run here, together with the rest of the settings,
         // so Cancel genuinely means "change nothing".
-        AutoStart.SetEnabled(AutoStartBox.IsChecked == true);
+        if (!AutoStart.TrySetEnabled(AutoStartBox.IsChecked == true, out var autoStartError))
+        {
+            MessageBox.Show(this, "开机自启设置失败：" + autoStartError, "开机自启",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
 
         var patch = new System.Text.Json.Nodes.JsonObject
         {

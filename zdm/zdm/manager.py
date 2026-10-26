@@ -104,6 +104,37 @@ def default_download_dir() -> str:
     return os.path.join(home, "Downloads")
 
 
+def _log_state_issue(kind: str, detail: str, base_dir: str = "") -> str:
+    """把「state 读写出了问题」留痕到 download-errors.log，并回备份/日志位置。
+
+    静默是这类 bug 里最贵的一种：state.json 解析不了就当「没有历史」启动，随后
+    任何一次 save_state 会把空列表覆盖回磁盘，用户的下载记录从此消失，界面上
+    连一条痕迹都没有。写日志本身失败（磁盘满）不能反过来拖垮主流程。
+
+    日志写在 state.json 旁边（生产环境就是配置目录，和 core.py 记录下载失败的
+    那份是同一个文件）；测试里换过 state_file 时不会污染真实配置目录。
+    """
+    note = f"{kind}：{str(detail)[:300]}"
+    try:
+        directory = base_dir or config_dir()
+        path = os.path.join(directory, "download-errors.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "status": kind,
+                        "detail": str(detail)[:500],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    return note
+
+
 DEFAULT_CONFIG: Dict[str, object] = {
     "download_dir": default_download_dir(),
     "connections": 8,
@@ -243,10 +274,17 @@ class Manager:
         self.config: Dict[str, object] = dict(DEFAULT_CONFIG)
         self.state_file = state_file or os.path.join(config_dir(), "state.json")
         self._stop = threading.Event()
+        # 最近一次 save_state 的失败原因（空串 = 正常）。界面用它把「没落盘」
+        # 告诉用户，而不是等下次重启发现设置全丢。
+        self._state_error = ""
         self.global_limiter = RateLimiter(int(self.config.get("speed_limit") or 0))
         self._scheduler = threading.Thread(target=self._loop, daemon=True)
         self.load_state()
         self._scheduler.start()
+
+    @property
+    def state_error(self) -> str:
+        return self._state_error
 
     # ---------------- events ----------------
     def subscribe(self) -> queue.Queue:
@@ -600,15 +638,24 @@ class Manager:
         self.save_state()
         return True
 
-    def pause_all(self) -> None:
-        for d in list(self.downloads.values()):
-            if d.status in ("downloading", "queued"):
-                self.pause(d.id)
+    def pause_all(self) -> int:
+        """暂停所有可暂停的任务，返回真正被暂停的条数。
 
-    def resume_all(self) -> None:
+        返回数量是为了让界面能区分「暂停好了」和「本来就没有可暂停的任务」——
+        以前两种情况都只有一句成功，点了没反应用户只能反复点。
+        """
+        n = 0
         for d in list(self.downloads.values()):
-            if d.status in ("paused", "error"):
-                self.resume(d.id)
+            if d.status in ("downloading", "queued") and self.pause(d.id):
+                n += 1
+        return n
+
+    def resume_all(self) -> int:
+        n = 0
+        for d in list(self.downloads.values()):
+            if d.status in ("paused", "error") and self.resume(d.id):
+                n += 1
+        return n
 
     def clear_finished(self) -> int:
         n = 0
@@ -701,6 +748,12 @@ class Manager:
         return num
 
     def set_config(self, patch: Dict[str, object]) -> Dict[str, object]:
+        # 认不出的键名直接报错：以前 `zdm config conenctions 4`（打错一个字母）
+        # 会被静默过滤掉，服务端照样回 ok:true，用户看到「保存成功」却什么都没改。
+        # 三端界面只发已知键，所以这里可以严格。
+        unknown = [str(k) for k in patch if k not in DEFAULT_CONFIG]
+        if unknown:
+            raise ValueError("未知配置项：" + "、".join(sorted(unknown)))
         # 先全部换算再落盘：一处写错（speed_limit 填了「快点」）不能让前面
         # 几项已经生效、客户端却只看到一句失败。
         resolved = [
@@ -725,7 +778,8 @@ class Manager:
         self.save_state()
         return self.config
 
-    def save_state(self) -> None:
+    def save_state(self) -> bool:
+        """写回 state.json；返回值表示是否真的落盘，失败原因读 state_error。"""
         with self._state_lock:
             with self._lock:
                 tasks = []
@@ -764,14 +818,24 @@ class Manager:
                     os.fsync(f.fileno())
                 os.replace(tmp, self.state_file)
                 tmp = None
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                # 磁盘满 / 目录只读 / 权限：以前这里 pass 掉，set_config 照样回
+                # 「保存成功」，界面上的设置下次重启全丢。至少要留痕，并把
+                # 失败交给调用方显示。
+                self._state_error = _log_state_issue(
+                    "state_save_failed",
+                    f"{type(e).__name__}: {e}",
+                    os.path.dirname(self.state_file),
+                )
+            else:
+                self._state_error = ""
             finally:
                 if tmp:
                     try:
                         os.remove(tmp)
                     except OSError:
                         pass
+            return self._state_error == ""
 
     def load_state(self) -> None:
         if not os.path.exists(self.state_file):
@@ -779,10 +843,28 @@ class Manager:
         try:
             with open(self.state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except Exception:
+            if not isinstance(data, dict):
+                raise ValueError(f"顶层不是对象（{type(data).__name__}）")
+        except Exception as e:  # noqa: BLE001
+            # 整份文件坏了（手改、断电时写了一半）。不能只「当没有历史」：
+            # 下面任何一次 save_state 都会把空列表覆盖回去，历史就此永久消失。
+            # 先把原文件挪到旁边留一份能救的副本，再按默认配置继续启动。
+            backup = ""
+            try:
+                backup = self.state_file + ".bad-" + time.strftime("%Y%m%d-%H%M%S")
+                os.replace(self.state_file, backup)
+            except OSError:
+                backup = ""
+            self._state_error = _log_state_issue(
+                "state_unreadable",
+                f"{type(e).__name__}: {e}"
+                + (f"；原件已备份到 {backup}" if backup else "；备份失败，原件仍在原路径"),
+                os.path.dirname(self.state_file),
+            )
             return
         merged = dict(self.config)
-        for k, v in (data.get("config") or {}).items():
+        stored = data.get("config")
+        for k, v in (stored.items() if isinstance(stored, dict) else []):
             if k in DEFAULT_CONFIG and v is not None:
                 merged[k] = v
         # 与 load_config 共用同一套兜底：老版本存下的越界值、手改过的

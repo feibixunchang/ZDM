@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.16.7**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.16.8**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.16.7_amd64.deb` | `sudo apt install ./zdm_1.16.7_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.16.8_amd64.deb` | `sudo apt install ./zdm_1.16.8_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.16.7.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.16.8.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.16.7
+bash zdm/build_linux_app.sh ./linux-build 1.16.8
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -190,6 +190,35 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
   往 EOF 之后写）；全坏就当没有断点，重新分段下载。
 - 「检查更新」的版本号只认每段开头的数字：`1.16.7-rc2` 不再被算成 1.16.72，
   四段的 `1.16.7.1` 也能认出比 `1.16.7` 更新。
+
+**点了按钮却什么都没发生** —— v1.16.8 起，这三端共用的失败不再被说成成功：
+
+- `state.json` 解析不了时先把原件备份成 `state.json.bad-<时间>`，再把原因写进
+  `download-errors.log`；`save_state` 没落盘（目录只读、磁盘满）会记在 `state_error`，
+  `/api/state`、`/api/config`、`POST /api/tasks` 的响应都带 `warning`，桌面端状态栏直接显示。
+  以前这两条都是静默的：一次坏解析当成「没有历史」，随后任何一次保存就把空列表覆盖回
+  磁盘，下载记录从此消失且界面上没有痕迹。
+- 开机自启核对 `launchctl bootstrap` / `load` 的退出码，拉起桌面端核对子进程的退出码：
+  launchd 没接受这个启动项、或程序起来就非 0 退出（bundle 损坏、argv 拼错）时，复选框
+  退回未勾选并写明原因，不再凭「配置文件写好了」显示「开机自启：已开」。
+- 批量动作（全部暂停 / 全部继续 / 清除已完成）回 `changed`，也就是服务端真正改动的条数：
+  0 条时界面说「没有正在下载的任务」，以前它和「已暂停 3 个任务」长得一模一样。
+- 网页版 `api()` 统一兜底：连不上本机服务、返回 HTML（9000 端口被别的程序占了）、
+  HTTP 5xx、以及 200 但正文不是 JSON，全部变成 `{ok:false, error:…}`。以前这些异常
+  直接冒到调用方，点按钮的表现就是「没反应」。
+- 浏览器扩展（1.5.41）交接前确认「这条是否已入列」时同时比对 `original_url`：开了镜像加速后
+  `url` 被换成镜像地址，只比 `url` 永远查不到，同一个文件会被下两遍。
+- `zdm config` 的未知键（`conenctions` 少打一个字母）回 400 并指名是哪一项，CLI 退出码 1；
+  一批里混一个坏值则整批不生效。`zdm://` 链接添加失败（坏链接、服务没起、token 不对）
+  同样写 stderr 并退出 1，不再是「双击链接什么都没发生」。
+- curl 探大小以 `returncode` 为准：DNS 失败 / TLS 断 / 拒绝连接时 `-w` 模板照样打印出
+  `http_code=000`，以前被当成一次正常探测，任务带着 `size=0`、不支持 Range 排队空转，
+  很晚才报错。
+- 桌面端「修改任务」对话框的连接数、优先级、定时开始统一走 `_num` / `_int`：记录里
+  写坏的值退回默认，不会因为一次 `float()` 异常把整个对话框关掉。
+
+`windows-native/`（C# 参考实现）同步了这些行为：批量动作回 `changed`、配置未知键报错、
+`StateError` 透成 `warning`、开机自启校验注册表写入结果。**本机没有 dotnet，C# 侧未编译验证。**
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。
