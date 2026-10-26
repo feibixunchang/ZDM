@@ -120,14 +120,16 @@ Root: HKCU; Subkey: "Software\Chromium\NativeMessagingHosts\com.zdm.launcher"; V
 Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.zdm.launcher"; ValueType: string; ValueName: ""; ValueData: "{app}\com.zdm.launcher.json"; Flags: uninsdeletekey
 
 [Run]
-; 只有交互安装才拉起界面。**不要**再加一条 `Check: WizardSilent` 的自动重启：
-; 静默安装（应用内一键更新就是 /VERYSILENT，CI 也是）时那条会真的执行，
-; Setup 会一直等这个 GUI 进程退出，装完永远不返回。
+; 交互安装（手动双击，或应用内更新拉起的可见向导）装完**立即**拉起界面，
+; 不再依赖完成页上的勾选框 —— 用户反馈「装完不自动打开」就是因为那个勾选
+; 框经常被忽略。nowait 保证 Setup 不会等 GUI 退出；`not WizardSilent` 让
+; 静默安装（CI / 无人值守）不启动界面。CI 的 /VERYSILENT 还带 /NORUN，
+; 双保险。
 ;
 ; **必须带 gui 参数**（与 [Icons] 同理）：裸 ZDM.exe 在 CLI 里等于 `start`，
-; 1.15.x 以前这里漏了 Parameters，用户装完勾选「立即启动」看到的是浏览器
-; 里的网页版，桌面窗口根本没起来 —— 反馈就是「更新完界面没了」。
-Filename: "{app}\{#AppExeName}"; Parameters: "gui"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+; 1.15.x 以前这里漏了 Parameters，用户装完看到的是浏览器里的网页版，
+; 桌面窗口根本没起来 —— 反馈就是「更新完界面没了」。
+Filename: "{app}\{#AppExeName}"; Parameters: "gui"; Flags: nowait; Check: not WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
@@ -232,8 +234,14 @@ begin
   // 文件被占用时 Setup 会覆盖失败或留下半新半旧的目录 —— 表现就是「装完
   // 还是旧版本的行为」。安装包自身的镜像名是 ZDM-Setup-*.exe，不受影响。
   // 进程本来就没在跑时 taskkill 返回非 0，这里不当作失败。
+  //
+  // **绝对不要加 /T**：应用内更新时 Setup 是由 ZDM.exe 拉起的子进程，
+  // `taskkill /T /IM ZDM.exe` 会连同子进程树一起杀掉 —— 看起来就是
+  // 「点下载并安装，安装向导刚出来就把自己杀了」。去掉 /T 只杀同名进程，
+  // Setup 和它拉起的子进程都能活下来。后台 serve / NativeHost 用单独的
+  // 镜像名再杀一遍，不依赖父子关系。
   Ok := Exec(ExpandConstant('{cmd}'),
-             '/C taskkill /F /IM ZDM.exe /T >NUL 2>&1 & taskkill /F /IM ZDM-NativeHost.exe /T >NUL 2>&1',
+             '/C taskkill /F /IM ZDM.exe >NUL 2>&1 & taskkill /F /IM ZDM-NativeHost.exe >NUL 2>&1',
              '', SW_HIDE, ewWaitUntilTerminated, Rc);
 end;
 

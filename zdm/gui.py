@@ -434,14 +434,12 @@ from PyQt5.QtCore import (  # noqa: E402
     Qt,
     QThread,
     QTimer,
-    QUrl,
     pyqtSignal,
 )
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PyQt5.QtGui import (  # noqa: E402
     QColor,
     QCursor,
-    QDesktopServices,
     QFont,
     QIcon,
     QPainter,
@@ -982,7 +980,13 @@ class ExtensionDialog(QDialog):
                 f"目录不存在：\n{d}\n\nZDM 安装可能不完整，请重新安装。",
             )
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+        ok, err = desktop.open_external(d)
+        if ok:
+            self.status.setText(f"已打开扩展目录：{d}")
+        else:
+            QMessageBox.warning(
+                self, "无法打开目录", f"{d}\n\n{err or '系统没有可用的打开方式。'}"
+            )
 
     def _copy_path(self):
         d = runtime.extension_dir()
@@ -1395,6 +1399,7 @@ class MainWindow(QMainWindow):
         for text, fn in (
             ("清除已完成", lambda: self._bulk("clear_finished")),
             ("打开网页版", self._open_web),
+            ("软件发布页", self._open_update_page),
             ("浏览器扩展", self._extensions),
             ("打开目录", self._open_dir),
             ("设置", self._settings),
@@ -2411,7 +2416,7 @@ class MainWindow(QMainWindow):
             # 可见向导已经起来了，用户能看到「下一步」。
             # **不要**在这里 QApplication.quit()：主动退出会先留下一段空白，
             # 用户以为装崩了（这正是上一版 /SILENT 的观感）。向导走到 ssInstall
-            # 时 Inno 自己会 taskkill 掉 ZDM.exe，完成页还能勾选「立即启动」。
+            # 时 Inno 自己会 taskkill 掉 ZDM.exe，装完会自动拉起新版界面。
             # 提示条保持可见：用户在向导里点了「取消」后，还能再点「开始安装」。
             self._status("安装向导已打开，按提示点「下一步」即可", hold=20)
             if self.tray is not None:
@@ -2425,12 +2430,10 @@ class MainWindow(QMainWindow):
                     pass
             return
         if sys.platform.startswith("linux") and path.lower().endswith(".deb"):
-            # 用 GUI 自己的会话打开 .deb：QDesktopServices 走 Qt 的 xdg/DDE
-            # 集成，实测能稳定弹出「软件包安装器」。从后台线程 Popen
-            # deepin-deb-installer 在本机偶尔会直接退出，用户看到的就是
-            # 「下载完了，安装器没出来」。
+            # 用 GUI 自己的会话打开 .deb：后台服务常常没有 DISPLAY/DBUS，
+            # 系统安装器会直接退出，用户看到的就是「下载完了，安装器没出来」。
             self._status("正在打开系统安装器…", hold=10)
-            if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            if self._open_external(path, notify=False):
                 self._status("已打开系统安装器，请按提示完成安装；ZDM 即将关闭", hold=15)
                 if self.tray is not None:
                     try:
@@ -2451,12 +2454,16 @@ class MainWindow(QMainWindow):
             return
         self._status(f"已下载 {os.path.basename(path)}，正在打开安装包…", hold=6)
         # macOS: opening the .dmg mounts it and shows the installer.
-        self._run(self.api.open_file, path)
+        opened = self._open_external(path, notify=False)
         self._message(
             "更新已就绪",
             f"安装包已保存到：\n{path}\n\n"
-            "已为你打开这个安装包：把里面的 ZDM 拖进「应用程序」并确认「替换」。\n\n"
-            "替换完成后请退出 ZDM 再重新打开（托盘/菜单栏图标 → 退出），"
+            + (
+                "已为你打开这个安装包：把里面的 ZDM 拖进「应用程序」并确认「替换」。\n\n"
+                if opened
+                else "没能自动打开安装包，请手动双击上面的文件。\n\n"
+            )
+            + "替换完成后请退出 ZDM 再重新打开（托盘/菜单栏图标 → 退出），"
             "新版本才会生效。",
         )
 
@@ -2514,13 +2521,29 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(QMessageBox.Yes)
         return box.exec_() == QMessageBox.Yes
 
-    def _open_url(self, url: str):
-        try:
-            import webbrowser
+    def _open_external(self, target, reveal: bool = False, notify: bool = True) -> bool:
+        """Open a path/URL in the GUI's desktop session.
 
-            webbrowser.open(url)
-        except Exception as e:  # noqa: BLE001
-            self._status(f"打开链接失败：{e}")
+        Done here (not in the service) because the background process often
+        lacks DISPLAY/DBUS, and a frozen bundle's LD_LIBRARY_PATH breaks system
+        helpers. ``desktop.open_external`` tries a real fallback chain and
+        reports why it failed, so the button never looks dead.
+        """
+        ok, err = desktop.open_external(target, reveal=reveal)
+        if ok:
+            text = str(target or "")
+            if text.lower().startswith(("http://", "https://")):
+                self._status(f"已在浏览器打开：{text}", hold=6)
+            else:
+                self._status(f"已打开：{text}", hold=4)
+        else:
+            self._status(f"打开失败：{err}", hold=10)
+            if notify:
+                self._message("无法打开", f"{target}\n\n{err or '系统没有可用的打开方式。'}")
+        return ok
+
+    def _open_url(self, url: str):
+        self._open_external(url)
 
     def _about(self):
         box = QMessageBox(self)
@@ -2543,29 +2566,17 @@ class MainWindow(QMainWindow):
             self._open_url(update.PROJECT_URL)
 
     def _open_task(self, task_id, reveal=False):
-        """「打开 / 目录」用 GUI 自己的会话调用 xdg-open。
-
-        后台服务是独立进程，启动时没有继承 DISPLAY/DBUS_SESSION_BUS_ADDRESS；
-        它调用 xdg-open 只会静默失败（Linux 上「打开」「目录」点了没反应就是
-        这个原因）。GUI 进程本身在图形会话里，QDesktopServices 能正确唤起
-        文件管理器/默认播放器。
-        """
+        """「打开 / 目录」：在 GUI 会话里打开文件，或选中它所在的目录。"""
         t = next((x for x in self.tasks if x["id"] == task_id), None)
         if not t:
             return
         directory = t.get("directory") or ""
         path = os.path.join(directory, t.get("filename") or "")
-        if reveal or not os.path.exists(path):
-            target = directory if os.path.isdir(directory) else os.path.expanduser("~")
-        else:
-            target = path
-        if not os.path.exists(target):
-            self._status(f"路径不存在：{target}", hold=6)
+        target = path if os.path.exists(path) else directory
+        if not target or not os.path.exists(target):
+            self._status(f"路径不存在：{target or directory}", hold=6)
             return
-        if QDesktopServices.openUrl(QUrl.fromLocalFile(target)):
-            self._status(f"已打开：{target}", hold=4)
-        else:
-            self._status(f"无法打开：{target}（系统缺少文件管理器/默认程序）", hold=8)
+        self._open_external(target, reveal=bool(reveal and os.path.isfile(target)))
 
     def _act(self, task_id, action):
         self._run(self.api.action, task_id, action)
@@ -2976,36 +2987,12 @@ class MainWindow(QMainWindow):
 
     def _open_dir(self):
         path = str((self.config or {}).get("download_dir") or os.path.expanduser("~/Downloads"))
-        self._run(self.api.open_path, path)
+        self._open_external(path)
 
     def _open_web(self):
         """Open the local web UI (http://127.0.0.1:<port>/) in the default browser."""
         port = int((self.config or {}).get("port") or self.port or 9000)
-        url = f"http://127.0.0.1:{port}/"
-        ok = False
-        try:
-            import webbrowser
-
-            ok = bool(webbrowser.open(url))
-        except Exception:
-            ok = False
-        if not ok and os.name == "posix":
-            # webbrowser 模块在部分 Linux 发行版上找不到浏览器（没有
-            # $BROWSER、注册表为空）会静默返回 False —— 兜底直接调
-            # xdg-open，再不行就把原因告诉用户，而不是「点了没反应」。
-            try:
-                subprocess.Popen(
-                    ["xdg-open", url],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    **runtime.silent_proc_kwargs(),
-                )
-                ok = True
-            except Exception:
-                ok = False
-        if ok:
-            self._status(f"已在浏览器打开网页版：{url}")
-        else:
-            self._status("打开网页版失败：系统里没有可用的浏览器（需要 xdg-open 或已安装的浏览器）")
+        self._open_external(f"http://127.0.0.1:{port}/")
 
     # ---- 主界面扩展状态（常驻） ----
     def _refresh_ext_status(self):
@@ -3063,9 +3050,9 @@ class MainWindow(QMainWindow):
         if not t:
             return
         if t.get("status") == "completed":
-            self._act(t["id"], "open")   # opens the file itself (e.g. the .dmg)
+            self._open_task(t["id"], False)   # opens the file itself (e.g. the .dmg)
         else:
-            self._run(self.api.open_path, t["directory"])
+            self._open_external(t.get("directory") or "")
 
     def _menu(self, pos):
         row = self.table.rowAt(pos.y())

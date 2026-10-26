@@ -41,6 +41,47 @@ def silent_proc_kwargs() -> dict:
     return {}
 
 
+def child_env() -> dict:
+    """Environment for launching *system* helpers from this app.
+
+    PyInstaller puts the bundle's ``_internal`` directory on
+    ``LD_LIBRARY_PATH``. That is required by the bundled interpreter, but every
+    child inherits it: system programs such as ``xdg-open``, ``gio``,
+    ``dbus-send`` or the distro's .deb installer then load our ``libssl`` /
+    ``libstdc++`` and exit without doing anything. The user sees a button that
+    simply does nothing (Linux 上「打开网页版 / 打开目录」就是这个原因).
+    Remove only our own runtime directories, plus the Python overrides a frozen
+    bundle must not leak into system scripts.
+    """
+    env = os.environ.copy()
+    if sys.platform.startswith("linux"):
+        drop = set()
+        if is_frozen():
+            try:
+                drop.add(os.path.realpath(app_root()))
+            except OSError:
+                pass
+        libpath = env.get("LD_LIBRARY_PATH")
+        if libpath:
+            keep = []
+            for part in libpath.split(":"):
+                if not part:
+                    continue
+                try:
+                    if os.path.realpath(part) in drop:
+                        continue
+                except OSError:
+                    pass
+                keep.append(part)
+            if keep:
+                env["LD_LIBRARY_PATH"] = ":".join(keep)
+            else:
+                env.pop("LD_LIBRARY_PATH", None)
+        for key in ("PYTHONHOME", "PYTHONPATH"):
+            env.pop(key, None)
+    return env
+
+
 def app_root() -> str:
     """Directory that holds the read-only resources (``web/``, ``extension/``).
 

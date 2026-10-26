@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -598,92 +596,26 @@ class Manager:
         the file is missing we fall back to revealing its folder so the user can
         see what happened instead of getting a silent no-op.
         """
-        try:
-            devnull = subprocess.DEVNULL
-            if not path:
-                return False
-            if os.path.isdir(path):
-                return Manager.open_path(path)
-            if not os.path.exists(path):
-                return Manager.reveal_path(path)
-            if IS_WIN:
-                os.startfile(path)  # type: ignore[attr-defined]
-            elif IS_MAC:
-                subprocess.Popen(["open", path], stdout=devnull, stderr=devnull)
-            else:
-                subprocess.Popen(["xdg-open", path], stdout=devnull, stderr=devnull)
-            return True
-        except Exception:
+        from .desktop import open_external
+
+        if not path:
             return False
+        if os.path.isdir(path):
+            return open_external(path)[0]
+        if not os.path.exists(path):
+            return Manager.reveal_path(path)
+        return open_external(path)[0]
 
     @staticmethod
     def reveal_path(path: str) -> bool:
         """Show the file (or folder) inside the OS file manager, selected."""
-        try:
-            devnull = subprocess.DEVNULL
-            p = path or os.path.expanduser("~")
-            if IS_WIN:
-                if os.path.isdir(p):
-                    os.startfile(p)  # type: ignore[attr-defined]
-                else:
-                    subprocess.Popen(
-                        ["explorer", "/select,", os.path.normpath(p)],
-                        stdout=devnull, stderr=devnull,
-                    )
-            elif IS_MAC:
-                if os.path.isdir(p):
-                    subprocess.Popen(["open", p], stdout=devnull, stderr=devnull)
-                else:
-                    subprocess.Popen(["open", "-R", p], stdout=devnull, stderr=devnull)
-            else:
-                if not os.path.isdir(p) and shutil.which("dbus-send"):
-                    import urllib.parse
+        from .desktop import open_external
 
-                    uri = "file://" + urllib.parse.quote(os.path.abspath(p))
-                    r = subprocess.run(
-                        [
-                            "dbus-send", "--session",
-                            "--dest=org.freedesktop.FileManager1",
-                            "--type=method_call",
-                            "/org/freedesktop/FileManager1",
-                            "org.freedesktop.FileManager1.ShowItems",
-                            "array:string:" + uri, "string:",
-                        ],
-                        stdout=devnull, stderr=devnull, timeout=5,
-                    )
-                    if r.returncode == 0:
-                        return True
-                target = p if os.path.isdir(p) else (os.path.dirname(p) or ".")
-                subprocess.Popen(["xdg-open", target], stdout=devnull, stderr=devnull)
-            return True
-        except Exception:
-            return False
+        return open_external(path or os.path.expanduser("~"), reveal=True)[0]
 
     @staticmethod
     def open_path(path: str) -> bool:
         """Open a file's folder (or the folder itself) in the OS file manager."""
-        try:
-            devnull = subprocess.DEVNULL
-            if IS_WIN:
-                if os.path.isdir(path):
-                    os.startfile(path)  # type: ignore[attr-defined]
-                elif os.path.exists(path):
-                    subprocess.Popen(["explorer", "/select,", os.path.normpath(path)],
-                                     stdout=devnull, stderr=devnull)
-                else:
-                    subprocess.Popen(["explorer", os.path.dirname(os.path.normpath(path))],
-                                     stdout=devnull, stderr=devnull)
-            elif IS_MAC:
-                if os.path.isdir(path):
-                    subprocess.Popen(["open", path], stdout=devnull, stderr=devnull)
-                elif os.path.exists(path):
-                    subprocess.Popen(["open", "-R", path], stdout=devnull, stderr=devnull)
-                else:
-                    subprocess.Popen(["open", os.path.dirname(path) or "."],
-                                     stdout=devnull, stderr=devnull)
-            else:
-                target = path if os.path.isdir(path) else (os.path.dirname(path) or ".")
-                subprocess.Popen(["xdg-open", target], stdout=devnull, stderr=devnull)
-            return True
-        except Exception:
-            return False
+        from .desktop import open_external
+
+        return open_external(path)[0]

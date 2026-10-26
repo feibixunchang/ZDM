@@ -28,6 +28,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
+from typing import Tuple
 
 from . import runtime
 
@@ -192,6 +194,173 @@ def _spawn_python_gui(urls, port: int) -> bool:
             return False
         time.sleep(0.1)
     return True
+
+
+# --------------------------------------------------------------------------- open
+def _spawn(argv, env) -> Tuple[bool, str]:
+    """Launch one handler and tell the caller whether it clearly failed.
+
+    ``xdg-open`` and friends return immediately; a non-zero exit code means
+    "no handler / could not launch" and is what used to be swallowed (the
+    button looked dead). If the process is still running after a short grace
+    period it has handed off to a browser/file manager, so treat it as success.
+    """
+    try:
+        p = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+    except Exception as e:  # noqa: BLE001
+        return False, f"{os.path.basename(argv[0])}: {e}"
+    try:
+        rc = p.wait(timeout=1.5)
+    except subprocess.TimeoutExpired:
+        return True, ""
+    if rc == 0:
+        return True, ""
+    return False, f"{os.path.basename(argv[0])} 退出码 {rc}"
+
+
+def _linux_open_path(target: str, reveal: bool) -> Tuple[bool, str]:
+    env = runtime.child_env()
+    path_env = env.get("PATH") or ""
+
+    if reveal and os.path.isfile(target):
+        # FileManager1 是标准接口，能直接在文件管理器里选中文件。
+        dbus = shutil.which("dbus-send", path=path_env)
+        if dbus:
+            uri = "file://" + urllib.parse.quote(os.path.abspath(target))
+            try:
+                r = subprocess.run(
+                    [
+                        dbus, "--session",
+                        "--dest=org.freedesktop.FileManager1",
+                        "--type=method_call",
+                        "/org/freedesktop/FileManager1",
+                        "org.freedesktop.FileManager1.ShowItems",
+                        "array:string:" + uri, "string:",
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    env=env,
+                )
+                if r.returncode == 0:
+                    return True, ""
+            except Exception:  # noqa: BLE001
+                pass
+        for name, argv in (
+            ("nautilus", ["nautilus", "--select", target]),
+            ("dolphin", ["dolphin", "--select", target]),
+            ("nemo", ["nemo", target]),
+            ("thunar", ["thunar", target]),
+        ):
+            if shutil.which(name, path=path_env):
+                ok, err = _spawn(argv, env)
+                if ok:
+                    return True, ""
+                last = err
+        # 选不中文件时退一步：至少把所在目录打开。
+        target = os.path.dirname(target) or "."
+
+    # xdg-open is the canonical entry point; gio/kde-open5/... cover minimal
+    # installs where xdg-utils is missing. Browser/file-manager names are the
+    # last resort so a desktop without those helpers still does something.
+    cmds = [
+        ["xdg-open", target],
+        ["gio", "open", target],
+        ["kde-open5", target],
+        ["kioclient5", "exec", target],
+        ["exo-open", target],
+        ["gnome-open", target],
+        ["deepin-open", target],
+    ]
+    if os.path.isdir(target):
+        for name in ("nautilus", "dolphin", "thunar", "nemo", "pcmanfm", "caja"):
+            cmds.append([name, target])
+    last = ""
+    for argv in cmds:
+        if shutil.which(argv[0], path=path_env) is None:
+            continue
+        ok, err = _spawn(argv, env)
+        if ok:
+            return True, ""
+        last = err
+    return False, last or "系统里没有可用的文件管理器/默认程序"
+
+
+def _linux_open_url(url: str) -> Tuple[bool, str]:
+    env = runtime.child_env()
+    path_env = env.get("PATH") or ""
+    cmds = [
+        ["xdg-open", url],
+        ["gio", "open", url],
+        ["sensible-browser", url],
+    ]
+    for name in (
+        "google-chrome", "chromium", "chromium-browser", "firefox",
+        "microsoft-edge", "brave-browser", "vivaldi",
+    ):
+        cmds.append([name, url])
+    last = ""
+    for argv in cmds:
+        if shutil.which(argv[0], path=path_env) is None:
+            continue
+        ok, err = _spawn(argv, env)
+        if ok:
+            return True, ""
+        last = err
+    return False, last or "系统里没有可用的浏览器（需要 xdg-open 或已安装的浏览器）"
+
+
+def open_external(target: str, reveal: bool = False) -> Tuple[bool, str]:
+    """Open a path or URL with the desktop's default handler.
+
+    Returns ``(ok, reason)`` instead of a bare bool so the GUI can tell the
+    user *why* nothing happened. Must run in the GUI process: the background
+    service often has no DISPLAY/DBUS env, and a frozen bundle's
+    ``LD_LIBRARY_PATH`` breaks system helpers (see :func:`runtime.child_env`).
+    """
+    target = str(target or "").strip()
+    if not target:
+        return False, "路径为空"
+    is_url = target.lower().startswith(("http://", "https://"))
+    if is_url:
+        if IS_WIN:
+            try:
+                os.startfile(target)  # type: ignore[attr-defined]
+                return True, ""
+            except Exception as e:  # noqa: BLE001
+                return False, str(e)
+        if IS_MAC:
+            return _spawn(["open", target], runtime.child_env())
+        return _linux_open_url(target)
+
+    target = os.path.expanduser(target)
+    if not os.path.exists(target):
+        return False, f"路径不存在：{target}"
+    if IS_WIN:
+        try:
+            if reveal and os.path.isfile(target):
+                subprocess.Popen(
+                    ["explorer", "/select,", os.path.normpath(target)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                os.startfile(target)  # type: ignore[attr-defined]
+            return True, ""
+        except Exception as e:  # noqa: BLE001
+            return False, str(e)
+    if IS_MAC:
+        argv = ["open", "-R", target] if (reveal and os.path.isfile(target)) else ["open", target]
+        return _spawn(argv, runtime.child_env())
+    return _linux_open_path(target, reveal)
 
 
 def ensure_desktop(urls=None, port: int = 9000) -> bool:

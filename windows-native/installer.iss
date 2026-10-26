@@ -3,7 +3,7 @@
 
 #define AppName "ZDM 下载管理器"
 #define AppNameEn "ZDM Download Manager"
-#define AppVersion "1.15.35"
+#define AppVersion "1.15.36"
 #define AppPublisher "ZDM"
 #define AppExeName "Zdm.exe"
 #define AppUrl "https://github.com/"
@@ -79,7 +79,7 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\c
 ; 先无界面地把协议、原生消息清单、自启路径都注册一遍，
 ; 这样即使用户装完没立刻打开程序，浏览器那边也能正常唤醒。
 Filename: "{app}\{#AppExeName}"; Parameters: "--register"; Flags: runhidden nowait
-Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Flags: nowait; Check: not WizardSilent
 ; 注意：应用内「一键更新」升级完的重启**不在这里做**。
 ; 放在这里需要 `Check: WizardSilent`，而静默安装（CI 的 Install and verify 也是
 ; /VERYSILENT）会真的把 ZDM 拉起来，把自检卡死。改由 UpdateInstaller.RunInstaller
@@ -96,12 +96,14 @@ Type: files; Name: "{userappdata}\ZDM\com.zdm.launcher.json"
 // 都是同一个映像名）。不做这一步，用户双击新安装包就会被「文件被占用」
 // 卡住，只能开任务管理器手动结束（Windows 实测）；taskkill 找不到进程
 // 时返回非零，属正常，不用处理。
+// **不要加 /T**：应用内更新时 Setup 是 ZDM.exe 的子进程，/T 会把它一起
+// 杀掉（用户看到的是「安装向导刚出来就自己关了」）。
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   RC: Integer;
 begin
   Exec(ExpandConstant('{cmd}'),
-    '/C taskkill /F /IM Zdm.exe /T & taskkill /F /IM ZDM.exe /T',
+    '/C taskkill /F /IM Zdm.exe & taskkill /F /IM ZDM.exe',
     '', SW_HIDE, ewWaitUntilTerminated, RC);
   Sleep(800);
   Result := '';

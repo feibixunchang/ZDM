@@ -519,16 +519,21 @@ def install_linux(deb_path: str) -> Tuple[bool, str]:
     """
     import shutil
 
+    from . import runtime
+
     if not sys.platform.startswith("linux") or not deb_path:
         return False, "仅在 Linux 上可用"
     if not os.path.isfile(deb_path):
         return False, "安装包不存在"
+    # 冻结包里 LD_LIBRARY_PATH 指向 _internal；不剥掉的话系统安装器会加载
+    # 我们的 libssl/libstdc++ 后直接退出，用户看到的是「下载完什么都没发生」。
+    env = runtime.child_env()
     for exe in ("deepin-deb-installer", "gdebi-gtk", "gdebi", "xdg-open"):
-        path = shutil.which(exe)
+        path = shutil.which(exe, path=env.get("PATH"))
         if not path:
             continue
         try:
-            subprocess.Popen([path, deb_path], close_fds=True)
+            subprocess.Popen([path, deb_path], close_fds=True, env=env)
             return True, ""
         except Exception:  # noqa: BLE001
             continue
@@ -541,6 +546,7 @@ def install_linux(deb_path: str) -> Tuple[bool, str]:
         p = subprocess.run(
             [pkexec, dpkg, "-i", deb_path],
             timeout=600,
+            env=env,
             **_silent_kwargs(),
         )
     except subprocess.TimeoutExpired:
@@ -568,9 +574,9 @@ def install_windows(setup_path: str, relaunch_exe: str = "", silent: bool = Fals
     很低（省掉一次点「下一步」），代价却是更新失败时完全不可诊断。
 
     可见向导下：Setup 自己在 ``ssInstall`` 阶段 taskkill 掉 ZDM.exe（见
-    installer.iss::KillRunningZdm），装完的完成页自带「立即启动 ZDM」勾选项
-    （``[Run] ... postinstall skipifsilent``），所以调用方**不需要**再安排重启，
-    也不应该急着 quit —— 让用户看着向导走完，体验才对。
+    installer.iss::KillRunningZdm），装完直接拉起界面（``[Run]`` +
+    ``nowait``），所以调用方**不需要**再安排重启，也不应该急着 quit ——
+    让用户看着向导走完，体验才对。
 
     ``silent=True`` 保留给无人值守场景（CI/脚本），走 /SILENT 并起一个游离的
     powershell 在装完后拉起新版；那条路径**不要**在交互式更新里用。
@@ -601,7 +607,9 @@ def install_windows(setup_path: str, relaunch_exe: str = "", silent: bool = Fals
         # 先杀掉残留进程（serve 是独立的 ZDM.exe，GUI 退出后它还活着）：
         # 不杀的话 Inno 的 /CLOSEAPPLICATIONS 关不掉它们，用户就得开任务
         # 管理器手动结束（Windows 实测）。本 GUI 即将退出，再杀一次无妨。
-        "taskkill /F /IM ZDM.exe /T >$null 2>&1; Start-Sleep -Seconds 1; "
+        # **不要加 /T**：这个 PowerShell 自己就是 ZDM.exe 的子进程，/T 会
+        # 把执行脚本的进程一起杀掉，后面的安装器根本起不来。
+        "taskkill /F /IM ZDM.exe >$null 2>&1; Start-Sleep -Seconds 1; "
         f"$p = Start-Process -FilePath {q(setup_path)} -ArgumentList "
         "'/SILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS' -PassThru;"
         " Wait-Process -Id $p.Id -ErrorAction SilentlyContinue;"
