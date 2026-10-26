@@ -210,11 +210,27 @@ EOF
   fi
   # Firefox：Linux 是 ~/.mozilla/native-messaging-hosts，macOS 是
   # ~/Library/Application Support/Mozilla/NativeMessagingHosts（大小写不一样）。
-  # 只在其父目录已存在（= 装过 Firefox）时写，不给没装的用户造空目录。
-  if [ -d "$(dirname "$dir")" ]; then
+  #
+  # 「装过 Firefox 才写」这件事在 macOS 上不能拿 …/Mozilla 当证据：一台装了
+  # Firefox 的 Mac，用户数据全在 …/Firefox 里，…/Mozilla 那棵树可能从来没建过
+  # （本机实测就是这样 —— /Applications/Firefox.app 明明在，按老写法判断就是
+  # 「Firefox 永远收不到主机」，而表现只是「ZDM 没开着时扩展唤不醒它」，用户
+  # 根本联不到安装脚本这一层）。所以证据用三选一：配置目录 / 应用包 / 那棵树本身，
+  # 命中了再把 Mozilla/NativeMessagingHosts 建出来 —— 那是 Firefox 真正读的路径。
+  local FF_OK=""
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if [ -d "$AS/Firefox" ] || [ -d "$AS/Mozilla" ] || [ -d "/Applications/Firefox.app" ]; then
+      FF_OK=1
+    fi
+  else
+    if [ -d "$HOME/.mozilla" ] || [ -d "/usr/lib/firefox" ] || [ -d "/snap/firefox" ]; then
+      FF_OK=1
+    fi
+  fi
+  if [ -n "$FF_OK" ]; then
     mkdir -p "$dir"
     printf '%s\n' "$MANIFEST" > "$dir/com.zdm.launcher.json"
-    echo "==> 已为 Firefox 注册原生消息主机（扩展 ID $GECKO_ID）"
+    echo "==> 已为 Firefox 注册原生消息主机（扩展 ID $GECKO_ID）：$dir"
   fi
   echo "==> 已注册浏览器原生消息主机 com.zdm.launcher（扩展 ID $EXT_ID）"
 }

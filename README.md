@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.1**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.2**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.1_amd64.deb` | `sudo apt install ./zdm_1.18.1_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.2_amd64.deb` | `sudo apt install ./zdm_1.18.2_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.1.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.2.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.1
+bash zdm/build_linux_app.sh ./linux-build 1.18.2
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -415,13 +415,21 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
   `~/Library/Application Support/<浏览器>/NativeMessagingHosts`，Firefox 是
   `…/Mozilla/NativeMessagingHosts`），`install_mac()` 末尾补上调用，Chrome 在 macOS 上这才真的
   能静默唤醒 ZDM。
+  这里还藏着一个第二次才踩出来的坑：Firefox 那一半最初拿 `…/Mozilla` 是否存在当「装过 Firefox」
+  的证据，而一台装了 Firefox 的 Mac 完全可能只有 `…/Firefox`（用户数据在那儿，`…/Mozilla` 那棵
+  树从没建过）—— 本机就是这样，`/Applications/Firefox.app` 明摆着在，注册却被跳过。现在证据改三选一
+  （`…/Firefox`、应用包、`…/Mozilla` 任一命中），命中就 `mkdir -p` 出 Firefox 真正要读的那条路径。
 - 要说在前面的限制：未签名的 `.xpi` 在正式版 Firefox 只能**临时加载**，浏览器一重启就没了，
   而且临时加载会分配一次性扩展 ID，原生消息那条自动唤醒对不上 —— 表现是「ZDM 没开着时扩展
   唤醒不了它」。接管下载、嗅探、推送走 HTTP，与扩展 ID 无关，照常可用。要永久安装 + 自动唤醒，
   走签名包或 Dev Edition / Nightly / ESR（`xpinstall.signatures.required=false`）。
 - 最低 Firefox 115。移植的正确性由一套双命名空间模拟器验证（同一份 `background.js` 分别在
-  「Firefox 语义」和「Chrome 语义」下跑：顶层不报错、事件注册齐全、`state` 请求有回包、
-  通知按 `create(id, options)` 两参签名调用），实机端到端仍以临时加载为准。
+  「Firefox 语义」（`chrome.*` 只有回调）和「Chrome 语义」（`chrome.*` 就返回 Promise）下跑：
+  顶层不报错、十类事件监听器一个不缺（`runtime.onMessage/onInstalled/onStartup`、
+  `webRequest.onResponseStarted`、`tabs.onUpdated/onRemoved`、`downloads.onCreated`、
+  `contextMenus.onClicked`、`storage.onChanged`、`alarms.onAlarm`）、presence 心跳 alarm 建了、
+  `zdm-inject-sites` 这类异步消息在回调式语义下也把 `sendResponse` 调到了、英文界面下右键菜单与
+  通知拿到的是英文、通知按 `create(id, options)` 两参签名调用），实机端到端仍以临时加载为准。
 
 **界面只有中文，非中文用户只能连猜** —— v1.18.0 起**网页版和浏览器扩展都是中英双语**：
 
@@ -443,6 +451,13 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.2 = macOS 上 Firefox 的原生消息主机** —— 本机实测：`/Applications/Firefox.app` 明摆在，
+`install.sh` 却把 Firefox 那一半跳过了，因为「装过 Firefox 才写」的证据取的是
+`~/Library/Application Support/Mozilla` 是否存在 —— 而这棵树在装了 Firefox 的 Mac 上常常从没建过
+（用户数据全在 `…/Firefox` 里）。表现只是「ZDM 没开着时扩展唤不醒它」，联不到安装脚本这一层。
+证据改成三选一（`…/Firefox`、应用包、`…/Mozilla` 任一命中），命中就 `mkdir -p` 出 Firefox 真正读的
+`…/Mozilla/NativeMessagingHosts`。Linux 侧本来就是 `~/.mozilla` 判断，不受影响。
 
 **v1.18.1 = v1.18.0 的 Linux 包** —— v1.18.0 那次 CI 只有 mac 的 `.dmg` 和 Windows 的 `.exe` 出来了，
 `.deb` 与便携 `.tar.gz` 缺：`build_linux_app.sh` 里新加的「脚本内 Firefox 扩展 ID 必须和
