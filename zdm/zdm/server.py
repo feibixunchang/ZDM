@@ -607,6 +607,11 @@ class Handler(BaseHTTPRequestHandler):
                 and not (body.get("filename") or body.get("name"))
             ):
                 body["filename"] = video_page_filename(url)
+            section = _parse_section(body.get("section"))
+            if section and not (body.get("yt_page") or body.get("page_url")):
+                # 普通文件任务没有 yt-dlp 通道，选段只会下整包。静默忽略
+                # 比报错更伤人：用户以为限制生效，结果拉了个全片。
+                return self._error(400, "选段只适用于视频页面链接（YouTube/B站等）")
             directory = body.get("dir") or body.get("directory")
             if directory is not None:
                 if not isinstance(directory, str):
@@ -633,7 +638,7 @@ class Handler(BaseHTTPRequestHandler):
                     # YouTube：给了页面地址就走 yt-dlp 下载通道
                     yt_page=body.get("yt_page") or body.get("page_url"),
                     yt_height=body.get("yt_height") or body.get("height"),
-                    section=_parse_section(body.get("section")),
+                    section=section,
                     priority=int(body.get("priority") or 0),
                     start_at=_parse_start_at(body.get("start_at")),
                 )

@@ -958,6 +958,7 @@ class Download:
         simply re-run against the new address.
         """
         changed = bool(url) and str(url) != self.url
+        old_section = self.section
         if url:
             self.url = str(url)
             self.final_url = str(url)
@@ -967,6 +968,7 @@ class Download:
             self.proxy = proxy or None
         if section is not None:
             self.section = str(section or "")
+        section_changed = section is not None and self.section != old_section
         kept = False
         if changed:
             # 用户手动换的地址就是最终地址；旧的镜像原始链接不再适用，
@@ -976,6 +978,20 @@ class Download:
             if self.segmenter is not None and self.segmenter.downloaded() > 0:
                 self._retarget_pending = True
                 kept = True
+        if self.yt_page and (changed or section_changed):
+            # yt-dlp 任务的旧进度描述的是上一个视频/区间：不清零会让新任务
+            # 一开始就带着旧百分比（甚至超过 100%）。旧临时文件也一并清掉，
+            # 否则换区间后 zdm-<id> [旧区间].* 会永远留在下载目录里。
+            old_stem = "zdm-" + self.id
+            if old_section:
+                old_stem += f" [{_section_tag(old_section)}]"
+            self._yt_cleanup(old_stem)
+            self._yt_bytes = 0
+            self._yt_completed = 0
+            self._yt_speed = 0.0
+            self.size = 0
+            self.completed_at = None
+            self.started_at = None
         if self.segmenter is not None:
             # 立即落盘：下次 start 时 _prepare 读的就是这份 meta。里面同时
             # 带着新地址、新请求头和 retarget 标记。
@@ -1892,8 +1908,7 @@ class Download:
         # 也方便从文件名看出是哪一段。Windows 不允许 ':' 进文件名。
         out_stem = stem
         if self.section:
-            tag = self.section.lstrip("*").replace(":", ".").replace("/", "_")
-            out_stem = f"{stem} [{tag}]"
+            out_stem = f"{stem} [{_section_tag(self.section)}]"
         cookie = (self.headers or {}).get("Cookie") or ""
         cookie_path = None
         if cookie:
@@ -2036,8 +2051,7 @@ class Download:
         if self.section:
             # 同一视频下多段时，成品名要能区分，而不是靠系统的「(1)」。
             base, ext = os.path.splitext(want)
-            tag = self.section.lstrip("*").replace(":", ".").replace("/", "_")
-            want = f"{base} [{tag}]{ext}"
+            want = f"{base} [{_section_tag(self.section)}]{ext}"
         final = _unique_name(self.directory, want)
         target = os.path.join(self.directory, final)
         moved = None
@@ -2700,6 +2714,13 @@ def _log_download_error(d) -> None:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 - 诊断日志失败不影响下载
         pass
+
+
+def _section_tag(section: str) -> str:
+    """Filename-safe label for a yt-dlp section range."""
+    tag = str(section or "").lstrip("*").replace(":", ".")
+    tag = _re.sub(r'[\\/:*?"<>|\s]+', "_", tag).strip("._")
+    return (tag or "clip")[:40]
 
 
 def _with_ext(filename: str, path_with_ext: str) -> str:

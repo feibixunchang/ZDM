@@ -13,6 +13,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from .core import Chunk, Download, RateLimiter, Segmenter
+from .videopage import is_video_page
 
 APP_NAME = "zdm"
 DEFAULT_PORT = 9000
@@ -286,6 +287,10 @@ class Manager:
             url = str(url).strip()
             if url and not url.startswith(("http://", "https://")):
                 raise ValueError("只支持 http/https 链接")
+        if section and not (d.yt_page or (url and is_video_page(url))):
+            # 普通文件任务没有 yt-dlp 通道，选了段也只会下整包。与其让用户
+            # 以为限制生效，不如直接说清楚。
+            raise ValueError("选段只适用于视频页面链接（YouTube/B站等）")
         was_active = d.status in ("downloading", "queued")
         was_error = d.status == "error"
         if was_active and not self.pause(task_id):
@@ -294,9 +299,26 @@ class Manager:
         if url:
             res = d.retarget(url=url, headers=headers, proxy=proxy, section=section)
             kept = bool(res.get("kept"))
-            if d.yt_page:
+            if d.yt_page or is_video_page(url):
                 # yt-dlp 通道认的是页面地址；任务列表里那一条 URL 也得跟着换，
-                # 否则用户看到的新链接和实际下载的页面是两回事。
+                # 否则用户看到的新链接和实际下载的页面是两回事。普通文件
+                # 改成视频页链接时，这里顺带把任务切到 yt-dlp 通道。
+                if not d.yt_page:
+                    # 旧分块半成品属于被换掉的那个文件，yt-dlp 不会接着写：
+                    # 留着既占空间，进度条也会从旧文件的百分比开始。
+                    d._retarget_pending = False
+                    d.segmenter = None
+                    for p in (d.part_path, d.meta_path):
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                    d.size = 0
+                    d.completed_at = None
+                    d.started_at = None
+                    d.meter.reset()
+                    if not d.audio_only:
+                        d.kind = "video"
                 d.yt_page = url
         elif headers is not None or proxy is not None or section is not None:
             d.retarget(headers=headers, proxy=proxy, section=section)
@@ -347,6 +369,27 @@ class Manager:
         d.meter.reset()
         d.retries = 0
         d.error = None
+        d._retarget_pending = False
+        d._mirror_fallback_used = False
+        if d.yt_page:
+            # 上一轮 yt-dlp 的已完成字节/总大小还是旧视频的；不清零，
+            # 重下会从旧百分比开始，甚至一直显示 100%。
+            d._yt_bytes = 0
+            d._yt_completed = 0
+            d._yt_speed = 0.0
+            d.size = 0
+            d.completed_at = None
+            d.started_at = None
+        if self.config.get("mirror_accel") and d.original_url:
+            # 上次镜像失败已退回原地址；「重新下载」应该再给镜像一次机会。
+            try:
+                from .mirror import accelerate
+
+                mirrored = accelerate(d.original_url)
+            except Exception:  # noqa: BLE001
+                mirrored = ""
+            if mirrored:
+                d.url = d.final_url = mirrored
         d.status = "queued"
         self._emit("restarted", d)
         return True
