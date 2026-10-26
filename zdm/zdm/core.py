@@ -1415,7 +1415,13 @@ class Download:
                 cmd += ["-headers", hdr_blob]
             if self.proxy:
                 cmd += ["-http_proxy", self.proxy]
-            cmd += ["-i", url, "-c", "copy"]
+            cmd += ["-i", url]
+            # 音频清单如果碰巧也带视频轨（站点把音视频放同一份 playlist，
+            # 或用户对视频流选了「只要音频」），-c copy 会把画面一起塞进
+            # .m4a —— 容器和内容不符，体积也翻几十倍。
+            if self.audio_only:
+                cmd += ["-vn"]
+            cmd += ["-c", "copy"]
             # 直接产出 mp4/m4a 的那一路（单播放列表路径）保留 faststart；
             # 中间暂存是 mkv，不需要。
             if dst.lower().endswith((".mp4", ".m4a")):
@@ -1760,7 +1766,7 @@ class Download:
         }
 
         common = dict(
-            fmt=yt_resolve.format_selector(self.yt_height),
+            fmt=yt_resolve.format_selector(self.yt_height, self.audio_only),
             outtmpl=os.path.join(self.directory, stem + ".%(ext)s"),
             ffmpeg=_find_ffmpeg(),
             cookie_path=cookie_path,
@@ -1798,8 +1804,13 @@ class Download:
                     time.sleep(delay)
                     if self._stop.is_set():
                         break
+                extras = list(extra_args or [])
+                if self.audio_only:
+                    # 选择器已限定音频；-x 再兜一层：站点只剩合轨格式时
+                    # 也能从里面抽出音频，而不是交出带画面的「m4a」。
+                    extras += ["-x", "--audio-format", "m4a"]
                 rc, err = ytdlp_bin.download(
-                    binp, self.yt_page, extra=list(extra_args) if extra_args else None,
+                    binp, self.yt_page, extra=extras or None,
                     **common,
                 )
                 if rc == 0 and not err:

@@ -601,13 +601,18 @@ def _clean_err(msg: str) -> str:
     return msg[:400]
 
 
-def format_selector(height: int) -> str:
+def format_selector(height: int, audio_only: bool = False) -> str:
     """下载时给 yt-dlp 的 -f 表达式。
 
     优先级：H.264 + m4a（合出来的 .mp4 任何播放器都能放）→ 其它 mp4 编码
     （AV1 在 QuickTime/部分播放器里打不开）→ 任意编码 + 最佳音频
     （1440p/2160p 只有 VP9/AV1，没得挑）→ 该高度以下的合轨。
+
+    audio_only 时只要音频轨：用户在播放器面板里选的就是音频（或纯音频
+    清单），再下一条视频轨既浪费流量，又会让 .m4a 里躺着 H.264。
     """
+    if audio_only:
+        return "ba[ext=m4a]/ba/b"
     h = int(height or 0)
     if h <= 0:
         return "bv*[vcodec^=avc1]+ba[ext=m4a]/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"

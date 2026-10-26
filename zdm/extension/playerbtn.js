@@ -485,9 +485,10 @@
         cookie: document.cookie || undefined,
         source: "playerbtn",
         kind: isAudioPick ? "audio" : isStreamPick ? pick.kind : "video",
-        // 纯音频 HLS/DASH：后端据此用 m4a 收尾
-        audio: audioStream || undefined,
-        audio_only: audioStream || undefined,
+        // 纯音频选择（音频轨或纯音频 HLS/DASH）：YouTube 会走 yt-dlp
+        // 通道，必须把意图一起带过去，否则 -f 仍按视频选，下出整条视频。
+        audio: audioOnly || undefined,
+        audio_only: audioOnly || undefined,
         // DASH 站点：yt-dlp 已经把配套音轨配好了，不带就下成无声
         audio_url: isAudioPick ? undefined : pick.audio_url || undefined,
         // YouTube：带 page_url 让后端走 yt-dlp 通道（理由见 ytPageUrl）。
