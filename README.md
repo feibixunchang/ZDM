@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.17.0**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.17.1**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.17.0_amd64.deb` | `sudo apt install ./zdm_1.17.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.17.1_amd64.deb` | `sudo apt install ./zdm_1.17.1_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.17.0.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.17.1.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.17.0
+bash zdm/build_linux_app.sh ./linux-build 1.17.1
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -246,6 +246,13 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 
 边界仍在：DRM / AES 密钥需要外部解密的流、以及需要选音轨/字幕的多轨道封装，这一版
 还是「整条最佳画质下下来再合流」，和 ffmpeg 通道等价 —— 轨道选择是下一步。
+
+**Windows 安装包在 v1.17.0 那次没能构建出来** —— v1.17.1 修的是构建脚本自己：
+`fetch_bin.py` 的进度文案是中文，而 Windows 控制台默认是代码页（CI 上 cp1252），
+`print` 抛 `UnicodeEncodeError` 让**已经下载成功**的那一步非 0 退出，整个 Windows 作业
+红在「下载 deno 失败」这种看着完全无关的行上。现在这两个构建期脚本把输出流统一改成
+UTF-8（`errors="replace"`），`--selfcheck` 的 JSON 打印同理。功能代码没变 ——
+v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。

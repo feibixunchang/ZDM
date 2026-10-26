@@ -38,6 +38,16 @@ import tempfile
 import urllib.request
 import zipfile
 
+# Windows 控制台默认是代码页（CI 上是 cp1252），本脚本的进度文案是中文：
+# 打印时 UnicodeEncodeError 会让「已经下载好」的那一步崩掉，构建随之失败。
+# 输出流改成 UTF-8 且对编码不了的字符用 replace —— 少一行漂亮的中文，
+# 也远比整条 Windows 流水线红掉好。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - 老 Python / 被重定向成非文本流
+        pass
+
 DENO_VERSION = "2.9.8"
 RE_VERSION = "0.6.0-beta"
 # 上游把构建日期写在资产名里；换版本时这一串要一起对上新 release 的资产名。

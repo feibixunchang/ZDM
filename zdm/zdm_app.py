@@ -136,6 +136,13 @@ def _selfcheck() -> int:
                 json.dump(report, fh, ensure_ascii=False, indent=2)
         except OSError:
             pass
+    try:
+        # 和 fetch_bin.py 同一件事：Windows 控制台是代码页（CI 上 cp1252），
+        # 报告里出现中文路径时 print 会抛 UnicodeEncodeError，把「自检其实通过」
+        # 变成非 0 退出、整条 Windows 流水线红掉。
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - console=False 的 exe 没有真 stdout
+        pass
     print(json.dumps(report, ensure_ascii=False, indent=2))
     ok = bool(
         report["web_index"]
