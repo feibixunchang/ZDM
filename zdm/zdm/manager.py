@@ -8,6 +8,7 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -89,6 +90,10 @@ def load_config(state_file: Optional[str] = None) -> Dict[str, object]:
 class Manager:
     def __init__(self, state_file: Optional[str] = None):
         self._lock = threading.RLock()
+        # 串行化 state.json 的快照与落盘：并发的 save_state 以前共用同一个
+        # state.json.tmp，两次 dump 交错会写出坏 JSON；后写的旧快照还可能
+        # 覆盖新快照。
+        self._state_lock = threading.Lock()
         self._listeners: List[queue.Queue] = []
         self._workers: Dict[str, threading.Thread] = {}
         self.downloads: Dict[str, Download] = {}
@@ -207,6 +212,10 @@ class Manager:
         d = self.get(task_id)
         if not d:
             return False
+        # 只有这两态能暂停；merging / completed 上「暂停」只会发出一条
+        # 假的 paused 事件，界面显示暂停、任务却继续跑完。
+        if d.status not in ("downloading", "queued"):
+            return False
         d.pause()
         self._wait_idle(d)
         self._emit("paused", d)
@@ -215,6 +224,8 @@ class Manager:
     def resume(self, task_id: str) -> bool:
         d = self.get(task_id)
         if not d:
+            return False
+        if d.status not in ("paused", "error", "canceled"):
             return False
         self._wait_idle(d)
         d.resume()
@@ -349,28 +360,46 @@ class Manager:
         return self.config
 
     def save_state(self) -> None:
-        with self._lock:
-            tasks = []
-            limit = int(self.config.get("history_limit") or 200)
-            finished = [d for d in self.downloads.values() if d.status == "completed"]
-            finished.sort(key=lambda x: x.completed_at or 0, reverse=True)
-            keep = {d.id for d in finished[:limit]}
-            for d in self.downloads.values():
-                if d.status == "completed" and d.id not in keep:
-                    continue
-                meta = d.to_dict()
-                meta.pop("chunks", None)
-                meta["chunks"] = d.segmenter.snapshot() if d.segmenter else []
-                tasks.append(meta)
-            data = {"config": self.config, "tasks": tasks}
-        tmp = self.state_file + ".tmp"
-        try:
-            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-            os.replace(tmp, self.state_file)
-        except Exception:
-            pass
+        with self._state_lock:
+            with self._lock:
+                tasks = []
+                limit = int(self.config.get("history_limit") or 200)
+                finished = [
+                    d for d in self.downloads.values() if d.status == "completed"
+                ]
+                finished.sort(key=lambda x: x.completed_at or 0, reverse=True)
+                keep = {d.id for d in finished[:limit]}
+                for d in self.downloads.values():
+                    if d.status == "completed" and d.id not in keep:
+                        continue
+                    meta = d.to_dict()
+                    meta.pop("chunks", None)
+                    meta["chunks"] = (
+                        d.segmenter.snapshot() if d.segmenter else []
+                    )
+                    tasks.append(meta)
+                data = {"config": self.config, "tasks": tasks}
+            tmp = None
+            try:
+                parent = os.path.dirname(self.state_file) or "."
+                os.makedirs(parent, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(
+                    prefix=".state-", suffix=".tmp", dir=parent
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.state_file)
+                tmp = None
+            except Exception:
+                pass
+            finally:
+                if tmp:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
     def load_state(self) -> None:
         if not os.path.exists(self.state_file):
@@ -382,54 +411,89 @@ class Manager:
             return
         cfg = data.get("config") or {}
         for k, v in cfg.items():
-            if k in DEFAULT_CONFIG:
-                self.config[k] = v
-        for t in data.get("tasks", []):
-            if t.get("status") == "completed":
-                d = Download(
-                    id=t["id"], url=t["url"],
-                    directory=t.get("directory") or str(self.config["download_dir"]),
-                    filename=t.get("filename"), connections=int(t.get("connections") or 1),
-                    source=t.get("source") or "manual",
-                    kind=t.get("kind") or "",
-                )
-                d.size = int(t.get("size") or 0)
-                d.status = "completed"
-                d.completed_at = t.get("completed_at") or time.time()
-                d.created_at = t.get("created_at", time.time())
-                d.global_limiter = self.global_limiter
-                if d.size:
-                    d.segmenter = Segmenter(d.size, [Chunk(0, d.size, d.size)])
-                self.downloads[d.id] = d
+            if k not in DEFAULT_CONFIG or v is None:
                 continue
+            try:
+                if k in (
+                    "connections",
+                    "max_active",
+                    "max_retries",
+                    "speed_limit",
+                    "port",
+                    "history_limit",
+                ):
+                    v = int(v)
+                elif k == "timeout":
+                    v = float(v)
+                elif k == "auto_resume":
+                    v = bool(v)
+            except (TypeError, ValueError):
+                continue
+            self.config[k] = v
+        # 限速器在 __init__ 里按默认值 0 建好；不在这里同步，重启后
+        # config 里存的限速就完全失效（用户看到「限速 1 MB/s」却满速跑）。
+        self.global_limiter.set_rate(
+            int(self.config.get("speed_limit") or 0)
+        )
+        tasks = data.get("tasks")
+        if not isinstance(tasks, list):
+            return
+        for t in tasks:
+            # 单条记录损坏不能拖垮整个历史：以前一条坏数据就 return/抛异常，
+            # 后面所有任务都静默消失。
+            try:
+                self._load_task(t)
+            except Exception:
+                continue
+
+    def _load_task(self, t) -> None:
+        if not isinstance(t, dict) or not t.get("id") or not t.get("url"):
+            return
+        if t.get("status") == "completed":
             d = Download(
-                id=t["id"],
-                url=t["url"],
+                id=t["id"], url=t["url"],
                 directory=t.get("directory") or str(self.config["download_dir"]),
-                filename=t.get("filename"),
-                connections=int(t.get("connections") or self.config["connections"]),
-                headers=t.get("headers") or {},
-                proxy=t.get("proxy"),
-                max_retries=int(self.config["max_retries"]),  # type: ignore[arg-type]
-                timeout=float(self.config["timeout"]),  # type: ignore[arg-type]
-                speed_limit=int(t.get("speed_limit") or 0),
+                filename=t.get("filename"), connections=int(t.get("connections") or 1),
                 source=t.get("source") or "manual",
                 kind=t.get("kind") or "",
-                audio_url=t.get("audio_url") or "",
             )
-            d.set_event_callback(self._on_task_event)
-            d.global_limiter = self.global_limiter
             d.size = int(t.get("size") or 0)
+            d.status = "completed"
+            d.completed_at = t.get("completed_at") or time.time()
             d.created_at = t.get("created_at", time.time())
-            d.load_meta(t)
-            prev = t.get("status")
-            if prev == "downloading":
-                d.status = "queued" if self.config["auto_resume"] else "paused"
-            elif prev in ("queued", "paused", "error"):
-                d.status = "queued" if self.config["auto_resume"] else "paused"
-            else:
-                continue
+            d.global_limiter = self.global_limiter
+            if d.size:
+                d.segmenter = Segmenter(d.size, [Chunk(0, d.size, d.size)])
             self.downloads[d.id] = d
+            return
+        d = Download(
+            id=t["id"],
+            url=t["url"],
+            directory=t.get("directory") or str(self.config["download_dir"]),
+            filename=t.get("filename"),
+            connections=int(t.get("connections") or self.config["connections"]),
+            headers=t.get("headers") or {},
+            proxy=t.get("proxy"),
+            max_retries=int(self.config["max_retries"]),  # type: ignore[arg-type]
+            timeout=float(self.config["timeout"]),  # type: ignore[arg-type]
+            speed_limit=int(t.get("speed_limit") or 0),
+            source=t.get("source") or "manual",
+            kind=t.get("kind") or "",
+            audio_url=t.get("audio_url") or "",
+        )
+        d.set_event_callback(self._on_task_event)
+        d.global_limiter = self.global_limiter
+        d.size = int(t.get("size") or 0)
+        d.created_at = t.get("created_at", time.time())
+        d.load_meta(t)
+        prev = t.get("status")
+        if prev == "downloading":
+            d.status = "queued" if self.config["auto_resume"] else "paused"
+        elif prev in ("queued", "paused", "error"):
+            d.status = "queued" if self.config["auto_resume"] else "paused"
+        else:
+            return
+        self.downloads[d.id] = d
 
     def shutdown(self) -> None:
         self._stop.set()

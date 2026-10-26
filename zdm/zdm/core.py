@@ -693,7 +693,10 @@ class Download:
         self._tls = threading.local()
 
         self._stop = threading.Event()
-        self._pause = threading.Event()
+        # 用户按下暂停的意图。和 _stop 分开：_stop 是「让工作线程现在退出」，
+        # 它会被 start() 清掉；暂停意图必须活到 resume()，否则排队中的任务
+        # 被暂停后仍会被调度器拉起（_stop 在 start() 里被清空）。
+        self._pause_requested = threading.Event()
         # 看门狗正在把任务切去 yt-dlp 通道（见 _upgrade_to_ytdlp）。
         # 置位期间 start() 的主循环必须安静退出，否则会和看门狗抢任务。
         self._yt_switching = threading.Event()
@@ -931,18 +934,33 @@ class Download:
             if not self.filename or self.filename == "download":
                 self.filename = filename_from_headers(info["headers"], self.final_url)
             self.filename = _unique_name(self.directory, self.filename)  # never clobber
-            self.segmenter = Segmenter(total)
+            # 只有支持 Range 才用分块器。单流任务用它的话，工作线程从不更新
+            # 分块位置，downloaded 永远是 0 —— 进度条就会一直卡在 0%。
+            self.segmenter = Segmenter(total) if (total and self.supports_range) else None
 
         elif self.size and not os.path.exists(self.part_path):
             # metadata survived but the partial file is gone
-            self.segmenter = Segmenter(self.size)
+            self.segmenter = Segmenter(self.size) if self.supports_range else None
 
-        if self.size and self.supports_range:
+        if not self.supports_range:
+            # 旧 meta 里的 chunks 对单流没有意义（必须从头重下），留着还会
+            # 让恢复时误以为已完成。
+            self.segmenter = None
+            try:
+                os.remove(self.meta_path)
+            except OSError:
+                pass
+
+        if self.size and self.supports_range and self.segmenter is None:
+            # meta 里只剩 size（chunks 丢失/为空）时的保底
+            self.segmenter = Segmenter(self.size)
+        if self.size and self.supports_range and self.segmenter:
             self.segmenter.balance(self.connections)
 
         fd = os.open(self.part_path, os.O_RDWR | os.O_CREAT | O_BINARY, 0o644)
         self._fd = fd
-        if self.size:
+        # 单流会以 "wb" 重新打开 .part，这里预分配只会白写一遍磁盘。
+        if self.size and self.supports_range:
             try:
                 os.posix_fallocate(fd, 0, self.size)
             except (AttributeError, OSError):
@@ -961,6 +979,12 @@ class Download:
 
     def start(self) -> None:
         """Run the download to completion in the calling thread."""
+        # 调度器可能刚把 status 改成 downloading 就撞上用户暂停：暂停意图
+        # 还在，就不要再清 _stop 开跑，否则「暂停排队任务」会变成空操作。
+        if self._pause_requested.is_set():
+            self.status = "paused"
+            self._emit("paused")
+            return
         if self.yt_page:
             self._start_ytdlp()
             return
@@ -979,11 +1003,23 @@ class Download:
             self._emit("error")
             return
 
+        # probe / 读 meta 可能要几秒，暂停可能在这期间落到队列上。
+        if self._pause_requested.is_set():
+            self._close_fd()
+            self.status = "paused"
+            self._emit("paused")
+            return
+
         self.status = "downloading"
         if self.started_at is None:
             self.started_at = time.time()
         self._stop.clear()
-        self._pause.clear()
+        # 与 pause() 的交错窗口：清完 _stop 再看一眼暂停意图。
+        if self._pause_requested.is_set():
+            self._close_fd()
+            self.status = "paused"
+            self._emit("paused")
+            return
         self.meter.reset()
         self._emit("started")
 
@@ -1113,9 +1149,14 @@ class Download:
             self._prepare()
         except Exception:
             return False
+        # 兜底切换发生在 yt-dlp 失败之后，这期间用户可能已经按了暂停。
+        if self._pause_requested.is_set():
+            self._close_fd()
+            self.status = "paused"
+            self._emit("paused")
+            return True
         self.status = "downloading"
         self._stop.clear()
-        self._pause.clear()
         self.meter.reset()
         self._emit("started")
         if self.size and self.supports_range:
@@ -1235,7 +1276,10 @@ class Download:
             self.retries = 0
             self.meter.reset()
             self._stop.clear()
-            self._pause.clear()
+            if self._pause_requested.is_set():
+                self.status = "paused"
+                self._emit("paused")
+                return True
             self.status = "downloading"
             self.error = None
             self.mux_error = None
@@ -1246,22 +1290,28 @@ class Download:
         return True
 
     def _start_ytdlp(self) -> None:
+        self._stop.clear()
+        if self._pause_requested.is_set():
+            self.status = "paused"
+            self._emit("paused")
+            return
         self.status = "downloading"
         if self.started_at is None:
             self.started_at = time.time()
-        self._stop.clear()
-        self._pause.clear()
         self._emit("started")
         self._run_ytdlp()
 
     # ---------- HLS / DASH（流媒体播放列表）----------
 
     def _start_stream(self) -> None:
+        self._stop.clear()
+        if self._pause_requested.is_set():
+            self.status = "paused"
+            self._emit("paused")
+            return
         self.status = "downloading"
         if self.started_at is None:
             self.started_at = time.time()
-        self._stop.clear()
-        self._pause.clear()
         self._stream_bytes = 0
         self._stream_time = 0.0
         self._stream_duration = 0.0
@@ -1318,6 +1368,9 @@ class Download:
 
         def pull(url: str, dst: str, lo: float, hi: float, errs: list) -> int:
             """跑一段 ffmpeg 拉流，进度线性映射到 [lo, hi]。返回退出码。"""
+            # 暂停可能正好落在两段之间：别再启动下一段 ffmpeg。
+            if self._stop.is_set():
+                return -1
             cmd = [
                 ffmpeg, "-hide_banner", "-nostdin", "-y",
                 # info 级别才会打印 "Duration: 00:10:00.00" —— 那是流媒体唯一的
@@ -1428,6 +1481,13 @@ class Download:
                 return
             # 阶段二：音频轨（85-95%）。失败不致命 —— 退回无声视频。
             a_rc = pull(audio_url, a_tmp, 85.0, 95.0, errs)
+            if self._stop.is_set():
+                # 以前这里不检查：音频阶段一暂停，流程会继续「合流」并用
+                # 视频轨收尾，把暂停直接变成「已完成」。
+                self._cleanup_stream_tmp(tmpdir)
+                self.status = "paused" if self.status != "canceled" else "canceled"
+                self._emit(self.status)
+                return
             has_audio = a_rc == 0 and os.path.exists(a_tmp)
             if not has_audio:
                 errs.append("音频轨拉取失败（退出码 %s），退回无声视频" % a_rc)
@@ -1451,7 +1511,15 @@ class Download:
                         stdin=subprocess.DEVNULL,
                         **_no_window(),
                     )
-                    _, merr = mproc.communicate(timeout=600)
+                    self._stream_proc = mproc  # 暂停/取消时能立刻杀掉合流进程
+                    try:
+                        _, merr = mproc.communicate(timeout=600)
+                    except subprocess.TimeoutExpired:
+                        mproc.kill()
+                        _, merr = mproc.communicate()
+                        errs.append("合流超时（600 秒）")
+                    finally:
+                        self._stream_proc = None
                     final_ok = mproc.returncode == 0 and os.path.exists(out)
                     if not final_ok and merr:
                         errs.append(
@@ -1459,8 +1527,53 @@ class Download:
                         )
                 except Exception as e:  # noqa: BLE001
                     errs.append("合流失败：%s" % e)
+            if self._stop.is_set():
+                self._cleanup_stream_tmp(tmpdir)
+                try:
+                    if os.path.exists(out):
+                        os.remove(out)
+                except OSError:
+                    pass
+                self.status = "paused" if self.status != "canceled" else "canceled"
+                self._emit(self.status)
+                return
             if not final_ok:
-                # 合流不成 → 无声但能播，总比全丢好
+                # 合流不成 → 无声但能播，总比全丢好。视频轨暂存是 mkv，
+                # 直接改后缀成 mp4 大多数播放器都打不开，先重封装一次。
+                remux_cmd = [
+                    ffmpeg, "-hide_banner", "-nostdin", "-y",
+                    "-loglevel", "error", "-i", v_tmp,
+                    "-c", "copy", "-movflags", "+faststart", out,
+                ]
+                try:
+                    rproc = subprocess.Popen(
+                        remux_cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        **_no_window(),
+                    )
+                    self._stream_proc = rproc
+                    try:
+                        _, rerr = rproc.communicate(timeout=600)
+                    finally:
+                        self._stream_proc = None
+                    final_ok = rproc.returncode == 0 and os.path.exists(out)
+                    if not final_ok and rerr:
+                        errs.append(rerr.decode("utf-8", "ignore").strip()[-300:])
+                except Exception as e:  # noqa: BLE001
+                    errs.append("重封装失败：%s" % e)
+                if self._stop.is_set():
+                    try:
+                        if os.path.exists(out):
+                            os.remove(out)
+                    except OSError:
+                        pass
+                    self._cleanup_stream_tmp(tmpdir)
+                    self.status = "paused" if self.status != "canceled" else "canceled"
+                    self._emit(self.status)
+                    return
+            if not final_ok:
                 try:
                     os.replace(v_tmp, out)
                 except OSError as e:
@@ -1485,6 +1598,12 @@ class Download:
                 self._emit(self.status)
                 return
             if rc != 0 or not os.path.exists(out):
+                # ffmpeg -y 失败时可能留下半截 mp4；别把它当成品摆在那。
+                try:
+                    if os.path.exists(out):
+                        os.remove(out)
+                except OSError:
+                    pass
                 msg = "；".join(errs[-6:]) if errs else ""
                 self.status = "error"
                 self.error = (
@@ -1848,7 +1967,13 @@ class Download:
         return chunk.pos >= chunk.end
 
     def _worker_single(self) -> None:
-        """Stream download for servers without Range support / unknown size."""
+        """Stream download for servers without Range support / unknown size.
+
+        不支持 Range 就没法断点续传：每次开始都必须从头写，所以这里用
+        "wb" 截断旧的 .part 是正确的。暂停时**不能**把 size 改成已下字节数
+        或伪造一个「已完成」的 Segmenter —— 那会让恢复时把旧进度当成总长，
+        下载完整文件后反而报 "incomplete body"，进度也会显示成 100% 假死。
+        """
         url = self.final_url or self.url
         offset = 0
         expected = self.size
@@ -1858,8 +1983,6 @@ class Download:
                     url, 0, None, self._http_headers(), self.timeout, self.proxy
                 ):
                     if self._stop.is_set():
-                        self.size = offset
-                        self.segmenter = Segmenter(0, [Chunk(0, offset, offset)])
                         return
                     if self.global_limiter:
                         self.global_limiter.consume(len(buf))
@@ -2097,35 +2220,54 @@ class Download:
         tmpdir = tempfile.mkdtemp(prefix="zdmmux")
         audio_path = os.path.join(tmpdir, "audio.bin")
         out_path = video + ".merged.mp4"
+        audio_is_pl = bool(_PLAYLIST_URL_RE.search(self.audio_url))
         try:
-            # 1) 音轨下载。Honour the task proxy (googlevideo 需要) but never
-            #    the sandbox's own proxy settings.
-            proxy = self.proxy
-            if proxy:
-                handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+            audio_input: list = []
+            if audio_is_pl:
+                # 音频轨本身是 m3u8/mpd：下载到的是播放列表文本，交给
+                # ffmpeg 只会报「Invalid data」。让 ffmpeg 直接跟着列表拉。
+                hdr_blob = "".join(
+                    "%s: %s\r\n" % (k, v) for k, v in headers.items()
+                )
+                if hdr_blob:
+                    audio_input += ["-headers", hdr_blob]
+                if self.proxy:
+                    audio_input += ["-http_proxy", self.proxy]
+                audio_input += ["-i", self.audio_url]
             else:
-                handler = urllib.request.ProxyHandler({})
-            try:
-                req = urllib.request.Request(self.audio_url, headers=headers)
-                opener = urllib.request.build_opener(handler)
-                with opener.open(req, timeout=self.timeout) as resp, open(audio_path, "wb") as fh:
-                    shutil.copyfileobj(resp, fh)
-            except Exception as e:
-                self.mux_error = f"音轨下载失败：{e}"
-                return False
-            try:
-                if not os.path.getsize(audio_path):
-                    self.mux_error = "音轨下载到 0 字节（直链可能已过期）"
+                # 1) 音轨下载。Honour the task proxy (googlevideo 需要) but
+                #    never the sandbox's own proxy settings.
+                proxy = self.proxy
+                if proxy:
+                    handler = urllib.request.ProxyHandler(
+                        {"http": proxy, "https": proxy}
+                    )
+                else:
+                    handler = urllib.request.ProxyHandler({})
+                try:
+                    req = urllib.request.Request(self.audio_url, headers=headers)
+                    opener = urllib.request.build_opener(handler)
+                    with opener.open(req, timeout=self.timeout) as resp, open(
+                        audio_path, "wb"
+                    ) as fh:
+                        shutil.copyfileobj(resp, fh)
+                except Exception as e:
+                    self.mux_error = f"音轨下载失败：{e}"
                     return False
-            except OSError:
-                self.mux_error = "音轨文件写入失败"
-                return False
+                try:
+                    if not os.path.getsize(audio_path):
+                        self.mux_error = "音轨下载到 0 字节（直链可能已过期）"
+                        return False
+                except OSError:
+                    self.mux_error = "音轨文件写入失败"
+                    return False
+                audio_input = ["-i", audio_path]
 
             # 2) 合并
             cmd = [
                 ffmpeg, "-y", "-loglevel", "error",
                 "-i", video,
-                "-i", audio_path,
+                *audio_input,
                 "-c", "copy", "-map", "0:v:0", "-map", "1:a:0",
                 out_path,
             ]
@@ -2165,6 +2307,13 @@ class Download:
             return True
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+            # ffmpeg 失败/复查失败时 out_path 会留下来，变成视频旁边一个
+            # 用户看不懂的 xxx.mp4.merged.mp4；成功时 os.replace 已经搬走。
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except OSError:
+                pass
 
     def _close_tls(self) -> None:
         """Close the per-thread handle used on platforms without os.pwrite."""
@@ -2200,19 +2349,25 @@ class Download:
 
     def pause(self) -> None:
         if self.status in ("downloading", "queued"):
+            # 先记意图再停线程：调度器可能正在把 queued 改成 downloading，
+            # 单靠 _stop 会被 start() 清掉。
+            self._pause_requested.set()
             self._stop.set()
             self._kill_yt_proc()
-            if self.status == "downloading":
-                self.status = "paused"
+            # 流媒体任务是 ffmpeg 子进程在写文件，不杀掉它暂停要等整条流下完。
+            self._kill_stream_proc()
+            self.status = "paused"
             self._join_workers()
 
     def resume(self) -> None:
         if self.status in ("paused", "error", "canceled"):
             self._join_workers()
+            self._pause_requested.clear()
             self.error = None
             self.status = "queued"
 
     def cancel(self, remove_files: bool = True) -> None:
+        self._pause_requested.clear()
         self._stop.set()
         self._kill_yt_proc()
         self._kill_stream_proc()
