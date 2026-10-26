@@ -101,6 +101,7 @@ jobs:
           $exe = Join-Path $app 'ZDM.exe'
           if (-not (Test-Path $exe)) { throw "installed exe missing: $exe" }
           foreach ($need in @('ZDM-NativeHost.exe', '_internal\bin\yt-dlp.exe', '_internal\bin\ffmpeg.exe',
+                              '_internal\bin\N_m3u8DL-RE.exe',
                               '_internal\extension\manifest.json', 'extension\manifest.json',
                               'com.zdm.launcher.json')) {
             if (-not (Test-Path (Join-Path $app $need))) { throw "missing in install dir: $need" }
@@ -132,6 +133,13 @@ jobs:
 
           $ver = (Invoke-WebRequest 'http://127.0.0.1:9000/api' -TimeoutSec 4 -UseBasicParsing).Content
           Write-Host "api: $ver"
+          # 装完的这一版要真的带上新配置项：三端读的是同一份 state.json，
+          # 老包升级后没有 stream_engine 的话，设置里那一项会静默落空。
+          $state = (Invoke-WebRequest 'http://127.0.0.1:9000/api/state' -TimeoutSec 4 -UseBasicParsing).Content | ConvertFrom-Json
+          if (-not ($state.config.PSObject.Properties.Name -contains 'stream_engine')) {
+            throw "安装后的 /api/state 里没有 stream_engine 配置项"
+          }
+          Write-Host "stream_engine: $($state.config.stream_engine)"
           Get-Process ZDM -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host "self-check passed"
 

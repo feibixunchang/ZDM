@@ -288,6 +288,16 @@ jobs:
           chmod +x zdm/bin/ffmpeg
           zdm/bin/ffmpeg -version | head -1
 
+      # HLS/DASH 流媒体引擎（N_m3u8DL-RE）。版本、URL、sha256 全钉在
+      # zdm/fetch_bin.py 里 —— CI 不再抄一遍版本号，避免两边各升各的。
+      - name: Fetch bundled stream engine N_m3u8DL-RE (macOS)
+        run: |
+          set -euo pipefail
+          mkdir -p zdm/bin
+          python3 zdm/fetch_bin.py --dest zdm/bin --os darwin --tool re
+          test -x zdm/bin/N_m3u8DL-RE || { echo "ERROR: N_m3u8DL-RE 没落地"; exit 1; }
+          zdm/bin/N_m3u8DL-RE --version
+
       - name: Build ZDM.app and .dmg (with launch smoke test)
         run: |
           bash zdm/build_macos_app.sh "$RUNNER_TEMP/zdm-macos" "${{ steps.ver.outputs.version }}"
@@ -303,6 +313,15 @@ jobs:
           # 随包的 yt-dlp 二进制：漏了就只剩「源码能用、装完不能用」
           test -x "$RES/bin/yt-dlp" || { echo "ERROR: 随包 yt-dlp 缺失或不可执行"; exit 1; }
           "$RES/bin/yt-dlp" --version
+          # 流媒体引擎：漏了 m3u8/mpd 会静默退回 ffmpeg（任务上有理由，但功能
+          # 就是没了）。Apple Silicon 只执行有签名的 Mach-O，所以顺手验签名。
+          test -x "$RES/bin/N_m3u8DL-RE" || { echo "ERROR: 随包 N_m3u8DL-RE 缺失或不可执行"; exit 1; }
+          "$RES/bin/N_m3u8DL-RE" --version
+          codesign -v "$RES/bin/N_m3u8DL-RE" || {
+            echo "ERROR: 随包 N_m3u8DL-RE 签名校验失败（Apple Silicon 不会执行）"; exit 1; }
+          if xattr -l "$RES/bin/N_m3u8DL-RE" | grep -q com.apple.quarantine; then
+            echo "ERROR: 随包 N_m3u8DL-RE 还带隔离属性，用户装完会被 Gatekeeper 拦"; exit 1
+          fi
           PLIST_V=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
           SRC_V=$(grep -E '^__version__' zdm/zdm/__init__.py | head -1 | cut -d'"' -f2)
           echo "plist=$PLIST_V source=$SRC_V"
