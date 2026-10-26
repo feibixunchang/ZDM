@@ -674,7 +674,19 @@ public sealed class Manager
                 tasks.ValueKind == JsonValueKind.Array)
             {
                 foreach (var t in tasks.EnumerateArray())
-                    RestoreTask(t);
+                {
+                    // Per record, not around the loop: one damaged entry used to
+                    // abort the iteration, so every task saved after it silently
+                    // disappeared from the history.
+                    try
+                    {
+                        RestoreTask(t);
+                    }
+                    catch
+                    {
+                        // damaged entry: skip it, keep the rest
+                    }
+                }
             }
         }
         catch
@@ -696,27 +708,32 @@ public sealed class Manager
 
     private void RestoreTask(JsonElement t)
     {
-        var id = t.TryGetProperty("id", out var i) ? i.GetString() : null;
-        var url = t.TryGetProperty("url", out var u) ? u.GetString() : null;
+        if (t.ValueKind != JsonValueKind.Object) return;
+        var id = Str(t, "id");
+        var url = Str(t, "url");
         if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(url)) return;
 
-        var prevStatus = t.TryGetProperty("status", out var s) ? s.GetString() : "queued";
+        var prevStatus = Str(t, "status") ?? TaskStatusNames.Queued;
 
         if (prevStatus == TaskStatusNames.Completed)
         {
             var done = new Download(id, url,
-                t.TryGetProperty("directory", out var dd) ? dd.GetString() ?? Config.DownloadDir : Config.DownloadDir,
-                t.TryGetProperty("filename", out var fn) ? fn.GetString() : null,
-                t.TryGetProperty("connections", out var cn) ? cn.GetInt32() : 1,
-                // ValueKind guard: a hand-edited state.json with "source": 5
-                // would otherwise throw here and take the whole startup down.
+                Str(t, "directory") ?? Config.DownloadDir,
+                Str(t, "filename"),
+                // Read-path healing, mirroring _load_task() in the Python
+                // manager: GetString() throws on a number and GetInt32() throws
+                // on "abc", and this runs from the constructor, so one
+                // hand-edited field used to cost the user a history entry with
+                // no message at all. The Download constructor clamps
+                // connections, so the helper only needs the type fallback.
+                RecordNumbers.Int(t, "connections", 1),
                 source: Str(t, "source"),
                 kind: Str(t, "kind"));
-            done.Size = t.TryGetProperty("size", out var sz) ? sz.GetInt64() : 0;
+            done.Size = Math.Max(0, RecordNumbers.Long(t, "size", 0));
             done.Status = TaskStatus.Completed;
-            done.CompletedAt = t.TryGetProperty("completed_at", out var ca) && ca.ValueKind != JsonValueKind.Null
-                ? ca.GetDouble() : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-            done.CreatedAt = t.TryGetProperty("created_at", out var ca2) ? ca2.GetDouble() : done.CreatedAt;
+            done.CompletedAt = RecordNumbers.Num(t, "completed_at",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
+            done.CreatedAt = RecordNumbers.Num(t, "created_at", done.CreatedAt);
             done.GlobalLimiter = GlobalLimiter;
             if (done.Size > 0)
                 done.Segments = new Segmenter(done.Size, new List<Chunk> { new(0, done.Size, done.Size) });
@@ -726,9 +743,9 @@ public sealed class Manager
 
         var d = new Download(
             id, url,
-            t.TryGetProperty("directory", out var dd2) ? dd2.GetString() ?? Config.DownloadDir : Config.DownloadDir,
-            t.TryGetProperty("filename", out var fn2) ? fn2.GetString() : null,
-            t.TryGetProperty("connections", out var cn2) ? cn2.GetInt32() : Config.Connections,
+            Str(t, "directory") ?? Config.DownloadDir,
+            Str(t, "filename"),
+            RecordNumbers.Int(t, "connections", Config.Connections),
             timeoutSeconds: Config.Timeout,
             speedLimit: Config.SpeedLimit,
             source: Str(t, "source"),
@@ -737,7 +754,7 @@ public sealed class Manager
 
         d.OnEvent += (evt, task) => Emit(evt, task);
         d.GlobalLimiter = GlobalLimiter;
-        d.CreatedAt = t.TryGetProperty("created_at", out var c3) ? c3.GetDouble() : d.CreatedAt;
+        d.CreatedAt = RecordNumbers.Num(t, "created_at", d.CreatedAt);
         try
         {
             d.LoadMeta(t);

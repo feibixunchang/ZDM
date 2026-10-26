@@ -140,6 +140,41 @@ O_BINARY = getattr(os, "O_BINARY", 0)  # Windows: without it files open in text 
 # （manager.CONFIG_RANGES）早就限制成 1~32，引擎这边必须用同一个数字。
 MAX_CONNECTIONS = 32
 
+# 优先级只在队列排序里用（-priority, created_at），但三端界面都把它渲染成
+# P±n 徽标，所以写入和恢复都要夹进同一区间：越界值不影响排序的相对顺序，
+# 却会让一条老记录永远插在最前面，看起来像「只改了排序」实际一直在抢线。
+MAX_PRIORITY = 99
+
+
+def clamp_priority(value) -> int:
+    """把任意来源的优先级夹进 ±MAX_PRIORITY，坏值当 0。"""
+    try:
+        num = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(-MAX_PRIORITY, min(MAX_PRIORITY, num))
+
+
+def record_int(value, default: int) -> int:
+    """历史 state.json / .zdm-meta 记录里的整数：坏值退回默认，不往外抛。
+
+    恢复路径以前全是裸 int()/float()，一处坏值就顺着 manager 的
+    `except: continue` 把整条任务吞掉 —— 用户看到的不是「这条记录有问题」，
+    而是「我下过的任务凭空少了一个」。配置坏值回默认、任务坏值蒸发，
+    两边不该这么不一样。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def record_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 # 有些 CDN（尤其 B站音轨）没有 UA/Referer 就直接 403。
 DEFAULT_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -403,9 +438,19 @@ class Chunk:
         return [self.start, self.end, self.pos]
 
     @classmethod
-    def from_list(cls, data) -> "Chunk":
-        c = cls(int(data[0]), int(data[1]), int(data[2]))
-        return c
+    def from_list(cls, data) -> Optional["Chunk"]:
+        """从 state.json / .zdm-meta 还原一个分块，形状或类型不对返回 None。
+
+        以前这里直接 int(data[0])：一条被手改坏的分块就让整条任务的恢复抛异常，
+        用户只看到历史里凭空少一条。分块本来就是可选的续传优化，坏值跳过、这块
+        重下即可，不该赔上整条记录。
+        """
+        try:
+            if not isinstance(data, (list, tuple)) or len(data) < 3:
+                return None
+            return cls(int(data[0]), int(data[1]), int(data[2]))
+        except (TypeError, ValueError):
+            return None
 
 
 class Segmenter:
@@ -845,27 +890,32 @@ class Download:
         }
 
     def load_meta(self, data: dict) -> None:
+        # 这里的每一项都来自历史 state.json / .zdm-meta：老版本写的、被手工
+        # 改过的、或干脆是截断过的文件。以前全是裸 int()/float()，一处坏值就
+        # 顺着 manager 的 `except: continue` 把整条任务吞掉 —— 用户看到的不是
+        # 「这条记录有问题」，而是「我下过的任务凭空少了一个」。
         self.url = data.get("url", self.url)
         self.final_url = data.get("final_url", self.url)
         self.filename = data.get("filename", self.filename)
-        self.size = int(data.get("size", 0) or 0)
+        self.size = max(0, record_int(data.get("size"), 0))
         # 恢复时也要按地址特性收敛：老 meta 里可能存着 8 连接。
         self.connections = _effective_connections(
-            self.final_url or self.url, int(data.get("connections", self.connections) or 1)
+            self.final_url or self.url,
+            max(1, record_int(data.get("connections"), self.connections or 1)),
         )
         self.supports_range = bool(data.get("supports_range"))
         self.transport_name = data.get("transport") or "native"
         self._transport = transport_mod.make(self.transport_name)
         self.headers = data.get("headers") or {}
         self.proxy = data.get("proxy")
-        self.speed_limit = int(data.get("speed_limit", 0) or 0)
+        self.speed_limit = max(0, record_int(data.get("speed_limit"), 0))
         self.audio_url = str(data.get("audio_url") or "")
         self.audio_only = bool(data.get("audio_only") or self.audio_only)
         self.yt_page = str(data.get("yt_page") or self.yt_page or "")
-        self.yt_height = int(data.get("yt_height") or self.yt_height or 0)
+        self.yt_height = max(0, record_int(data.get("yt_height"), self.yt_height or 0))
         self.section = str(data.get("section") or self.section or "")
-        self.priority = int(data.get("priority") or self.priority or 0)
-        self.start_at = float(data.get("start_at") or self.start_at or 0)
+        self.priority = clamp_priority(data.get("priority") or self.priority)
+        self.start_at = max(0.0, record_float(data.get("start_at"), self.start_at or 0))
         self.original_url = str(data.get("original_url") or self.original_url or "")
         self._retarget_pending = bool(data.get("retarget"))
         self.limiter.set_rate(self.speed_limit)
@@ -873,10 +923,26 @@ class Download:
         self.source = normalize_source(data.get("source"), self.source)
         self.kind = normalize_kind(data.get("kind") or self.kind)
         chunks = data.get("chunks") or []
-        if chunks and self.size:
-            self.segmenter = Segmenter(
-                self.size, [Chunk.from_list(c) for c in chunks]
-            )
+        if isinstance(chunks, (list, tuple)) and chunks and self.size:
+            # 只收落在文件长度内的分块：手改过的 start/end 会让连接往 EOF 之后写，
+            # 或者算出负的 remaining，进度直接乱掉。
+            restored = []
+            for item in chunks:
+                c = Chunk.from_list(item)
+                if c is None or c.start < 0 or c.end > self.size or c.start >= c.end:
+                    continue
+                c.pos = min(max(c.pos, c.start), c.end)
+                restored.append(c)
+            # 留下来的分块还得严丝合缝盖住整个文件：坏块一丢就留下洞，续传只填
+            # 有记录的那些区间，成品会是「显示下完了但缺一截」。宁可不认这个断点，
+            # 让 _run_segmented 重新分段整个重下（.part 会被覆盖，结果是完整的）。
+            covered = 0
+            for c in sorted(restored, key=lambda x: x.start):
+                if c.start != covered:
+                    break
+                covered = c.end
+            if covered == self.size:
+                self.segmenter = Segmenter(self.size, restored)
 
     # ---------- progress ----------
     @property

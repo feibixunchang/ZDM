@@ -219,14 +219,18 @@ public sealed class Download
 
     public void LoadMeta(JsonElement data)
     {
-        if (data.TryGetProperty("url", out var u)) Url = u.GetString() ?? Url;
-        if (data.TryGetProperty("final_url", out var fu)) FinalUrl = fu.GetString() ?? Url;
-        if (data.TryGetProperty("filename", out var fn)) Filename = fn.GetString() ?? Filename;
-        if (data.TryGetProperty("size", out var sz)) Size = sz.GetInt64();
-        if (data.TryGetProperty("connections", out var cn)) Connections = Math.Clamp(cn.GetInt32(), 1, MaxConnections);
-        if (data.TryGetProperty("supports_range", out var sr)) SupportsRange = sr.GetBoolean();
-        if (data.TryGetProperty("speed_limit", out var sl)) SpeedLimit = sl.GetInt64();
-        if (data.TryGetProperty("proxy", out var px)) Proxy = px.GetString();
+        Url = Text(data, "url") ?? Url;
+        FinalUrl = Text(data, "final_url") ?? Url;
+        Filename = Text(data, "filename") ?? Filename;
+        // Numbers and flags go through the read-path helpers: state.json and
+        // .zdm-meta can be hand-edited, and GetInt64()/GetBoolean() throw on a
+        // bad value — the caller's catch then turns that into a task quietly
+        // missing from the history. Same reason record_int() exists in Python.
+        Size = Math.Max(0, RecordNumbers.Long(data, "size", Size));
+        Connections = Math.Clamp(RecordNumbers.Int(data, "connections", Connections), 1, MaxConnections);
+        SupportsRange = Flag(data, "supports_range");
+        SpeedLimit = Math.Max(0, RecordNumbers.Long(data, "speed_limit", SpeedLimit));
+        Proxy = Text(data, "proxy");
         // Metadata written before 1.12.0 has neither key: keep the defaults.
         if (data.TryGetProperty("source", out var so) && so.ValueKind == JsonValueKind.String)
             Source = TaskSources.Normalize(so.GetString());
@@ -251,14 +255,39 @@ public sealed class Download
             foreach (var item in ch.EnumerateArray())
             {
                 if (item.ValueKind != JsonValueKind.Array) continue;
-                var parts = item.EnumerateArray().Select(x => x.GetInt64()).ToArray();
-                if (parts.Length >= 3)
-                    list.Add(Chunk.FromArray(parts));
+                var parts = item.EnumerateArray().ToArray();
+                if (parts.Length < 3) continue;
+                if (!RecordNumbers.Value(parts[0], out var start) ||
+                    !RecordNumbers.Value(parts[1], out var end) ||
+                    !RecordNumbers.Value(parts[2], out var pos))
+                    continue;
+                // A chunk outside the file length makes a connection write past
+                // EOF (or report negative remaining); skip it and re-fetch that
+                // range instead of trusting a corrupted resume point.
+                if (start < 0 || end > Size || start >= end) continue;
+                list.Add(new Chunk((long)start, (long)end, (long)Math.Min(Math.Max(pos, start), end)));
             }
-            if (list.Count > 0)
+            // The surviving chunks must still tile the whole file. Dropping a
+            // damaged one otherwise leaves a hole that resume never refills:
+            // the task reports "completed" with bytes missing from the middle.
+            // Without full coverage, forget the resume point and re-segment.
+            long covered = 0;
+            foreach (var c in list.OrderBy(x => x.Start))
+            {
+                if (c.Start != covered) break;
+                covered = c.End;
+            }
+            if (covered == Size)
                 Segments = new Segmenter(Size, list);
         }
     }
+
+    /// <summary>Optional string field: null when absent or holding another type.</summary>
+    private static string? Text(JsonElement data, string name) =>
+        data.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static bool Flag(JsonElement data, string name) =>
+        data.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
 
     // ---------------- lifecycle ----------------
 

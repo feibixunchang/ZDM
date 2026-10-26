@@ -294,7 +294,10 @@ public sealed class UpdateChecker
 
     private static bool TryParse(string s, out Version v)
     {
-        var core = s.Split('-')[0];
+        // A prerelease or build tag (v1.17.0-beta.1, 1.0.0+build20241019) is not
+        // a Version: cut at the first suffix marker so the comparison stays
+        // against the numeric core instead of failing and hiding the update.
+        var core = s.Split('-', '+')[0];
         return Version.TryParse(core, out v!);
     }
 }

@@ -43,14 +43,26 @@ UPDATE_MIRRORS = (
 
 # --------------------------------------------------------------------------- versions
 def parse_version(text) -> tuple:
-    """'v1.3.0' -> (1, 3, 0). Missing parts become 0; junk becomes 0."""
+    """'v1.3.0' -> (1, 3, 0). Missing parts become 0; junk becomes 0.
+
+    每段只认开头的连续数字，而且遇到带后缀的段就收尾：以前 "1.16.7-rc2" 会把
+    段内数字全拼成 72，预发布/构建号的 tag 于是被当成比正式版还新，桌面端提示
+    「有新版本」并去下一个根本不存在资产；"1.16.7.1" 则被砍成三段，看成和
+    "1.16.7" 一样，补丁号永远提示不了更新。
+    """
     nums: List[int] = []
     for part in str(text or "").strip().lstrip("vV").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
+        digits = ""
+        for ch in part:
+            if not ch.isdigit():
+                break
+            digits += ch
         nums.append(int(digits) if digits else 0)
+        if digits != part:  # 段尾是 -rc2 / +build：后面那些不再是版本号
+            break
     while len(nums) < 3:
         nums.append(0)
-    return tuple(nums[:3])
+    return tuple(nums)
 
 
 def is_newer(candidate, current) -> bool:

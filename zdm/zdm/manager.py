@@ -14,11 +14,14 @@ from typing import Dict, List, Optional
 
 from .core import (
     MAX_CONNECTIONS,
+    MAX_PRIORITY,
     Chunk,
     Download,
     RateLimiter,
     Segmenter,
     normalize_section,
+    record_float,
+    record_int,
 )
 from .videopage import is_video_page
 
@@ -42,10 +45,9 @@ def to_bool(value, name: str = "配置项") -> bool:
     return bool(value)
 
 
-# 优先级只在排序里用（-priority, created_at），但界面把它渲染成 P±n 徽标，
-# 网页版/桌面端/命令行都按 ±99 约束；服务端兜住同一个区间，扩展或 curl 传
-# 999999 时才不至于把名字列撑坏。
-MAX_PRIORITY = 99
+# 优先级只在排序里用（-priority, created_at），但网页版/桌面端/命令行都按
+# ±99 约束（上限见 core.MAX_PRIORITY，恢复老记录时用的是同一个数）；服务端
+# 兜住同一个区间，扩展或 curl 传 999999 时才不至于把名字列撑坏。
 
 
 def to_int(value, name: str, default: int = 0) -> int:
@@ -809,10 +811,11 @@ class Manager:
             d = Download(
                 id=t["id"], url=t["url"],
                 directory=t.get("directory") or str(self.config["download_dir"]),
-                filename=t.get("filename"), connections=int(t.get("connections") or 1),
+                filename=t.get("filename"),
+                connections=record_int(t.get("connections"), 1),
                 headers=t.get("headers") or {},
                 proxy=t.get("proxy"),
-                speed_limit=int(t.get("speed_limit") or 0),
+                speed_limit=max(0, record_int(t.get("speed_limit"), 0)),
                 source=t.get("source") or "manual",
                 kind=t.get("kind") or "",
                 audio_url=t.get("audio_url") or "",
@@ -820,18 +823,20 @@ class Manager:
                 # 历史任务也可能是 YouTube/B站：不恢复这几个字段，「重新下载」
                 # 会拿页面 HTML 当视频存下来（页面前的任务地址是 page URL）。
                 yt_page=t.get("yt_page") or "",
-                yt_height=int(t.get("yt_height") or 0),
+                yt_height=max(0, record_int(t.get("yt_height"), 0)),
                 section=t.get("section") or "",
-                priority=int(t.get("priority") or 0),
-                start_at=float(t.get("start_at") or 0),
+                # 1.16.5 之前存下的越界优先级会在这里复活，然后一直插队；
+                # 写入侧夹过 ±99，读取侧用同一个函数，两边不会各说各话。
+                priority=to_priority(record_int(t.get("priority"), 0)),
+                start_at=record_float(t.get("start_at"), 0.0),
                 original_url=t.get("original_url") or "",
             )
-            d.size = int(t.get("size") or 0)
+            d.size = max(0, record_int(t.get("size"), 0))
             d.final_url = t.get("final_url") or t["url"]
             d.supports_range = bool(t.get("supports_range"))
             d.status = "completed"
-            d.completed_at = t.get("completed_at") or time.time()
-            d.created_at = t.get("created_at", time.time())
+            d.completed_at = record_float(t.get("completed_at"), 0.0) or time.time()
+            d.created_at = record_float(t.get("created_at"), time.time())
             d.global_limiter = self.global_limiter
             if d.size:
                 d.segmenter = Segmenter(d.size, [Chunk(0, d.size, d.size)])
@@ -842,27 +847,29 @@ class Manager:
             url=t["url"],
             directory=t.get("directory") or str(self.config["download_dir"]),
             filename=t.get("filename"),
-            connections=int(t.get("connections") or self.config["connections"]),
+            connections=record_int(
+                t.get("connections"), int(self.config["connections"])
+            ),
             headers=t.get("headers") or {},
             proxy=t.get("proxy"),
             max_retries=int(self.config["max_retries"]),  # type: ignore[arg-type]
             timeout=float(self.config["timeout"]),  # type: ignore[arg-type]
-            speed_limit=int(t.get("speed_limit") or 0),
+            speed_limit=max(0, record_int(t.get("speed_limit"), 0)),
             source=t.get("source") or "manual",
             kind=t.get("kind") or "",
             audio_url=t.get("audio_url") or "",
             audio_only=bool(t.get("audio_only")),
             yt_page=t.get("yt_page") or "",
-            yt_height=int(t.get("yt_height") or 0),
+            yt_height=max(0, record_int(t.get("yt_height"), 0)),
             section=t.get("section") or "",
-            priority=int(t.get("priority") or 0),
-            start_at=float(t.get("start_at") or 0),
+            priority=to_priority(record_int(t.get("priority"), 0)),
+            start_at=record_float(t.get("start_at"), 0.0),
             original_url=t.get("original_url") or "",
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter
-        d.size = int(t.get("size") or 0)
-        d.created_at = t.get("created_at", time.time())
+        d.size = max(0, record_int(t.get("size"), 0))
+        d.created_at = record_float(t.get("created_at"), time.time())
         d.load_meta(t)
         prev = t.get("status")
         if prev == "downloading":

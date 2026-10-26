@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.16.6**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.16.7**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.16.6_amd64.deb` | `sudo apt install ./zdm_1.16.6_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.16.7_amd64.deb` | `sudo apt install ./zdm_1.16.7_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.16.6.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.16.7.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.16.6
+bash zdm/build_linux_app.sh ./linux-build 1.16.7
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -178,6 +178,18 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
   起来比报错更值钱，这些兜底在三端（桌面/网页/命令行/扩展）共用同一张区间表。
 
 端口改动仍需重启服务才生效。
+
+**历史任务凭空少了几条** —— v1.16.7 起，读取任务记录时按同一套规则兜底：
+
+- `state.json` / `.zdm-meta` 里被写坏或改坏的数字（`connections:"abc"`、
+  `priority:999999`、`size:null`）读回来时退回默认值或夹回区间，不再因为一次转换
+  失败让整条任务消失；越界的老优先级会被夹到 ±99，不会一直插队。
+- `created_at` / `completed_at` 是队列排序和历史裁剪的键：以前混进字符串会让调度器
+  每轮抛异常、所有任务都不开工，现在这类键保证是数字。
+- 断点分块（`chunks`）坏几块只跳过那几块，超出文件长度的块不再被相信（否则连接会
+  往 EOF 之后写）；全坏就当没有断点，重新分段下载。
+- 「检查更新」的版本号只认每段开头的数字：`1.16.7-rc2` 不再被算成 1.16.72，
+  四段的 `1.16.7.1` 也能认出比 `1.16.7` 更新。
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。

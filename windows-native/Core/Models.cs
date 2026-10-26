@@ -1,4 +1,6 @@
-﻿using System.Text.Json.Serialization;
+﻿using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Zdm.App.Core;
 
@@ -85,8 +87,6 @@ public sealed class Chunk
     }
 
     public long[] ToArray() => new[] { Start, End, Pos };
-
-    public static Chunk FromArray(long[] a) => new(a[0], a[1], a[2]);
 }
 
 /// <summary>Where a task came from, matching the Python build's vocabulary.</summary>
@@ -124,6 +124,49 @@ public static class TaskKinds
         Video or Audio => s!,
         _ => "",
     };
+}
+
+/// <summary>
+/// Read-path healing for numbers inside a saved task record (state.json /
+/// .zdm-meta): a missing, null or malformed value falls back to the caller's
+/// default instead of throwing. Mirrors record_int()/record_float() in the
+/// Python core, which exists for the same reason — the config reader healed bad
+/// values for a while, but the task reader did not, so one hand-edited
+/// "connections": "abc" made that task (and, since LoadState wraps the whole
+/// loop, every task after it) vanish from the history with no message.
+/// </summary>
+public static class RecordNumbers
+{
+    /// <summary>Number, or numeric string — the same tolerance as Python's int()/float().</summary>
+    public static bool Value(JsonElement v, out double value)
+    {
+        if (v.ValueKind == JsonValueKind.Number)
+        {
+            value = v.GetDouble();
+            return true;
+        }
+        // 字符串数字也算：Python 端 int("8") 能通过，手工改过的 state 里很常见。
+        if (v.ValueKind == JsonValueKind.String &&
+            double.TryParse(v.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var text))
+        {
+            value = text;
+            return true;
+        }
+        value = 0;
+        return false;
+    }
+
+    public static bool Property(JsonElement t, string name, out double value) =>
+        t.TryGetProperty(name, out var v) && Value(v, out value);
+
+    public static int Int(JsonElement t, string name, int fallback) =>
+        Property(t, name, out var value) ? (int)Math.Round(value) : fallback;
+
+    public static long Long(JsonElement t, string name, long fallback) =>
+        Property(t, name, out var value) ? (long)Math.Round(value) : fallback;
+
+    public static double Num(JsonElement t, string name, double fallback) =>
+        Property(t, name, out var value) ? value : fallback;
 }
 
 /// <summary>Public snapshot of a task, shaped exactly like the Python version's JSON.</summary>
