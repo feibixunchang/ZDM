@@ -141,6 +141,7 @@ zdm add URL -H "Referer: https://site/page" -H "Cookie: k=v"
 zdm add URL -p 10                     # 优先级：数字越大越先下载
 zdm add URL --start-at 2026-10-27T02:00:00   # 定时开始（也接受 Unix 时间戳）
 zdm add "https://www.bilibili.com/video/BV..." --section 00:01:00-00:05:00
+                                       # --section 只适用于视频页面链接，普通文件会被拒绝
 zdm list --json
 zdm pause <id> / zdm resume <id> / zdm restart <id> / zdm remove <id>
 zdm config connections 16

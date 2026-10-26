@@ -2912,7 +2912,10 @@ class MainWindow(QMainWindow):
         if t.get("status") in ("completed", "merging"):
             self._status("已完成/正在合并的任务不能修改，请先重新下载", hold=5)
             return
-        is_video = bool(t.get("yt_page")) or t.get("kind") == "video"
+        # 选段只在真正走 yt-dlp 通道的任务上有效：有页面地址，或地址本身就
+        # 是视频页。扩展推的 DASH 直链 kind 也是 video，但它没有页面，
+        # 显示选段框只会让用户填了之后被服务端拒绝。
+        is_video = bool(t.get("yt_page")) or is_video_page(t.get("url") or "")
         dlg = QDialog(self)
         dlg.setWindowTitle("修改任务")
         form = QFormLayout(dlg)
@@ -3048,8 +3051,18 @@ class MainWindow(QMainWindow):
             new_section = _section_range(sec_start.text(), sec_end.text())
             if new_section != _section_range(s0, s1):
                 payload["section"] = new_section
+        elif new_url and is_video_page(new_url):
+            # 普通文件任务改成视频页后走的是 yt-dlp 通道，选段这时才有意义；
+            # 对话框刚打开时还看不到这一步，所以在这里补一个入口。
+            try:
+                new_section = _section_range(sec_start.text(), sec_end.text())
+            except ValueError as e:
+                QMessageBox.warning(self, "选段时间不对", str(e))
+                return
+            if new_section:
+                payload["section"] = new_section
         self._run(self.api.edit, t["id"], payload)
-        self._status("已保存修改", hold=4)
+        self._status("正在保存修改…", hold=4)
 
     def _new_download(self):
         dlg = QDialog(self)

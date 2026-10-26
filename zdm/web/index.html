@@ -330,6 +330,14 @@ const fromLocalInput = v => v ? Math.floor(new Date(v).getTime() / 1000) : '';
 
 let editingId = '';
 let editingOrig = { url: '', start: '', section: '' };
+let editHasPage = false;
+// 把普通文件改成视频页链接时，选段这一刻才开始有意义。这里只列最常粘贴的
+// 两个站点做 UI 提示，真正的判断在服务端（videopage.is_video_page）。
+const VIDEO_PAGE_HINT = /^https?:\/\/(?:[a-z0-9-]+\.)*(?:youtube\.com\/(?:watch|shorts|live|embed)|youtu\.be\/|bilibili\.com\/(?:video|bangumi\/play|audio)\/|b23\.tv\/)/i;
+function toggleEditSection(){
+  const shown = editHasPage || VIDEO_PAGE_HINT.test($('#editUrl').value.trim());
+  $('#editSectionRow').style.display = shown ? '' : 'none';
+}
 function openEdit(t){
   editingId = t.id;
   const h = t.headers || {};
@@ -347,7 +355,8 @@ function openEdit(t){
   $('#editPrio').value = num(t.priority);
   $('#editStart').value = toLocalInput(t.start_at);
   $('#editSection').value = String(t.section || '').replace(/^\*/, '');
-  $('#editSectionRow').style.display = (t.yt_page || t.kind === 'video') ? '' : 'none';
+  editHasPage = !!t.yt_page;
+  toggleEditSection();
   // 记下原值：URL 没改就不回传。扩展推的直链任务同时带页面地址，
   // 回传页面地址会把「被拦时退回直链」的兜底地址换掉。
   editingOrig = {
@@ -358,6 +367,7 @@ function openEdit(t){
   $('#dlgEdit').showModal();
 }
 $('#btnEditCancel').onclick = () => $('#dlgEdit').close();
+$('#editUrl').addEventListener('input', toggleEditSection);
 $('#btnEditSave').onclick = async () => {
   if (!editingId) return;
   const orig = tasks.find(x => x.id === editingId) || {};
