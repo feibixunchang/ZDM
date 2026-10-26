@@ -10,7 +10,7 @@
 #   * never touches ~/Library or ~/.local (safe to run on a CI runner),
 #   * writes everything under a build directory you pass in,
 #   * picks the Python framework robustly (CLT / Xcode / Homebrew / pyenv),
-#   * produces ZDM-<version>.dmg ready to upload.
+#   * produces ZDM-<version>-<arch>.dmg ready to upload.
 #
 # Usage:
 #   ./build_macos_app.sh <build_dir> <version>
@@ -25,9 +25,19 @@ VERSION="${VERSION:-0.0.0}"
 APP="$BUILD_DIR/ZDM.app"
 STAGE="$BUILD_DIR/dmg-root"
 
+# The bundle embeds the build machine's CPython framework, so this is NOT a
+# universal binary: a DMG built on an arm64 runner will not launch on an Intel
+# Mac. Name it by architecture and let update.py pick the matching asset.
+case "$(uname -m)" in
+  arm64|aarch64) PKG_ARCH=arm64 ;;
+  x86_64|amd64)  PKG_ARCH=x64 ;;
+  *)             PKG_ARCH="$(uname -m)" ;;
+esac
+
 echo "==> repo=$REPO"
 echo "==> build dir=$BUILD_DIR"
 echo "==> version=$VERSION"
+echo "==> arch=$PKG_ARCH"
 
 # ---------------------------------------------------------------- python lookup
 # Find an interpreter that (a) is >= 3.9 and (b) has a Python.framework we can
@@ -329,6 +339,14 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.zdm.desktop</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>zdm</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 EOF
@@ -472,7 +490,7 @@ cp "$SRC/README.md" "$STAGE/" 2>/dev/null || true
 [ -f "$REPO/docs/ZDM_安装与使用说明.md" ] && cp "$REPO/docs/ZDM_安装与使用说明.md" "$STAGE/安装与使用说明.md"
 ln -s /Applications "$STAGE/Applications"
 
-DMG="$BUILD_DIR/ZDM-$VERSION.dmg"
+DMG="$BUILD_DIR/ZDM-$VERSION-$PKG_ARCH.dmg"
 echo "==> creating $DMG"
 hdiutil create -volname ZDM -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 echo "==> done: $DMG"

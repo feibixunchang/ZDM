@@ -2,7 +2,7 @@
 # Build a macOS .dmg installer for ZDM.
 # This script MUST run on macOS (it uses /usr/bin/hdiutil, which is macOS-only).
 #
-#   ./build_macos_dmg.sh            # produces ZDM-1.13.0.dmg in the current dir
+#   ./build_macos_dmg.sh            # produces ZDM-1.13.0-<arch>.dmg in the current dir
 #   ZDM_VERSION=1.13.0 ./build_macos_dmg.sh
 #
 # The repo already ships a ready-made ZDM.app (see zdm/install.sh, which builds it
@@ -15,7 +15,14 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="${ZDM_VERSION:-$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SRC/zdm/__init__.py" 2>/dev/null | head -1)}"
 VERSION="${VERSION:-0.0.0}"
 APP_NAME="ZDM"
-DMG_NAME="${APP_NAME}-${VERSION}.dmg"
+# The bundled launcher embeds one CPython framework, so the DMG is arm64- or
+# x64-only - never universal. Tag the file and let update.py pick by arch.
+case "$(uname -m)" in
+  arm64|aarch64) PKG_ARCH=arm64 ;;
+  x86_64|amd64)  PKG_ARCH=x64 ;;
+  *)             PKG_ARCH="$(uname -m)" ;;
+esac
+DMG_NAME="${APP_NAME}-${VERSION}-${PKG_ARCH}.dmg"
 STAGING="$(mktemp -d)/${APP_NAME}"
 APPS="/Applications"
 

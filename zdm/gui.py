@@ -524,10 +524,10 @@ def _build_reopen_delegate_class():
                 try:
                     # Restore on the next runloop turn so Cocoa finishes the reopen.
                     from PyQt5.QtCore import QTimer
-                    QTimer.singleShot(0, lambda: target._maybe_restore("cocoaReopen"))
+                    QTimer.singleShot(0, lambda: target._restore_from_dock("cocoaReopen"))
                 except Exception:
                     try:
-                        target._maybe_restore("cocoaReopen")
+                        target._restore_from_dock("cocoaReopen")
                     except Exception:
                         pass
             return True
@@ -684,6 +684,24 @@ class ZDMApplication(QApplication):
             _dlog("[stateChanged] ignored (non-macOS: WM restores the window)")
             return
         self._maybe_restore("stateChanged")
+
+    def _restore_from_dock(self, _tag="cocoaReopen"):
+        """Handle an explicit Dock-icon click.
+
+        Unlike an ordinary ApplicationActive flip (cmd-tab, launching another
+        app), a Dock click is the user *asking* for the window. So it must
+        bypass the ``_user_hidden`` / ``_user_minimized`` guards that
+        ``_maybe_restore`` deliberately honours - otherwise hiding to the tray
+        made the Dock icon a dead end.
+        """
+        win = self._main_window
+        if win is None:
+            return
+        _dlog(f"[restore:{_tag}] explicit Dock reopen -> show front")
+        try:
+            win._show_front()
+        except Exception:
+            pass
 
     def _maybe_restore(self, _tag="?"):
         win = self._main_window

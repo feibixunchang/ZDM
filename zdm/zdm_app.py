@@ -112,6 +112,9 @@ def _selfcheck() -> int:
         and report["pyqt5"]
         and report["ytdlp"]
         and report["ffmpeg"]
+        # deno 是 YouTube 签名/ n 参数解析需要的 JS 运行时。缺了它包照样能启动，
+        # 但 YouTube 会在运行时才失败 —— 所以必须算进自检的通过条件。
+        and report["deno"]
     )
     return 0 if ok else 1
 

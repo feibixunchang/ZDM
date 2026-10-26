@@ -349,7 +349,7 @@ YouTube 读播放器的 `streamingData`，B站读 `__playinfo__` 里的 `dash`�
 
 | 平台 | 文件 |
 |---|---|
-| macOS | `ZDM-1.13.0.dmg` |
+| macOS | `ZDM-<版本>-<架构>.dmg` |
 | Linux | `zdm_1.13.0_amd64.deb` / `zdm-linux-amd64.tar.gz` |
 | Windows | `ZDM-Setup-1.13.0.exe`（原生 C#/WPF） |
 

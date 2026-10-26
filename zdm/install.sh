@@ -78,6 +78,33 @@ linux_uninstall() {
   echo "已卸载（配置在 ~/.config/zdm，已下载文件保留）"
 }
 
+ensure_media_tools() {
+  # The source tree keeps bin/ out of git (it is ~80MB), so a fresh clone (or a
+  # zip built without a pre-populated bin/) has no yt-dlp/ffmpeg/deno. Copying
+  # bin/ alone then leaves the user with "YouTube fails" / "video has no audio"
+  # on a clean machine. Fetch the JS runtime (small, pinned) and at least warn
+  # about the rest instead of failing silently at download time.
+  local dir="$1"
+  local t
+  for t in yt-dlp ffmpeg; do
+    [ -x "$dir/bin/$t" ] || \
+      echo "!! 随包缺少 $t：将回退到系统 PATH（干净机器上可能不可用）"
+  done
+  [ -x "$dir/bin/deno" ] && return
+  local fetcher="$dir/fetch_bin.py"
+  [ -f "$fetcher" ] || fetcher="$ROOT/fetch_bin.py"
+  [ -f "$fetcher" ] || {
+    echo "!! 缺少随包 deno：YouTube 解析可能不可用"
+    return
+  }
+  echo "==> 随包缺少 deno，正在下载（YouTube 解析需要）..."
+  if "$PY" "$fetcher" --dest "$dir/bin" --arch "$(uname -m)" >/dev/null 2>&1; then
+    chmod +x "$dir/bin/deno" 2>/dev/null || true
+  else
+    echo "!! deno 下载失败：YouTube 解析可能不可用（可重跑安装重试）"
+  fi
+}
+
 install_native_host() {
   # Chrome/Chromium native messaging lets the extension start ZDM without
   # showing an "open zdm://" dialog. The host name and the extension id must
@@ -125,6 +152,16 @@ install_linux() {
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
   cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" \
         "$ROOT/theme.py" "$ROOT/zdm_native_host.py" "$APP_DIR/"
+  # 随包二进制（yt-dlp / ffmpeg / deno）。没装进数据目录时，core.py 会退回
+  # 系统 PATH —— 干净机器上没有 ffmpeg，B 站/YouTube 下完就是「只有画面没声音」。
+  # 升级时保留已有的 bin/，只覆盖本包带的那几个。
+  if [ -d "$ROOT/bin" ]; then
+    mkdir -p "$APP_DIR/bin"
+    cp -R "$ROOT/bin/." "$APP_DIR/bin/"
+    chmod +x "$APP_DIR/bin"/* 2>/dev/null || true
+  fi
+  cp "$ROOT/fetch_bin.py" "$APP_DIR/" 2>/dev/null || true
+  ensure_media_tools "$APP_DIR"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   # gui.py imports theme.py from the app root (it is NOT inside the zdm package),
@@ -232,6 +269,16 @@ install_mac() {
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
   cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" \
         "$ROOT/theme.py" "$ROOT/zdm_native_host.py" "$APP_DIR/"
+  # 随包二进制（yt-dlp / ffmpeg / deno）。没装进数据目录时，core.py 会退回
+  # 系统 PATH —— 干净机器上没有 ffmpeg，B 站/YouTube 下完就是「只有画面没声音」。
+  # 升级时保留已有的 bin/，只覆盖本包带的那几个。
+  if [ -d "$ROOT/bin" ]; then
+    mkdir -p "$APP_DIR/bin"
+    cp -R "$ROOT/bin/." "$APP_DIR/bin/"
+    chmod +x "$APP_DIR/bin"/* 2>/dev/null || true
+  fi
+  cp "$ROOT/fetch_bin.py" "$APP_DIR/" 2>/dev/null || true
+  ensure_media_tools "$APP_DIR"
   cp "$ROOT/README.md" "$APP_DIR/" 2>/dev/null || true
   find "$APP_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   # gui.py imports theme.py from the app root (it is NOT inside the zdm package),
@@ -375,7 +422,24 @@ fi
 EOF
     chmod +x "$APP/Contents/MacOS/ZDM"
   fi
-  cat > "$APP/Contents/Info.plist" <<EOF
+  PLIST="$APP/Contents/Info.plist"
+  if [ -f "$PLIST" ] && [ -x /usr/libexec/PlistBuddy ]; then
+    # A DMG-installed bundle already carries a complete Info.plist (and an
+    # ad-hoc signature over it). Rewriting it from our minimal template drops
+    # keys such as CFBundleShortVersionString and invalidates the signature,
+    # so patch only the two entries this installer owns.
+    PB=/usr/libexec/PlistBuddy
+    "$PB" -c "Set :CFBundleVersion $VERSION" "$PLIST" 2>/dev/null \
+      || "$PB" -c "Add :CFBundleVersion string $VERSION" "$PLIST" 2>/dev/null || true
+    if ! "$PB" -c "Print :CFBundleURLTypes" "$PLIST" >/dev/null 2>&1; then
+      "$PB" -c "Add :CFBundleURLTypes array" "$PLIST" 2>/dev/null || true
+      "$PB" -c "Add :CFBundleURLTypes:0 dict" "$PLIST" 2>/dev/null || true
+      "$PB" -c "Add :CFBundleURLTypes:0:CFBundleURLName string com.zdm.desktop" "$PLIST" 2>/dev/null || true
+      "$PB" -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "$PLIST" 2>/dev/null || true
+      "$PB" -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string zdm" "$PLIST" 2>/dev/null || true
+    fi
+  else
+    cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -388,9 +452,22 @@ EOF
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.zdm.desktop</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>zdm</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 EOF
+  fi
+  # We may have replaced the launcher / patched Info.plist inside a bundle that
+  # shipped ad-hoc signed (the DMG build signs it). Re-sign ad-hoc, otherwise
+  # Gatekeeper reports the app as damaged after an update.
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
   # clear the quarantine flag so a double click opens it right away
   xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
   echo "==> 已生成 $APP"

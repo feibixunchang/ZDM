@@ -21,7 +21,7 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-1.15.21.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明） |
+| macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
 | Linux | `zdm_1.15.21_amd64.deb` | `sudo apt install ./zdm_1.15.21_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
@@ -29,7 +29,7 @@
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
-> `ZDM-<version>.dmg` 在 `macos-latest` 上构建，`ZDM-Setup-*.exe` 在 `windows-latest` 上构建（由
+> `ZDM-<version>-<arch>.dmg` 在 `macos-latest` 上构建，`ZDM-Setup-*.exe` 在 `windows-latest` 上构建（由
 > `.github/workflows/build-packages.yml` 驱动），push main 即构建，推 tag 时产物自动挂到对应 Release。
 >
 > macOS 的 `.dmg` 与 Linux 的 `.deb` 都是**自包含**的：Python 运行时、PyQt5/Qt 与资源全部

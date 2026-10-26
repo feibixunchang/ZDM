@@ -211,9 +211,24 @@ def pick_asset(assets, platform: str = "") -> Optional[dict]:
         return None
 
     if plat == "darwin":
-        # Prefer the plain universal dmg; skip arch-tagged variants.
+        # DMGs are per-architecture: the bundle embeds the build machine's
+        # CPython framework, so "arm64" and "x64" builds are not interchangeable.
+        # Match the running machine first, then accept a legacy untagged DMG
+        # (old naming scheme), and only then any DMG so old releases still
+        # resolve. Picking blindly used to hand Intel Macs an arm64 installer
+        # that refuses to launch.
+        import platform as _plat
+
+        machine = _plat.machine().lower()
+        if machine in ("arm64", "aarch64"):
+            want = ("arm64", "aarch64")
+            avoid = ("x64", "x86_64", "amd64", "intel")
+        else:
+            want = ("x64", "x86_64", "amd64", "intel")
+            avoid = ("arm64", "aarch64")
         return (
-            first(lambda n: n.endswith(".dmg") and "arm" not in n and "x86" not in n and "intel" not in n)
+            first(lambda n: n.endswith(".dmg") and any(k in n for k in want))
+            or first(lambda n: n.endswith(".dmg") and not any(k in n for k in avoid))
             or first(lambda n: n.endswith(".dmg"))
         )
     if plat in ("win32", "cygwin"):
@@ -234,6 +249,10 @@ def pick_asset(assets, platform: str = "") -> Optional[dict]:
     arch = "arm64" if machine in ("aarch64", "arm64") else "amd64"
     return (
         first(lambda n: n.endswith(".deb") and arch in n)
+        # the tarball is arch-tagged too; falling straight through to the .deb
+        # used to hand an arm64 machine the amd64 bundle whenever the matching
+        # .deb was missing.
+        or first(lambda n: n.endswith(".tar.gz") and arch in n)
         or first(lambda n: n.endswith(".deb"))
         or first(lambda n: n.endswith(".tar.gz"))
         or first(lambda n: "linux" in n and n.endswith(".zip"))
@@ -250,14 +269,21 @@ def _expected_asset_names(version: str, platform: str = "") -> List[str]:
         return []
     plat = platform or sys.platform
     if plat == "darwin":
-        return [f"ZDM-{v}.dmg"]
+        import platform as _plat
+
+        arch = "arm64" if _plat.machine().lower() in ("aarch64", "arm64") else "x64"
+        return [f"ZDM-{v}-{arch}.dmg", f"ZDM-{v}.dmg"]
     if plat in ("win32", "cygwin"):
         # 新包叫 ZDM-Setup-*；ZDM-PyQt5-Setup-* 是旧命名，只有在没有新包时才试。
         return [f"ZDM-Setup-{v}.exe", f"ZDM-PyQt5-Setup-{v}.exe"]
     import platform as _plat
 
     arch = "arm64" if _plat.machine().lower() in ("aarch64", "arm64") else "amd64"
-    return [f"zdm_{v}_{arch}.deb", "zdm-linux-amd64.tar.gz"]
+    return [
+        f"zdm_{v}_{arch}.deb",
+        f"zdm-linux-{arch}.tar.gz",
+        "zdm-linux-amd64.tar.gz",
+    ]
 
 
 def _url_exists(url: str, proxy: str = "", timeout: float = 6.0) -> bool:

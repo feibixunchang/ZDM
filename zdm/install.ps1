@@ -15,6 +15,16 @@ $StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\ZDM"
 $Startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 $Agent = "com.zdm.service"
 
+# 版本号只认 zdm/__init__.py 一个真源。这里以前写死 "1.11.0"，于是「应用与功能」
+# 里永远显示 1.11.0，和界面/更新提示对不上。
+$Version = "0.0.0"
+$verFile = Join-Path $Root "zdm\__init__.py"
+if (Test-Path $verFile) {
+    $m = Select-String -Path $verFile -Pattern '^__version__\s*=\s*"([^"]+)"' |
+        Select-Object -First 1
+    if ($m) { $Version = $m.Matches[0].Groups[1].Value }
+}
+
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
 function Find-Python {
@@ -90,7 +100,38 @@ foreach ($item in @("zdm", "web", "extension")) {
     if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
     Copy-Item -Recurse -Force (Join-Path $Root $item) $dst
 }
-foreach ($f in @("zdm.py", "gui.py", "theme.py", "README.md", "install.ps1", "install.bat")) {
+# 随包二进制（yt-dlp / ffmpeg / deno）。干净 Windows 上没有 ffmpeg，缺了它
+# B 站/YouTube 下完就是「只有画面没声音」。源码树里 bin/ 可能还没 fetch，
+# 所以只在存在时复制，且不删除旧文件（升级时保留已下载的运行时）。
+$binSrc = Join-Path $Root "bin"
+if (Test-Path $binSrc) {
+    $binDst = Join-Path $App "bin"
+    New-Item -ItemType Directory -Force -Path $binDst | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $binSrc "*") $binDst
+} else {
+    Write-Host "  no bundled bin/ found - yt-dlp/ffmpeg must be on PATH" -ForegroundColor Yellow
+}
+# bin/ is gitignored, so a source checkout has no binaries at all. Fetch the
+# pinned deno runtime (small) - without it yt-dlp cannot solve YouTube's JS
+# challenge. ffmpeg/yt-dlp cannot be fetched here cheaply; just say so.
+if (-not (Test-Path (Join-Path $App "bin\deno.exe"))) {
+    $fetcher = Join-Path $App "fetch_bin.py"
+    if (Test-Path $fetcher) {
+        Write-Step "Fetching deno (required for YouTube)"
+        try {
+            & $py $fetcher --dest (Join-Path $App "bin") --os windows `
+                --arch $env:PROCESSOR_ARCHITECTURE | Out-Null
+        } catch {
+            Write-Host "  deno download failed - YouTube resolve may be unavailable" -ForegroundColor Yellow
+        }
+    }
+}
+foreach ($t in @("yt-dlp.exe", "ffmpeg.exe")) {
+    if (-not (Test-Path (Join-Path $App "bin\$t"))) {
+        Write-Host "  missing bundled $t - will fall back to PATH" -ForegroundColor Yellow
+    }
+}
+foreach ($f in @("zdm.py", "gui.py", "theme.py", "README.md", "install.ps1", "install.bat", "fetch_bin.py")) {
     Copy-Item -Force (Join-Path $Root $f) (Join-Path $App $f)
 }
 # theme.py lives next to gui.py (not inside the zdm package); without it the
@@ -182,7 +223,7 @@ try {
     $reg.SetValue("DisplayIcon", (Join-Path $App "extension\icons\icon.ico"))
     $reg.SetValue("InstallLocation", $App)
     $reg.SetValue("Publisher", "ZDM")
-    $reg.SetValue("DisplayVersion", "1.11.0")
+    $reg.SetValue("DisplayVersion", $Version)
     $reg.SetValue("NoModify", 1)
     $reg.SetValue("NoRepair", 1)
     $reg.Close()

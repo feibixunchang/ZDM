@@ -80,7 +80,7 @@ def stage_files(dst):
     if os.path.isdir(bin_src):
         shutil.copytree(bin_src, os.path.join(dst, "bin"), dirs_exist_ok=True)
     for f in ("zdm.py", "gui.py", "theme.py", "README.md", "install.sh",
-              "zdm_native_host.py",
+              "zdm_native_host.py", "fetch_bin.py",
               "install.ps1", "install.bat", "setup.cmd", "build_macos_dmg.sh",
               "zdm_launcher.m", "build_macos_app.sh", "LICENSE.txt"):
         src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
@@ -171,6 +171,11 @@ def build_macos_app(dst_app):
             f"  <key>CFBundleVersion</key><string>{VERSION}</string>\n"
             "  <key>CFBundlePackageType</key><string>APPL</string>\n"
             "  <key>NSHighResolutionCapable</key><true/>\n"
+            "  <key>CFBundleURLTypes</key>\n"
+            "  <array><dict>\n"
+            "    <key>CFBundleURLName</key><string>com.zdm.desktop</string>\n"
+            "    <key>CFBundleURLSchemes</key><array><string>zdm</string></array>\n"
+            "  </dict></array>\n"
             "</dict>\n</plist>\n"
         )
 
@@ -181,15 +186,19 @@ def build_macos_zip():
         shutil.rmtree(d)
     os.makedirs(d, exist_ok=True)
     build_macos_app(os.path.join(d, "ZDM.app"))
-    shutil.copytree(os.path.join(ZDM, "extension"), os.path.join(d, "extension"),
-                    dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("__pycache__"))
+    # The zip's install.sh installs a *source* copy into
+    # ~/Library/Application Support/ZDM, so the source has to travel with it.
+    # This used to copy only extension/ + the installer scripts, which made
+    # `install.sh` abort with "找不到 zdm/ 目录" on a clean machine.
+    stage_files(d)
+    # stage_files already brings install.sh/README/... plus the build scripts;
+    # the extra copy here only exists for trees where stage_files skipped one.
     for f in ("install.sh", "zdm_native_host.py", "install.ps1", "install.bat",
               "build_macos_dmg.sh",
               "zdm_launcher.m", "build_macos_app.sh", "README.md", "LICENSE.txt"):
         src = os.path.join(ZDM, f) if os.path.exists(os.path.join(ZDM, f)) \
             else os.path.join(ROOT, f)
-        if os.path.exists(src):
+        if os.path.exists(src) and not os.path.exists(os.path.join(d, f)):
             shutil.copy2(src, os.path.join(d, f))
 
     zf = os.path.join(DIST, "zdm-macos.zip")

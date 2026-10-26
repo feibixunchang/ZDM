@@ -254,12 +254,11 @@ MANIFEST
 done
 
 # System-wide default handler for the zdm:// scheme (the extension's fallback
-# wake-up path). /etc/xdg/mimeapps.list is the XDG system default location.
-install -Dm644 /dev/null "$STAGE/etc/xdg/mimeapps.list"
-cat >"$STAGE/etc/xdg/mimeapps.list" <<'MIME'
-[Default Applications]
-x-scheme-handler/zdm=zdm.desktop
-MIME
+# wake-up path) is registered by postinst *without* shipping
+# /etc/xdg/mimeapps.list. Shipping that file made dpkg replace whatever the
+# admin/other packages had put there, silently wiping every other scheme's
+# default (e.g. mailto:, x-scheme-handler/http). postinst merges our single
+# line into the existing file instead.
 
 install -m644 "$REPO/LICENSE.txt" "$STAGE/usr/share/doc/zdm/copyright"
 install -m644 "$SRC/README.md" "$STAGE/usr/share/doc/zdm/README.md"
@@ -301,6 +300,40 @@ if command -v xdg-desktop-menu >/dev/null 2>&1; then
     xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
 fi
 
+# Claim zdm:// for the extension's fallback wake-up path, merging into the
+# existing system mimeapps.list instead of replacing it (see the staging
+# comment above). Only our single key is touched; every other default and
+# section survives.
+MIMEAPPS=/etc/xdg/mimeapps.list
+if [ -f "$MIMEAPPS" ] && ! grep -q '^x-scheme-handler/zdm=' "$MIMEAPPS"; then
+    if grep -q '^\[Default Applications\]' "$MIMEAPPS"; then
+        TMP="$MIMEAPPS.zdm.tmp"
+        if awk '
+            /^\[Default Applications\]/ {
+                print
+                if (!done) { print "x-scheme-handler/zdm=zdm.desktop"; done = 1 }
+                next
+            }
+            { print }
+            END {
+                if (!done) {
+                    print ""
+                    print "[Default Applications]"
+                    print "x-scheme-handler/zdm=zdm.desktop"
+                }
+            }
+        ' "$MIMEAPPS" >"$TMP" 2>/dev/null; then
+            cat "$TMP" >"$MIMEAPPS"
+        fi
+        rm -f "$TMP"
+    else
+        printf '\n[Default Applications]\nx-scheme-handler/zdm=zdm.desktop\n' >>"$MIMEAPPS"
+    fi
+elif [ ! -f "$MIMEAPPS" ]; then
+    mkdir -p /etc/xdg
+    printf '[Default Applications]\nx-scheme-handler/zdm=zdm.desktop\n' >"$MIMEAPPS"
+fi
+
 # 升级后旧版 serve 进程还握着 9000 端口跑旧代码：新界面 ping 得到它就
 # 不会重启，表现成「装了新版还是旧行为/下不动」。先杀掉旧进程，再以
 # 触发安装的桌面用户身份把新 serve 拉起来 —— 用户不用再开终端敲
@@ -319,6 +352,10 @@ if [ -z "$TU" ]; then
         u=$(stat -c %U "$d" 2>/dev/null || true)
         if [ -n "$u" ] && [ "$u" != "root" ] && [ "$u" != "UNKNOWN" ]; then TU="$u"; break; fi
     done
+fi
+if [ -n "$TU" ] && command -v xdg-mime >/dev/null 2>&1; then
+    su -s /bin/sh -c "xdg-mime default zdm.desktop x-scheme-handler/zdm" "$TU" \
+        >/dev/null 2>&1 || true
 fi
 if [ -n "$TU" ] && [ -x "/opt/zdm/ZDM" ]; then
     su -s /bin/sh -c "nohup /opt/zdm/ZDM start --daemon >/dev/null 2>&1" "$TU" || true
@@ -429,8 +466,40 @@ for hostroot in "$CFG/google-chrome/NativeMessagingHosts" "$CFG/chromium/NativeM
 MANIFEST
 done
 mkdir -p "$CFG"
-if ! grep -q 'x-scheme-handler/zdm' "$CFG/mimeapps.list" 2>/dev/null; then
-    printf '[Default Applications]\nx-scheme-handler/zdm=zdm.desktop\n' >>"$CFG/mimeapps.list"
+# Prefer xdg-mime (it writes a proper default); the manual merge below is the
+# fallback for systems without xdg-utils. Never append a second
+# [Default Applications] header - duplicate sections are invalid and some DEs
+# drop the whole file.
+if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default zdm.desktop x-scheme-handler/zdm >/dev/null 2>&1 || true
+fi
+MIMEAPPS="$CFG/mimeapps.list"
+if [ -f "$MIMEAPPS" ] && ! grep -q '^x-scheme-handler/zdm=' "$MIMEAPPS"; then
+    if grep -q '^\[Default Applications\]' "$MIMEAPPS"; then
+        TMP="$MIMEAPPS.zdm.tmp"
+        if awk '
+            /^\[Default Applications\]/ {
+                print
+                if (!done) { print "x-scheme-handler/zdm=zdm.desktop"; done = 1 }
+                next
+            }
+            { print }
+            END {
+                if (!done) {
+                    print ""
+                    print "[Default Applications]"
+                    print "x-scheme-handler/zdm=zdm.desktop"
+                }
+            }
+        ' "$MIMEAPPS" >"$TMP" 2>/dev/null; then
+            cat "$TMP" >"$MIMEAPPS"
+        fi
+        rm -f "$TMP"
+    else
+        printf '\n[Default Applications]\nx-scheme-handler/zdm=zdm.desktop\n' >>"$MIMEAPPS"
+    fi
+elif [ ! -f "$MIMEAPPS" ]; then
+    printf '[Default Applications]\nx-scheme-handler/zdm=zdm.desktop\n' >"$MIMEAPPS"
 fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q "${XDG_DATA_HOME:-$HOME/.local/share}/applications" >/dev/null 2>&1 || true
