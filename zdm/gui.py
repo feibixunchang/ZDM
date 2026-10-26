@@ -1519,12 +1519,9 @@ class MainWindow(QMainWindow):
         tb.addWidget(spacer)
 
         for text, fn in (
-            ("清除已完成", lambda: self._bulk("clear_finished")),
             ("打开网页版", self._open_web),
             ("软件发布页", self._open_update_page),
             ("浏览器扩展", self._extensions),
-            ("打开目录", self._open_dir),
-            ("设置", self._settings),
         ):
             b = QPushButton(text)
             b.clicked.connect(fn)
@@ -1546,12 +1543,22 @@ class MainWindow(QMainWindow):
             self.filter_btns[key] = b
             hl.addWidget(b)
         hl.addStretch(1)
+        # 「清除已完成 / 打开目录 / 设置」从上面那行挪到这里。默认 1080 宽的窗口里
+        # 第一行装不下它们，QToolBar 会弹出「>>」把按钮收进溢出菜单 —— 用户看到的
+        # 就是「设置按钮不见了」；而筛选条这一行右侧一直空着四百多像素，正好接住。
+        btn_clear = QPushButton("清除已完成")
+        btn_clear.clicked.connect(lambda: self._bulk("clear_finished"))
+        hl.addWidget(btn_clear)
         self.btn_pause_all = self._bulk_button(
             hl, "pause", "全部暂停", "暂停所有正在下载的任务", lambda: self._bulk("pause_all")
         )
         self.btn_resume_all = self._bulk_button(
             hl, "play", "全部继续", "继续所有已暂停的任务", lambda: self._bulk("resume_all")
         )
+        for text, fn in (("打开目录", self._open_dir), ("设置", self._settings)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            hl.addWidget(b)
         self.filter_btns["all"].setChecked(True)
 
         self.table = QTableWidget(0, 7)
