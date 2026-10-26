@@ -158,6 +158,13 @@
     <div class="field"><label>服务端口</label><input id="cfgPort" type="number" min="1024" max="65535"></div>
     <div class="field full"><label><input type="checkbox" id="cfgAuto"> 重启后自动继续未完成任务</label></div>
     <div class="field full"><label><input type="checkbox" id="cfgMirror"> GitHub / Hugging Face 链接走镜像加速（失败自动退回直连）</label></div>
+    <div class="field"><label>流媒体（m3u8 / mpd）引擎</label>
+      <select id="cfgStream">
+        <option value="auto">自动：优先 N_m3u8DL-RE，找不到时用 ffmpeg</option>
+        <option value="re">只用 N_m3u8DL-RE（找不到可执行文件就报错）</option>
+        <option value="ffmpeg">只用 ffmpeg</option>
+      </select>
+    </div>
   </div>
   <div class="dlg-f">
     <button id="btnOpenDir">打开下载目录</button>
@@ -300,7 +307,7 @@ function render(){
     html += `<tr>
       <td>
         <div class="fname">${esc(t.filename || '未命名')}${badge(t)}</div>
-        <div class="sub">${esc(t.url || '')}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}</div>
+        <div class="sub">${esc(t.url || '')}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}${t.stream_note ? ' · <span style="color:var(--warn)" title="换引擎的理由">'+esc(t.stream_note)+'</span>' : ''}</div>
       </td>
       <td>${fmtSize(num(t.downloaded))} / ${t.size ? fmtSize(num(t.size)) : '未知'}</td>
       <td>
@@ -531,6 +538,9 @@ $('#btnSettings').onclick = () => {
   $('#cfgPort').value = config.port || 9000;
   $('#cfgAuto').checked = !!config.auto_resume;
   $('#cfgMirror').checked = !!config.mirror_accel;
+  // 服务端 heal_config 认不出的值会退回 auto，这里也用同一个集合，
+  // 免得选择框停在 undefined 上、保存时把 undefined 发回去。
+  $('#cfgStream').value = ['auto','re','ffmpeg'].includes(config.stream_engine) ? config.stream_engine : 'auto';
   $('#dlgSettings').showModal();
 };
 $('#btnSaveCfg').onclick = async () => {
@@ -558,6 +568,7 @@ $('#btnSaveCfg').onclick = async () => {
     port: port,
     auto_resume: $('#cfgAuto').checked,
     mirror_accel: $('#cfgMirror').checked,
+    stream_engine: $('#cfgStream').value,
   });
   if (r.ok){ toast(r.warning || '已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }
   else toast(r.error || '保存失败');

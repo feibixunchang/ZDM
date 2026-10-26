@@ -60,6 +60,9 @@ def _selfcheck() -> int:
         "ffmpeg": "",
         # YouTube 的签名/n 参数需要 JS 运行时；现在随包带 deno。
         "deno": "",
+        # HLS/DASH 流媒体引擎：少了它 m3u8 会退回 ffmpeg（能下完，但没有分片
+        # 并发、单片重试和按分片续传）。发布包必须带，所以和上面几个一样是硬条件。
+        "m3u8dl_re": "",
     }
     try:
         import theme  # noqa: F401  (sits next to gui.py, not in the package)
@@ -94,6 +97,36 @@ def _selfcheck() -> int:
         report["ffmpeg"] = _find_ffmpeg() or ""
     except Exception as e:  # noqa: BLE001
         report["ffmpeg_error"] = f"{type(e).__name__}: {e}"
+    try:
+        from zdm import re_bin
+
+        report["m3u8dl_re"] = re_bin.binary_path() or ""
+    except Exception as e:  # noqa: BLE001
+        report["m3u8dl_re_error"] = f"{type(e).__name__}: {e}"
+    # 探到了还不够：得证明它真能跑。Linux 包可能带错架构、macOS 上的 .NET
+    # 单文件可能被签名/隔离属性拦住，而 binary_path() 只看文件在不在、能不能
+    # 执行 —— 这些都要到第一次下 m3u8 才暴露。发布自检里跑一次 --version。
+    if report["m3u8dl_re"]:
+        try:
+            import re as _re
+            import subprocess
+
+            r = subprocess.run(
+                [report["m3u8dl_re"], "--version"],
+                capture_output=True,
+                timeout=60,
+                **runtime.silent_proc_kwargs()
+            )
+            # 引擎的终端渲染器会把光标控制码混在版本串里（实测 0.6.0 输出带
+            # \x1b[?12l），报告是给 CI 读的 JSON，去掉再存。
+            txt = _re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", (r.stdout or b"").decode("utf-8", "ignore"))
+            report["m3u8dl_re_version"] = txt.strip()[:60]
+            if r.returncode != 0:
+                report["m3u8dl_re"] = ""
+                report["m3u8dl_re_error"] = "exit %d" % r.returncode
+        except Exception as e:  # noqa: BLE001
+            report["m3u8dl_re"] = ""
+            report["m3u8dl_re_error"] = f"{type(e).__name__}: {e}"
     # Windows 上的 exe 是 GUI 程序（console=False），没有可写的 stdout，CI 读不到
     # 下面这行 print。所以额外支持落文件；退出码仍然是唯一的通过/失败信号。
     out = os.environ.get("ZDM_SELFCHECK_OUT")
@@ -115,6 +148,8 @@ def _selfcheck() -> int:
         # deno 是 YouTube 签名/ n 参数解析需要的 JS 运行时。缺了它包照样能启动，
         # 但 YouTube 会在运行时才失败 —— 所以必须算进自检的通过条件。
         and report["deno"]
+        # 流媒体引擎同理：包照样启动、mp4 照样下，只有第一次下 m3u8 才看出退化。
+        and report["m3u8dl_re"]
     )
     return 0 if ok else 1
 

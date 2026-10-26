@@ -158,6 +158,9 @@ DEFAULT_CONFIG: Dict[str, object] = {
     # Rewrite GitHub / Hugging Face links through a public mirror. Off by
     # default; the original URL is kept so failures fall back to direct.
     "mirror_accel": False,
+    # HLS / DASH（m3u8 / mpd）用哪个引擎：auto（有 N_m3u8DL-RE 就用它，没有
+    # 退回 ffmpeg）/ re / ffmpeg。降级发生时任务上会写明理由，不静默换。
+    "stream_engine": "auto",
     # Cookies for sites that need a logged-in session (YouTube / Bilibili).
     # Shape: {"youtube": "SID=...", "bilibili": "SESSDATA=..."}
     # The browser extension normally sends the page's own cookie along with
@@ -182,6 +185,11 @@ CONFIG_INT_KEYS = (
     "history_limit",
 )
 CONFIG_FLOAT_KEYS = ("timeout",)
+# 取值受限于一个集合的配置项：写错的值既不能存下（set_config 报错），也不能
+# 在重启后原样生效（heal_config 兜底）。
+CONFIG_ENUM_KEYS = {
+    "stream_engine": ("auto", "re", "ffmpeg"),
+}
 # 数值项的合法区间（None = 不设上限）。网页版的输入框留空时
 # Number('') === 0，以前会连着存进去：连接数 0 让下载悄悄退化成单线程，
 # max_active 0 会把队列卡死，端口 0 则服务根本起不来。
@@ -240,6 +248,12 @@ def heal_config(cfg: Dict[str, object]) -> Dict[str, object]:
         healed[k] = DEFAULT_CONFIG[k] if k == "port" and clamped != num else clamped
     text = str(healed.get("download_dir") or "").strip()
     healed["download_dir"] = text or DEFAULT_CONFIG["download_dir"]
+    for k, allowed in CONFIG_ENUM_KEYS.items():
+        # 认不出的取值（手改的 state.json、别的版本）退回默认值：核心按
+        # want in ("auto","re") 分支选通道，留下一个拼错的 "RE-Beta" 会让
+        # 两条路都不匹配，行为取决于代码走到哪一步 —— 那不是用户选的。
+        val = str(healed.get(k) or "").strip().lower()
+        healed[k] = val if val in allowed else DEFAULT_CONFIG[k]
     if not isinstance(healed.get("site_cookies"), dict):
         healed["site_cookies"] = {}
     healed["proxy"] = str(healed.get("proxy") or "")
@@ -384,6 +398,7 @@ class Manager:
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter
+        d.stream_engine = str(cfg.get("stream_engine") or "auto")
         with self._lock:
             self.downloads[d.id] = d
         if start_now:
@@ -570,6 +585,9 @@ class Manager:
             if mirrored:
                 d.url = d.final_url = mirrored
         d.status = "queued"
+        # 重下按「当下」的设置选流媒体引擎：改了设置再重下，不能用创建时
+        # 记下的旧引擎（历史任务加载时可能还是上一个设置）。
+        d.stream_engine = str(self.config.get("stream_engine") or "auto")
         self._emit("restarted", d)
         return True
 
@@ -634,9 +652,21 @@ class Manager:
                         pass
         with self._lock:
             self.downloads.pop(task_id, None)
+        self._drop_re_work(task_id)
         self._emit("removed", d)
         self.save_state()
         return True
+
+    def _drop_re_work(self, task_id: str) -> None:
+        """任务记录删掉时，它在流媒体引擎暂存目录里的分片也没用了。
+
+        暂停的分片要留着给「恢复」续传（引擎靠 <序号>.<ext> 跳过已下完的片），
+        所以不能在下线时清；但记录一旦从列表里消失就没有下次了 —— 不删的话
+        每个「暂停后删除」的 m3u8 任务都在配置目录里留一份永久的垃圾。
+        """
+        from . import re_bin
+
+        re_bin.drop_work_dir(task_id)
 
     def pause_all(self) -> int:
         """暂停所有可暂停的任务，返回真正被暂停的条数。
@@ -663,6 +693,7 @@ class Manager:
             if d.status in ("completed", "canceled", "error"):
                 with self._lock:
                     self.downloads.pop(d.id, None)
+                self._drop_re_work(d.id)
                 n += 1
         self.save_state()
         return n
@@ -730,6 +761,18 @@ class Manager:
                 raise ValueError(f"{k} 需要数字（收到 {v!r}）") from e
         elif k in CONFIG_BOOL_KEYS:
             return to_bool(v, k)
+        elif k in CONFIG_ENUM_KEYS:
+            allowed = CONFIG_ENUM_KEYS[k]
+            val = str(v).strip().lower()
+            if not val:
+                # 留空 = 没做选择，用默认值；界面万一发出空串（老版网页表单）
+                # 不该让整批设置都保存不了。
+                return DEFAULT_CONFIG[k]
+            if val not in allowed:
+                raise ValueError(
+                    f"{k} 只能是 {'、'.join(allowed)}（收到 {v!r}）"
+                )
+            return val
         elif k == "download_dir":
             # 清空目录框存进去的是 ""：os.makedirs("") 当场抛错，界面只会显示
             # 「保存失败」，看不出是自己把目录删空了。
@@ -920,6 +963,10 @@ class Manager:
             d.completed_at = record_float(t.get("completed_at"), 0.0) or time.time()
             d.created_at = record_float(t.get("created_at"), time.time())
             d.global_limiter = self.global_limiter
+            # 「这一轮实际用了哪个引擎、为什么换」也是历史的一部分：不恢复的话，
+            # 重启后一条降级完成的记录和正常记录长得一模一样，理由就丢了。
+            d.stream_engine_used = str(t.get("stream_engine_used") or "")
+            d.stream_note = str(t.get("stream_note") or "")
             if d.size:
                 d.segmenter = Segmenter(d.size, [Chunk(0, d.size, d.size)])
             self.downloads[d.id] = d
@@ -950,6 +997,7 @@ class Manager:
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter
+        d.stream_engine = str(self.config.get("stream_engine") or "auto")
         d.size = max(0, record_int(t.get("size"), 0))
         d.created_at = record_float(t.get("created_at"), time.time())
         d.load_meta(t)

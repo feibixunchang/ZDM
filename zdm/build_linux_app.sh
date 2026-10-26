@@ -110,6 +110,11 @@ PYEOF
 if [ ! -x "$SRC/bin/deno" ]; then
     python3 "$SRC/fetch_bin.py" --dest "$SRC/bin" --os linux
 fi
+# 流媒体引擎（N_m3u8DL-RE）同样随包：spec 从 bin/ 取，构建期没备货就打出一个
+# 只能靠 ffmpeg 下 m3u8 的包。版本号、URL、sha256 都钉在 fetch_bin.py 里。
+if [ ! -x "$SRC/bin/N_m3u8DL-RE" ]; then
+    python3 "$SRC/fetch_bin.py" --dest "$SRC/bin" --os linux --tool re
+fi
 echo "==> freezing (PyInstaller onedir)"
 cd "$SRC"
 export PYTHONDONTWRITEBYTECODE=1
@@ -151,6 +156,8 @@ if not r.get("ytdlp"): bad.append("bundled yt-dlp binary missing")
 if not r.get("ffmpeg"): bad.append("bundled ffmpeg missing (DASH 音轨无法合流)")
 # deno 是 YouTube 的 JS 运行时；没有它 YouTube 只回故事板（"page needs to be reloaded"）。
 if not r.get("deno"): bad.append("bundled deno/JS runtime missing (YouTube 解析会失败)")
+# 流媒体引擎没有也一样：包能启动，但 m3u8 全退化成 ffmpeg（无分片续传）。
+if not r.get("m3u8dl_re"): bad.append("bundled N_m3u8DL-RE missing (%s)" % r.get("m3u8dl_re_error"))
 if r.get("version") != want:
     bad.append(f"version mismatch: bundle {r.get('version')} != build {want}")
 if bad:
@@ -263,6 +270,7 @@ done
 install -m644 "$REPO/LICENSE.txt" "$STAGE/usr/share/doc/zdm/copyright"
 install -m644 "$SRC/README.md" "$STAGE/usr/share/doc/zdm/README.md"
 [ -f "$SRC/bin/DENO-LICENSE.md" ] && install -m644 "$SRC/bin/DENO-LICENSE.md" "$STAGE/usr/share/doc/zdm/DENO-LICENSE.md" || true
+[ -f "$SRC/bin/RE-LICENSE.txt" ] && install -m644 "$SRC/bin/RE-LICENSE.txt" "$STAGE/usr/share/doc/zdm/RE-LICENSE.txt" || true
 
 INSTALLED_KB="$(du -sk "$STAGE" --exclude=DEBIAN | awk '{print $1}')"
 mkdir -p "$STAGE/DEBIAN"

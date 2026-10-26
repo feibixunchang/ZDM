@@ -113,17 +113,32 @@ if (Test-Path $binSrc) {
 }
 # bin/ is gitignored, so a source checkout has no binaries at all. Fetch the
 # pinned deno runtime (small) - without it yt-dlp cannot solve YouTube's JS
-# challenge. ffmpeg/yt-dlp cannot be fetched here cheaply; just say so.
-if (-not (Test-Path (Join-Path $App "bin\deno.exe"))) {
-    $fetcher = Join-Path $App "fetch_bin.py"
-    if (Test-Path $fetcher) {
-        Write-Step "Fetching deno (required for YouTube)"
-        try {
-            & $py $fetcher --dest (Join-Path $App "bin") --os windows `
-                --arch $env:PROCESSOR_ARCHITECTURE | Out-Null
-        } catch {
-            Write-Host "  deno download failed - YouTube resolve may be unavailable" -ForegroundColor Yellow
-        }
+# challenge, and the same fetcher carries N_m3u8DL-RE for HLS/DASH.
+# ffmpeg/yt-dlp cannot be fetched here cheaply; just say so.
+# 两颗各自补齐：老版本升级上来的机器 bin/ 里已经有 deno，以前的「deno 在就
+# 什么都不做」会让流媒体引擎永远补不上，设置里选了它却一直用 ffmpeg。
+foreach ($need in @(
+    @{ Tool = "deno"; Exe = "deno.exe"; Why = "required for YouTube" },
+    @{ Tool = "re"; Exe = "N_m3u8DL-RE.exe"; Why = "required for HLS/DASH (m3u8/mpd)" }
+)) {
+    if (Test-Path (Join-Path $App "bin\$($need.Exe)")) { continue }
+    # fetch_bin.py 要到下面才复制进安装目录，这里必须先看源码树里那份 ——
+    # 以前只找 $App 里的，等于这一步从来没执行过，缺的二进制一直没补。
+    $fetcher = Join-Path $Root "fetch_bin.py"
+    if (-not (Test-Path $fetcher)) { $fetcher = Join-Path $App "fetch_bin.py" }
+    if (-not (Test-Path $fetcher)) {
+        Write-Host "  no fetch_bin.py - cannot fetch $($need.Exe)" -ForegroundColor Yellow
+        continue
+    }
+    Write-Step "Fetching $($need.Exe) ($($need.Why))"
+    try {
+        & $py $fetcher --dest (Join-Path $App "bin") --os windows `
+            --arch $env:PROCESSOR_ARCHITECTURE --tool $need.Tool | Out-Null
+    } catch {
+        Write-Host "  $($need.Exe) download failed - $($need.Why) may be unavailable" -ForegroundColor Yellow
+    }
+    if (-not (Test-Path (Join-Path $App "bin\$($need.Exe)"))) {
+        Write-Host "  missing bundled $($need.Exe) - $($need.Why) 会退化" -ForegroundColor Yellow
     }
 }
 foreach ($t in @("yt-dlp.exe", "ffmpeg.exe")) {

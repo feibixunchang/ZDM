@@ -103,18 +103,29 @@ ensure_media_tools() {
     [ -x "$dir/bin/$t" ] || \
       echo "!! 随包缺少 $t：将回退到系统 PATH（干净机器上可能不可用）"
   done
-  [ -x "$dir/bin/deno" ] && return
+  # deno 和 N_m3u8DL-RE 各补各的。以前函数是「deno 在就 return」，于是从旧版本
+  # 升级上来的机器（bin/ 里已经有 deno）永远补不到流媒体引擎，设置里选了
+  # N_m3u8DL-RE 却一直在用 ffmpeg 下 m3u8。
+  _ensure_pinned_bin "$dir" deno deno "YouTube 解析需要"
+  _ensure_pinned_bin "$dir" re N_m3u8DL-RE "HLS/DASH 只能退回 ffmpeg"
+}
+
+_ensure_pinned_bin() {
+  # $1=安装目录 $2=fetch_bin.py 的 --tool $3=期望落地的文件名 $4=缺了的后果
+  local dir="$1" tool="$2" file="$3" why="$4"
+  [ -x "$dir/bin/$file" ] && return 0
   local fetcher="$dir/fetch_bin.py"
   [ -f "$fetcher" ] || fetcher="$ROOT/fetch_bin.py"
   [ -f "$fetcher" ] || {
-    echo "!! 缺少随包 deno：YouTube 解析可能不可用"
-    return
+    echo "!! 缺少随包 $file：$why"
+    return 0
   }
-  echo "==> 随包缺少 deno，正在下载（YouTube 解析需要）..."
-  if "$PY" "$fetcher" --dest "$dir/bin" --arch "$(uname -m)" >/dev/null 2>&1; then
-    chmod +x "$dir/bin/deno" 2>/dev/null || true
+  echo "==> 随包缺少 $file，正在下载（$why）..."
+  if "$PY" "$fetcher" --dest "$dir/bin" --arch "$(uname -m)" --tool "$tool" >/dev/null 2>&1 \
+     && [ -f "$dir/bin/$file" ]; then
+    chmod +x "$dir/bin/$file" 2>/dev/null || true
   else
-    echo "!! deno 下载失败：YouTube 解析可能不可用（可重跑安装重试）"
+    echo "!! $file 下载失败：$why（可重跑安装重试）"
   fi
 }
 

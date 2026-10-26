@@ -2088,6 +2088,9 @@ class MainWindow(QMainWindow):
             st_item = QTableWidgetItem(st_text)
             st_item.setForeground(QColor(color))
             st_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            note = str(t.get("stream_note") or "").strip()
+            if note:
+                st_item.setToolTip(note)
             self.table.setItem(row, 4, st_item)
 
             time_item = QTableWidgetItem(time_text)
@@ -2172,6 +2175,13 @@ class MainWindow(QMainWindow):
                 self.table.setItem(row, 4, item)
             item.setText(st_text)
             item.setForeground(QColor(color))
+            # 换过引擎（或没找到引擎）的理由挂在状态列上：任务照样下完了，但
+            # 「用的是哪个、为什么不是设置里那个」必须能查到，不能只在日志里。
+            note = str(t.get("stream_note") or "").strip()
+            if note:
+                item.setToolTip(note)
+            elif item.toolTip():
+                item.setToolTip("")
 
             item = self.table.item(row, 5)
             if item is None:
@@ -3269,6 +3279,30 @@ class MainWindow(QMainWindow):
             "huggingface.co 的模型文件走 hf-mirror。镜像站不可用时会自动换回原地址。"
         )
         mirror_cb.setChecked(bool(cfg.get("mirror_accel", False)))
+        # ---- HLS / DASH 引擎 ----
+        stream_cb = QComboBox()
+        for key, label in (
+            ("auto", "自动（优先 N_m3u8DL-RE，缺失时用 ffmpeg）"),
+            ("re", "只用 N_m3u8DL-RE（找不到可执行文件就报错）"),
+            ("ffmpeg", "只用 ffmpeg"),
+        ):
+            stream_cb.addItem(label, key)
+        want = str(cfg.get("stream_engine") or "auto").strip().lower()
+        pos = stream_cb.findData(want if want in ("auto", "re", "ffmpeg") else "auto")
+        stream_cb.setCurrentIndex(pos if pos >= 0 else 0)
+        try:
+            from zdm import re_bin
+
+            have_re = bool(re_bin.binary_path())
+        except Exception:  # noqa: BLE001
+            have_re = False
+        stream_cb.setToolTip(
+            "m3u8 / mpd 这类播放列表用哪个引擎下载。\n"
+            "N_m3u8DL-RE 按分片并发下载、单片出错只重取那一片、暂停后能从已下的"
+            "分片接着下；ffmpeg 只能从头跟着播放列表拉。\n"
+            "合流都要用 ffmpeg。本机" + ("已找到" if have_re else "未找到")
+            + " N_m3u8DL-RE 可执行文件（应在 app 的 bin/ 目录）。"
+        )
         # ---- appearance: follow the OS appearance by default ----
         appearance = QComboBox()
         for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
@@ -3293,6 +3327,7 @@ class MainWindow(QMainWindow):
         form.addRow("", close_tray_cb)
         form.addRow("", clip_cb)
         form.addRow("", mirror_cb)
+        form.addRow("流媒体（m3u8/mpd）引擎", stream_cb)
         # ---- site cookies (YouTube / Bilibili need a logged-in session) ----
         cookies_box = QGroupBox("站点 Cookie（用于需要登录的视频站）")
         cookies_box.setToolTip(
@@ -3381,6 +3416,7 @@ class MainWindow(QMainWindow):
             "check_updates": update_cb.isChecked(),
             "clipboard_monitor": clip_cb.isChecked(),
             "mirror_accel": mirror_cb.isChecked(),
+            "stream_engine": stream_cb.currentData() or "auto",
             "site_cookies": {
                 "youtube": yt_cookie.toPlainText().strip(),
                 "bilibili": bili_cookie.toPlainText().strip(),

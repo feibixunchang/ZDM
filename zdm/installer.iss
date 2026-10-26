@@ -83,7 +83,7 @@ Type: filesandordirs; Name: "{app}\web"
 
 [Files]
 ; 整个 onedir 原样落盘：ZDM.exe、ZDM-NativeHost.exe、_internal\（CPython、PyQt5、
-; web、extension、bin\yt-dlp.exe、bin\ffmpeg.exe）。
+; web、extension、bin\yt-dlp.exe、bin\ffmpeg.exe、bin\deno.exe、bin\N_m3u8DL-RE.exe）。
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; 浏览器扩展单独放一份到 {app}\extension：Chrome 里「加载已解压的扩展程序」记的是
 ; 磁盘路径，目录一旦被移走，Chrome 会把整条扩展（含工具栏图标）直接丢掉。

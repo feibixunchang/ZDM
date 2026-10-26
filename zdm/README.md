@@ -151,6 +151,11 @@ zdm config speed_limit 2097152          # 2 MB/s，0 = 不限
 zdm config mirror_accel true            # GitHub / Hugging Face 镜像加速（默认关）
 zdm config clipboard_monitor true       # 复制 http(s) 链接后填入新建下载输入框
 zdm config mirror_accel off             # 关；认 true/false/yes/no/on/off
+zdm config stream_engine re             # HLS/DASH 引擎：auto(默认) / re / ffmpeg
+                                        # auto=优先 N_m3u8DL-RE，找不到或失败时退回 ffmpeg
+                                        # re=只用它（找不到可执行文件就报错，不假装按你选的做完了）
+                                        # ffmpeg=只用 ffmpeg
+                                        # 换了引擎的任务会在列表里写明理由（stream_note）
                                         # 写坏一项（zdm config port abc）会退出码 1 并指名是哪一项，
                                         # 且这一批配置整体不生效，不会改一半留一半
 zdm stop
@@ -178,7 +183,12 @@ zdm stop
 
 `download_dir`、`connections`(8)、`max_active`(3)、`speed_limit`(bytes/s)、`proxy`、
 `max_retries`(5)、`timeout`(30)、`port`(9000)、`auto_resume`、`clipboard_monitor`、
-`mirror_accel`。
+`mirror_accel`、`stream_engine`(`auto`)。
+
+`stream_engine` 只管 HLS `.m3u8` / DASH `.mpd` 这类分片流：`auto` 先用 N_m3u8DL-RE
+（分片并发、单片重试、暂停后按分片续传），找不到它的可执行文件或它失败时用 ffmpeg
+重下一遍；`re` / `ffmpeg` 是点名只用一个。降级或换引擎的理由会挂在任务上（`stream_note`），
+桌面端、网页版和 `/api/tasks` 都看得到，不会静默换个引擎说「按你选的做好了」。
 
 ## 结构
 

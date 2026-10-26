@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.16.9**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.17.0**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.16.9_amd64.deb` | `sudo apt install ./zdm_1.16.9_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.17.0_amd64.deb` | `sudo apt install ./zdm_1.17.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.16.9.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.17.0.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.16.9
+bash zdm/build_linux_app.sh ./linux-build 1.17.0
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -227,6 +227,26 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 `download-errors.log` 排查时第一个要核对的东西，对不上就等于没有。（v1.16.8 的发布资产
 里仍是旧脚本 —— tag 不能挪 —— 所以这一笔单独补成 v1.16.9。）
 
+**m3u8 / mpd 下不动、下了只有一条** —— v1.17.0 起，HLS / DASH 交给内置的
+**N_m3u8DL-RE**（MIT，随包单文件，无需 .NET）：按分片并发取、单片失败只重取那一片、
+暂停后按分片续传（实测同一份 6 分片源，续传只补没下完的那片，0.1 秒收尾）。设置里
+`stream_engine` 三端都能选：`auto`（默认，RE 失败自动换 ffmpeg 并把换的理由写在任务上）、
+`re`、`ffmpeg`；界面状态列会显示这一条实际用了哪个引擎。
+
+- 以前只能报「引擎退出码 1」：这个引擎最常见的死法（播放列表 404）压根不打 ERROR，
+  而是每轮重试一条 WARN，最后甩一段 .NET 异常。现在失败原因取 ERROR 文案 → 异常首行
+  加 `--->` 那句根因 → 最后一条 WARN，`流媒体下载失败（N_m3u8DL-RE）：… 404 (File not found)`
+  这样能直接照着排查，`download-errors.log` 里也是同一句。
+- 合流阶段（`ffmpeg merging...`）标成「合并中」，不再表现成「卡在 83% 不动」。
+- 引擎自己那份分片暂存目录（`re-work/<任务 id>`）在暂停时留着续传，删除任务或
+  「清除已完成/失败」时一并回收，不再在配置目录里留永久垃圾。
+- 打包侧：`--selfcheck` 现在要求随包 N_m3u8DL-RE 存在**且能跑**（跑一次 `--version`），
+  CI 额外校验 macOS 那份已签名、没有 quarantine 属性；`install.sh` / `install.ps1`
+  里 deno 与该引擎各自补齐（以前 deno 在就整段跳过，升级上来的机器永远补不上流媒体引擎）。
+
+边界仍在：DRM / AES 密钥需要外部解密的流、以及需要选音轨/字幕的多轨道封装，这一版
+还是「整条最佳画质下下来再合流」，和 ffmpeg 通道等价 —— 轨道选择是下一步。
+
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。
 排查时先看这个文件，再对比版本号。
@@ -299,8 +319,15 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
   （能看到 Content-Type 与大小，覆盖播放 / 拖进度条 / 切清晰度时的请求）+ 页面 DOM 扫描
   （覆盖首屏就摆在那儿的 `<video>` / `<audio>` 直链媒体）。
   任务列表会标出来源（`[嗅探]` / `[浏览器]` / `[网页版]` / `[协议]`），顶部有「嗅探」筛选。
-  *（HLS `.m3u8` / DASH `.mpd` 这类自适应流不进嗅探列表——它们是分片协议，
-  需要的是「拉取 + 拼接」引擎。直播与自适应流走「解析此页面」，由 yt-dlp 处理。）*
+  *（HLS `.m3u8` / DASH `.mpd` 这类自适应流不进嗅探列表——它们是分片协议，列出来点了也
+  只是个清单。把 `.m3u8` / `.mpd` 地址交给「＋下载」或 `zdm add`，会走流媒体通道：
+  分片并发拉取 + 合流，见下方「流媒体下载」。直播与自适应视频页仍走「解析此页面」，由 yt-dlp 处理。）*
+- **流媒体下载（HLS `.m3u8` / DASH `.mpd`）**：默认引擎是随包内置的 **N_m3u8DL-RE**
+  （MIT，单文件、自带 .NET 运行时），它按分片并发下载、单片失败自动重试，暂停后**按分片续传**
+  ——下次接着下已完成的分片，不再从第一个切片重来。设置里可选 `自动`（找不到它就退回 ffmpeg）/
+  `只用 N_m3u8DL-RE` / `只用 ffmpeg`（`zdm config stream_engine re`）。凡是没用上你选的那个引擎，
+  任务上会写明理由（桌面端状态列的悬停提示、网页版任务行的橙色提示、`/api/tasks` 的 `stream_note`），
+  不静默降级。限速、代理、Cookie / Referer 都会带给引擎；DASH 的音视频分轨场景仍由 ffmpeg 处理。
 - **视频卡片上的「下载此视频」按钮**：B站 / YouTube 的每个视频卡片右上角，鼠标移上去
   会浮出一颗按钮，点开是该视频的**清晰度列表**（1080P / 720P / 音频…），选一个直接推给 ZDM。
   扩展就地解析页面里已加载的媒体数据（YouTube 的 `streamingData`、B站的 `__playinfo__`），

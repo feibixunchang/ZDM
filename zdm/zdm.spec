@@ -29,10 +29,11 @@ datas = [
     (os.path.join(SRC, "web"), "web"),
     (os.path.join(SRC, "extension"), "extension"),
 ]
-# Deno is MIT-licensed; ship its notice next to the binary in every package.
-_deno_lic = os.path.join(SRC, "bin", "DENO-LICENSE.md")
-if os.path.isfile(_deno_lic):
-    datas.append((_deno_lic, "bin"))
+# Deno 与 N_m3u8DL-RE 都是 MIT 许可；许可声明随二进制一起放进每个安装包。
+for _lic in ("DENO-LICENSE.md", "RE-LICENSE.txt"):
+    _deno_lic = os.path.join(SRC, "bin", _lic)
+    if os.path.isfile(_deno_lic):
+        datas.append((_deno_lic, "bin"))
 
 # Qt 内置文案（QDialogButtonBox 的 Save/Cancel/OK、QMessageBox 的 Yes/No、
 # QFileDialog 的按钮）都来自 Qt 自己的翻译文件。不收集的话，冻结包里
@@ -75,7 +76,8 @@ except Exception:
 WIN = sys.platform.startswith("win")
 
 binaries = []
-for _name in ("yt-dlp", "yt-dlp.exe", "ffmpeg", "ffmpeg.exe", "deno", "deno.exe"):
+for _name in ("yt-dlp", "yt-dlp.exe", "ffmpeg", "ffmpeg.exe", "deno", "deno.exe",
+              "N_m3u8DL-RE", "N_m3u8DL-RE.exe"):
     # 一个 Linux 构建目录里可能同时放着给 Windows 安装包准备的 .exe；不要把
     # 别的平台的二进制塞进当前 bundle（会白胖几十 MB，而且跑不起来）。
     if WIN and not _name.endswith(".exe"):
@@ -95,6 +97,11 @@ if not (_found & {"ffmpeg", "ffmpeg.exe"}):
     print("WARNING: zdm/bin/ffmpeg missing - DASH muxing will fall back to system ffmpeg")
 if not (_found & {"deno", "deno.exe"}):
     print("WARNING: zdm/bin/deno missing - YouTube JS challenges cannot be solved")
+# 流媒体引擎缺失时 m3u8/mpd 会退回 ffmpeg：能下完，但没有分片并发、单片重试
+# 和「按分片续传」。发布用的构建脚本（build_*.sh / .ps1）把这条当硬错误处理，
+# 只有本地临时构建才允许带着 WARNING 过去。
+if not (_found & {"N_m3u8DL-RE", "N_m3u8DL-RE.exe"}):
+    print("WARNING: zdm/bin/N_m3u8DL-RE missing - HLS/DASH falls back to ffmpeg (no segment resume)")
 
 block_cipher = None
 

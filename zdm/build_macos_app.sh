@@ -185,6 +185,26 @@ chmod +x "$RES/bin/deno"
 "$RES/bin/deno" --version >/dev/null || {
     echo "ERROR: 随包 deno 无法执行（架构不匹配或文件损坏）" >&2; exit 1; }
 cp "$SRC/bin/DENO-LICENSE.md" "$RES/" 2>/dev/null || true
+
+# N_m3u8DL-RE：HLS/DASH 流媒体引擎（分片并发、单片重试、暂停后按分片续传）。
+# 少了它 m3u8/mpd 会退回 ffmpeg —— 用户丢掉正是这几项，而设置里默认选的是它。
+# 缺失按硬错误处理：宁可不发版，也不发一个「设置写了 N_m3u8DL-RE 却永远用不上」的包。
+RE_SRC="$SRC/bin/N_m3u8DL-RE"
+if [ ! -x "$RE_SRC" ]; then
+    echo "==> stream engine binary missing, downloading"
+    python3 "$SRC/fetch_bin.py" --dest "$SRC/bin" --os darwin --tool re || {
+        echo "ERROR: 下载 N_m3u8DL-RE 失败（HLS/DASH 会退回 ffmpeg）" >&2; exit 1; }
+fi
+[ -x "$RE_SRC" ] || { echo "ERROR: 没有 $RE_SRC，无法打包流媒体引擎" >&2; exit 1; }
+cp "$RE_SRC" "$RES/bin/N_m3u8DL-RE"
+chmod +x "$RES/bin/N_m3u8DL-RE"
+# Apple Silicon 只执行「有签名」的 Mach-O，GitHub 那份是 ad-hoc 签的，cp 后
+# 仍带着签名；这里再签一次，保证被 Gatekeeper 拦下的不是这颗二进制。
+codesign --force --sign - "$RES/bin/N_m3u8DL-RE" >/dev/null 2>&1 || true
+xattr -dr com.apple.quarantine "$RES/bin/N_m3u8DL-RE" 2>/dev/null || true
+"$RES/bin/N_m3u8DL-RE" --version >/dev/null || {
+    echo "ERROR: 随包 N_m3u8DL-RE 无法执行（架构不匹配或文件损坏）" >&2; exit 1; }
+cp "$SRC/bin/RE-LICENSE.txt" "$RES/" 2>/dev/null || true
 find "$APP" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Fail fast if a module gui.py imports at top level is missing.
@@ -248,6 +268,16 @@ if not _ff:
 if _os.path.abspath(_ff) != _os.path.abspath(_expect):
     print('ffmpeg 不是随包版本:', _ff, '!=', _expect); sys.exit(1)
 print('    ffmpeg ->', _ff)
+# 流媒体引擎必须是随包那份：binary_path() 探不到时会退回 ffmpeg，而用户
+# 设置里选的是 N_m3u8DL-RE —— 构建机能跑不代表装到用户机器上也能跑。
+from zdm import re_bin
+_re = re_bin.binary_path()
+_expect_re = _os.path.join(_os.environ.get('ZDM_RES', ''), 'bin', 'N_m3u8DL-RE')
+if not _re:
+    print('missing bundled N_m3u8DL-RE —— HLS/DASH 会退回 ffmpeg'); sys.exit(1)
+if _os.path.abspath(_re) != _os.path.abspath(_expect_re):
+    print('N_m3u8DL-RE 不是随包版本:', _re, '!=', _expect_re); sys.exit(1)
+print('    N_m3u8DL-RE ->', _re)
 print('    theme + gui + update + desktop + yt_resolve importable, both palettes render')
 " ) || { echo "ERROR: runtime module import check failed"; exit 1; }
 

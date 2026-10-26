@@ -169,6 +169,21 @@ if (-not (Test-Path $DenoExe)) {
 if ($LASTEXITCODE -ne 0) { Fail "随包 deno.exe 无法执行（文件损坏或被安全软件拦截）" }
 Write-Step "deno: $(& $DenoExe --version)"
 
+# N_m3u8DL-RE.exe：HLS/DASH 流媒体引擎（分片并发、单片重试、暂停后按分片续传）。
+# 没有它 m3u8/mpd 退回 ffmpeg —— 用户看不出来，直到第一次暂停重下从 0% 开始。
+# 版本与 sha256 钉在 fetch_bin.py（和 deno 同一套）。
+$ReExe = Join-Path $Bin "N_m3u8DL-RE.exe"
+if (-not (Test-Path $ReExe)) {
+    Write-Step "downloading N_m3u8DL-RE.exe"
+    & $VenvPy (Join-Path $Src "fetch_bin.py") --dest $Bin --os windows --tool re
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $ReExe)) {
+        Fail "下载 N_m3u8DL-RE 失败（HLS/DASH 会退回 ffmpeg）"
+    }
+}
+& $ReExe --version *> $null
+if ($LASTEXITCODE -ne 0) { Fail "随包 N_m3u8DL-RE.exe 无法执行（文件损坏或被安全软件拦截）" }
+Write-Step "N_m3u8DL-RE: $(& $ReExe --version)"
+
 # ------------------------------------------------------------------ freeze
 # build/ and dist/ZDM are disposable; leaving a stale tree behind is how a
 # "new" build ends up shipping last week's gui.py.
@@ -201,7 +216,7 @@ if (Test-Path $report) { Get-Content $report }
 if ($p.ExitCode -ne 0) { Fail "self-check 失败（exit $($p.ExitCode)）—— 缺 PyQt5 / web / extension 或 theme.py" }
 
 $internal = Join-Path $AppDir "_internal"
-foreach ($need in @("bin\yt-dlp.exe", "bin\ffmpeg.exe", "bin\deno.exe")) {
+foreach ($need in @("bin\yt-dlp.exe", "bin\ffmpeg.exe", "bin\deno.exe", "bin\N_m3u8DL-RE.exe")) {
     if (-not (Test-Path (Join-Path $internal $need))) { Fail "打包结果缺少 _internal\$need" }
 }
 $hostExe = Join-Path $AppDir "ZDM-NativeHost.exe"

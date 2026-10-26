@@ -755,6 +755,15 @@ class Download:
         # 多阶段拉流（视频轨+音频轨两条播放列表）时的**直接**百分比。
         # -1 表示未启用，progress 走「时长占比」的老路。
         self._stream_progress = -1.0
+        # N_m3u8DL-RE 通道：引擎自己算的剩余时长（墙钟秒）。None = 没拿到。
+        self._stream_eta: Optional[int] = None
+        # 用哪条流媒体通道：auto（有引擎就用引擎，没有退回 ffmpeg）/ re / ffmpeg。
+        # manager 建任务和恢复老任务时按配置写入（和 global_limiter 同一套路）。
+        self.stream_engine = "auto"
+        # 本轮**实际**走了哪条通道，以及换通道的理由。失败了不能说悄悄换个引擎
+        # 跑完就当没事发生：界面上要能看出「这次不是用你选的那个下下来的」。
+        self.stream_engine_used = ""
+        self.stream_note = ""
 
         self.size = 0
         self.status = "queued"
@@ -852,6 +861,9 @@ class Download:
             "progress": self.progress,
             "source": self.source,
             "kind": self.kind,
+            # 这一轮真正用的流媒体通道，以及换通道/降级的原因（三端都要显示）
+            "stream_engine_used": self.stream_engine_used,
+            "stream_note": self.stream_note,
             "audio_url": self.audio_url,
             "audio_only": self.audio_only,
             "yt_page": self.yt_page,
@@ -997,6 +1009,9 @@ class Download:
 
     @property
     def eta(self) -> Optional[int]:
+        # N_m3u8DL-RE 直接报墙钟剩余秒，比「媒体时长 ÷ 倍速」准，优先用它。
+        if self._stream_eta is not None and self.status in ("downloading", "merging"):
+            return self._stream_eta
         # 流媒体：总大小事先不知道，用剩余时长除以速度
         if self._stream_duration and self._yt_speed:
             left = self._stream_duration - self._stream_time
@@ -1566,9 +1581,189 @@ class Download:
         self._stream_bytes = 0
         self._stream_time = 0.0
         self._stream_duration = 0.0
+        self._stream_eta = None
         self._stream_progress = -1.0
+        self.stream_note = ""
         self._emit("started")
+        from . import re_bin
+
+        want = str(self.stream_engine or "auto").strip().lower()
+        if want in ("auto", "re"):
+            binp = re_bin.binary_path()
+            if binp:
+                self.stream_engine_used = "N_m3u8DL-RE"
+                self._run_stream_re(binp)
+                return
+            if want == "re":
+                # 用户点名要这个引擎却找不到二进制。退给 ffmpeg 也能下完，但
+                # 那就不是他选的那个引擎了 —— 报错让他能立刻改设置，比假装
+                # 「按你选的做完了」诚实。
+                self.stream_engine_used = ""
+                self.status = "error"
+                self.error = (
+                    "设置里选了 N_m3u8DL-RE，但找不到它的可执行文件"
+                    "（应在 app 的 bin/N_m3u8DL-RE）。请改用 ffmpeg，或重装 ZDM。"
+                )
+                self._emit("error")
+                return
+            self.stream_engine_used = "ffmpeg"
+            self.stream_note = "没找到 N_m3u8DL-RE 可执行文件，本次用 ffmpeg 下载"
+        else:
+            want = "ffmpeg"
+            self.stream_engine_used = "ffmpeg"
         self._run_stream()
+
+    def _run_stream_re(self, binp: str) -> None:
+        """HLS / DASH 交给 N_m3u8DL-RE：分片并发、单片重试、暂停后按分片续传。
+
+        和 ffmpeg 通道的分工：这条通道只负责「把这一条播放列表下成一个文件」，
+        音视频分别是两份播放列表的场景（audio_is_pl）仍然交给 ffmpeg 两段拉
+        再合流 —— 那需要轨道数据模型，是下一步的事。
+        """
+        from . import re_bin
+
+        stem = "zdm-" + self.id
+        tmp_dir = re_bin.work_dir(self.id)
+        try:
+            os.makedirs(tmp_dir, exist_ok=True)
+        except OSError as e:
+            self.stream_engine_used = "ffmpeg"
+            self.stream_note = "流媒体引擎的临时目录建不起来（%s），改用 ffmpeg" % e
+            self._run_stream()
+            return
+
+        # 上一轮被杀在合流中途可能留下半截 zdm-<id>.xxx；本轮开始前清掉，
+        # 不然收尾时会把半截文件当成果。名字带任务 id，不会碰到别人的文件。
+        for stale in self._re_outputs(stem):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+
+        limit = int(self.speed_limit or 0)
+        if not limit and self.global_limiter is not None:
+            # 引擎是独立进程，吃不到 ZDM 的令牌桶。总限速只在设置里给了时，
+            # 要把同一个数值传下去，否则「设了限速却没生效」。
+            limit = int(getattr(self.global_limiter, "rate", 0) or 0)
+
+        cmd = re_bin.build_cmd(
+            binp,
+            self.url,
+            save_dir=self.directory,
+            save_name=stem,
+            tmp_dir=tmp_dir,
+            headers=self._http_headers(),
+            proxy=self.proxy or "",
+            threads=self.connections,
+            rate_limit=limit,
+            ffmpeg=_find_ffmpeg() or "",
+        )
+        rc, err_text = re_bin.download(
+            cmd,
+            on_progress=self._re_progress,
+            on_message=self._re_message,
+            should_stop=self._stop.is_set,
+            on_proc=self._take_stream_proc,
+        )
+
+        if self._stop.is_set():
+            for half in self._re_outputs(stem):
+                try:
+                    os.remove(half)
+                except OSError:
+                    pass
+            # 暂停留着分片，下次接着下；取消把分片一起丢掉。
+            # 只看 status 不够：合流中被取消时 status 还是 merging。
+            if self._cancel_requested or self.status == "canceled":
+                self.status = "canceled"
+                re_bin.drop_work_dir(self.id)
+            else:
+                self.status = "paused"
+            self._emit(self.status)
+            return
+
+        produced, biggest = "", -1
+        for cand in self._re_outputs(stem):
+            try:
+                sz = os.path.getsize(cand)
+            except OSError:
+                continue
+            if sz > biggest:
+                produced, biggest = cand, sz
+        if rc != 0 or not produced:
+            for half in self._re_outputs(stem):
+                try:
+                    os.remove(half)
+                except OSError:
+                    pass
+            reason = err_text or ("引擎退出码 %s" % rc)
+            if str(self.stream_engine or "auto").strip().lower() == "re":
+                self.status = "error"
+                self.error = ("流媒体下载失败（N_m3u8DL-RE）：%s" % reason)[:600]
+                self._emit("error")
+                return
+            # auto：换引擎重试一次，并把换的理由留在任务上（不是悄悄降级）。
+            re_bin.drop_work_dir(self.id)
+            self.stream_engine_used = "ffmpeg"
+            self.stream_note = "N_m3u8DL-RE 失败（%s），已改用 ffmpeg 重新下载" % reason
+            self._run_stream()
+            return
+        re_bin.drop_work_dir(self.id)
+        self._finish_stream(produced)
+
+    def _re_outputs(self, stem: str) -> List[str]:
+        """引擎在本任务目录里产出的 <stem>.<容器> 文件（可能有多个候选）。"""
+        import glob
+
+        out: List[str] = []
+        for p in glob.glob(os.path.join(self.directory, stem + ".*")):
+            try:
+                if os.path.isfile(p):
+                    out.append(p)
+            except OSError:
+                continue
+        return out
+
+    def _re_message(self, level: str, msg: str) -> None:
+        """引擎日志 → 任务状态。ERROR/WARN 的文案由 download() 带回来，
+        这里只处理合流阶段：分片百分比这时不再变化，不标出来的话用户看到的是
+        「卡在 83%」，而实际正在 ffmpeg 合流。
+        """
+        if level != "MERGE" or self._stop.is_set():
+            return
+        self.status = "merging"
+        # 引擎的剩余秒数只对下载阶段有意义；合流时长和它无关，宁可不显示
+        # 也不报一个「还剩 2 秒」然后十分钟不动。
+        self._stream_eta = None
+        self._emit("progress")
+
+    def _re_progress(self, d: dict) -> None:
+        if self._stop.is_set():
+            return
+        done = int(d.get("done") or 0)
+        total = int(d.get("total") or 0)
+        pct = float(d.get("pct") or 0.0)
+        got = int(d.get("downloaded") or 0)
+        if got:
+            # 引擎的分片级帧有时不带字节数，只能拿上一帧的值兜住。
+            self._stream_bytes = max(self._stream_bytes, got)
+        sp = d.get("speed") or 0
+        if sp:
+            self._yt_speed = float(sp)
+        eta = d.get("eta")
+        if eta is not None and not (done and total and done >= total):
+            self._stream_eta = int(eta)
+        if pct > 0 or done > 0:
+            # 不到 100 前先按 99.5 封顶由 progress 属性统一负责，这里存真值。
+            self._stream_progress = pct
+        # 合流期间引擎还在刷最后一帧：状态不能被打回 downloading，否则
+        # 「合并中」一闪一闪。
+        if self.status != "merging":
+            self.status = "downloading"
+        self._emit("progress")
+
+    def _take_stream_proc(self, proc) -> None:
+        self._stream_proc = proc
 
     def _run_stream(self) -> None:
         """把 m3u8 / mpd 整条拉下来，封装成一个文件。
@@ -1880,12 +2075,27 @@ class Download:
                 self._emit("error")
                 return
 
+        self._finish_stream(out)
+
+    def _finish_stream(self, out: str) -> None:
+        """把通道产出的临时命名文件换成用户看得懂的名字并收尾（两条通道共用）。"""
+        # 停在最后一个分片/合流中途时才取消的话，_stop 检查已经过了：这里再挡
+        # 一次，否则会把已取消（甚至已删除）的任务改回 completed，还会把用户
+        # 刚取消的文件改名成正式名。
+        if self._cancel_requested or self.status == "canceled":
+            self.status = "canceled"
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+            self._emit("canceled")
+            return
         # 换成用户看得懂的文件名
         want = str(self.filename or "").strip()
         if want.lower() in ("", "download"):
             want = os.path.basename(out)
         # 实际容器可能和期望后缀不一致（纯音频 m3u8 被旧调用方标成 .mp4、
-        # 音乐站的 .mp3 实际是 m4a…）。改名时以 ffmpeg 真正产出的容器为准，
+        # 音乐站的 .mp3 实际是 m4a…）。改名时以真正产出的容器为准，
         # 否则「能播的文件被改成打不开的后缀」。
         want = _with_ext(want, out)
         final = _unique_name(self.directory, want)
