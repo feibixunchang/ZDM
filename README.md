@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.16.8**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.16.9**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.16.8_amd64.deb` | `sudo apt install ./zdm_1.16.8_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.16.9_amd64.deb` | `sudo apt install ./zdm_1.16.9_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.16.8.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.16.9.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.16.8
+bash zdm/build_linux_app.sh ./linux-build 1.16.9
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -219,6 +219,13 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 
 `windows-native/`（C# 参考实现）同步了这些行为：批量动作回 `changed`、配置未知键报错、
 `StateError` 透成 `warning`、开机自启校验注册表写入结果。**本机没有 dotnet，C# 侧未编译验证。**
+
+**简介里显示的版本号和实际跑的版本对不上** —— v1.16.9 起，`install.sh` 把 bundle 的
+`CFBundleVersion` 与 `CFBundleShortVersionString` 一起改写（改完照旧 ad-hoc 重签）：
+装过 DMG 的机器上以前只改前者，源码同步了、`/api/state` 也报新版，但 Finder「显示简介」
+和 App 「关于」读的是后者，本机它一直停在装 DMG 那一次的 1.15.39。版本号是照着
+`download-errors.log` 排查时第一个要核对的东西，对不上就等于没有。（v1.16.8 的发布资产
+里仍是旧脚本 —— tag 不能挪 —— 所以这一笔单独补成 v1.16.9。）
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。
