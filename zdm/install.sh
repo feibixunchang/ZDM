@@ -458,11 +458,16 @@ EOF
   if [ -f "$PLIST" ] && [ -x /usr/libexec/PlistBuddy ]; then
     # A DMG-installed bundle already carries a complete Info.plist (and an
     # ad-hoc signature over it). Rewriting it from our minimal template drops
-    # keys such as CFBundleShortVersionString and invalidates the signature,
-    # so patch only the two entries this installer owns.
+    # keys the bundle needs and invalidates the signature, so patch only the
+    # entries this installer owns and re-sign at the end.
     PB=/usr/libexec/PlistBuddy
     "$PB" -c "Set :CFBundleVersion $VERSION" "$PLIST" 2>/dev/null \
       || "$PB" -c "Add :CFBundleVersion string $VERSION" "$PLIST" 2>/dev/null || true
+    # Finder 的「显示简介」和「关于」读的是 CFBundleShortVersionString，不是
+    # CFBundleVersion。以前只改后者，结果源码早就升到新版、简介里还停在装 DMG
+    # 那一次的版本号，用户照着它排查就会对不上。
+    "$PB" -c "Set :CFBundleShortVersionString $VERSION" "$PLIST" 2>/dev/null \
+      || "$PB" -c "Add :CFBundleShortVersionString string $VERSION" "$PLIST" 2>/dev/null || true
     if ! "$PB" -c "Print :CFBundleURLTypes" "$PLIST" >/dev/null 2>&1; then
       "$PB" -c "Add :CFBundleURLTypes array" "$PLIST" 2>/dev/null || true
       "$PB" -c "Add :CFBundleURLTypes:0 dict" "$PLIST" 2>/dev/null || true
