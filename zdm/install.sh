@@ -278,6 +278,12 @@ install_mac() {
   local APP="$APPS/ZDM.app"
 
   echo "==> 安装到 $APP_DIR"
+  # Quit the old window first: it is single-instance and keeps the bundle's
+  # code loaded. Leaving it running is exactly how "I installed the new version
+  # but nothing changed" happens, because it also owns the service on :9000.
+  osascript -e 'tell application "ZDM" to quit' >/dev/null 2>&1 || true
+  pkill -f "ZDM.app/Contents/MacOS/ZDM" >/dev/null 2>&1 || true
+  sleep 0.5
   mkdir -p "$APP_DIR" "$LA" "$APPS" "$HOME/.local/bin"
   rm -rf "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension"
   cp -r "$ROOT/zdm" "$ROOT/web" "$ROOT/extension" "$ROOT/zdm.py" "$ROOT/gui.py" \
@@ -335,6 +341,11 @@ EOF
 EOF
   # macOS 13+ removed `launchctl load`; use bootstrap + kickstart (fallback to load on older macOS)
   launchctl bootout "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
+  # KeepAlive restarts the job with the *new* files once bootstrapped; before
+  # that, make sure neither the data-dir copy nor the bundle-native copy (the
+  # GUI auto-starts that one) still holds :9000 with old code.
+  pkill -f "$APP_DIR/zdm.py" >/dev/null 2>&1 || true
+  pkill -f "$APP/Contents/Resources/zdm.py" >/dev/null 2>&1 || true
   if launchctl bootstrap "gui/$(id -u)" "$LA/com.zdm.service.plist" 2>/dev/null; then
     launchctl kickstart -k "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
   else
@@ -387,6 +398,25 @@ EOF
   fi
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
   [ -f "$ICNS" ] && cp "$ICNS" "$APP/Contents/Resources/zdm.icns"
+
+  # The native launcher resolves its code from <bundle>/Contents/Resources
+  # FIRST (so the app keeps working when moved) and only falls back to
+  # ZDM_APP_DIR. Preserving a DMG-installed bundle without refreshing Resources
+  # therefore left the window *and* the service it auto-starts executing the
+  # old code we had just replaced - the app reported the old API behaviour no
+  # matter how many times install.sh ran. Keep both copies in lockstep.
+  local RES="$APP/Contents/Resources"
+  rm -rf "$RES/zdm" "$RES/web" "$RES/extension"
+  cp -r "$APP_DIR/zdm" "$APP_DIR/web" "$APP_DIR/extension" \
+        "$APP_DIR/zdm.py" "$APP_DIR/gui.py" "$APP_DIR/theme.py" \
+        "$APP_DIR/zdm_native_host.py" "$RES/"
+  if [ -d "$APP_DIR/bin" ]; then
+    mkdir -p "$RES/bin"
+    cp -R "$APP_DIR/bin/." "$RES/bin/"
+    chmod +x "$RES/bin"/* 2>/dev/null || true
+  fi
+  find "$RES" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  echo "==> 已同步 $RES（Dock 启动的是包内代码，不同步会继续跑旧版）"
 
   # Locate the Python framework that backs the target interpreter so we can embed
   # it and link the launcher against it.
