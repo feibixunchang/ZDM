@@ -327,6 +327,48 @@ def fmt_clock(ts) -> str:
     return time.strftime("%m-%d %H:%M", lt)
 
 
+def _clock_seconds(text: str):
+    """'90' / '01:30' / '00:01:30' → seconds; '' → None; garbage → None."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    parts = text.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    if len(nums) == 3:
+        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    return None
+
+
+def _section_range(start: str, end: str) -> str:
+    """Two clock inputs → yt-dlp's ``*HH:MM:SS-HH:MM:SS`` section range."""
+    a = _clock_seconds(start)
+    b = _clock_seconds(end)
+    if a is None and b is None:
+        return ""
+    if a is None or b is None:
+        raise ValueError("选段需要同时填写开始时间和结束时间")
+    if b <= a:
+        raise ValueError("选段的结束时间要晚于开始时间")
+    return "*{:02d}:{:02d}:{:02d}-{:02d}:{:02d}:{:02d}".format(
+        a // 3600, a % 3600 // 60, a % 60, b // 3600, b % 3600 // 60, b % 60
+    )
+
+
+def _split_section(value: str):
+    text = str(value or "").strip().lstrip("*")
+    if "-" not in text:
+        return "", ""
+    start, _, end = text.partition("-")
+    return start, end
+
+
 # 来源徽标：只给非「手动」的任务打，颜色取自主题调色板（不在代码里写死，
 # 深浅色切换时才不会留下一块异色）。见 _render() 里的用法。
 SOURCE_BADGES = {
@@ -402,6 +444,10 @@ class Api:
     def action(self, task_id: str, action: str):
         return self._req("POST", f"tasks/{task_id}/{action}", {}, timeout=30.0)
 
+    def edit(self, task_id: str, payload: dict):
+        """Update URL/headers/proxy/schedule without discarding partial data."""
+        return self._req("POST", f"tasks/{task_id}/edit", payload, timeout=30.0)
+
     def remove(self, task_id: str, keep_files: bool = False):
         return self._req("DELETE", f"tasks/{task_id}{'?files=0' if keep_files else ''}")
 
@@ -425,6 +471,7 @@ class Api:
 
 # --------------------------------------------------------------------------- Qt
 from PyQt5.QtCore import (  # noqa: E402
+    QDateTime,
     QEvent,
     QPoint,
     QPointF,
@@ -451,6 +498,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
     QCheckBox,
     QComboBox,
+    QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -1363,6 +1411,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_tray()
         self._start_polling()
+        # 剪贴板监听（设置里默认关闭）：轮询比 dataChanged 可靠 —— macOS 上
+        # 应用在后台时，只有取得焦点的窗口才会收到剪贴板变更通知。
+        self._clip_seen = ""
+        self._clip_timer = QTimer(self)
+        self._clip_timer.setInterval(1500)
+        self._clip_timer.timeout.connect(self._check_clipboard)
+        self._clip_timer.start()
         # Silent update check a moment after the window is up (never blocks).
         QTimer.singleShot(2200, self._auto_check_update)
 
@@ -1388,6 +1443,10 @@ class MainWindow(QMainWindow):
         # 才打开详细对话框。
         btn_add.clicked.connect(self._add_clicked)
         tb.addWidget(btn_add)
+        btn_batch = QPushButton("批量导入")
+        btn_batch.setToolTip("一次粘贴多行链接，可设置优先级 / 定时开始")
+        btn_batch.clicked.connect(self._batch_import)
+        tb.addWidget(btn_batch)
 
         # Per-task pause / resume live on each row (see _render); the global
         # "pause everything / resume everything" sit next to the filter chips in
@@ -1751,6 +1810,43 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg)
         self._status_hold_until = time.time() + hold
 
+    def _check_clipboard(self):
+        """Fill the add bar when the clipboard holds a new http(s) link.
+
+        Opt-in (Settings → 剪贴板监听). It never downloads on its own: the link
+        lands in the input box and the user still presses Enter. That keeps a
+        copied URL from silently becoming a task while the user is doing
+        something else.
+        """
+        if not self.config.get("clipboard_monitor"):
+            return
+        if getattr(self, "_add_guard", False):
+            return
+        try:
+            text = QApplication.clipboard().text().strip()
+        except Exception:  # noqa: BLE001
+            return
+        if not text or len(text) > 2048:
+            return
+        if not text.lower().startswith(("http://", "https://")):
+            return
+        if text == self._clip_seen:
+            return
+        self._clip_seen = text
+        if self.url_edit.text().strip() == text:
+            return
+        self.url_edit.setText(text)
+        self._status("剪贴板里有下载链接，已填入输入框（回车即可下载）", hold=5)
+        # 窗口缩在托盘里时，状态栏没人看得见。
+        if getattr(self, "tray", None) is not None and not self.isVisible():
+            try:
+                self.tray.showMessage(
+                    "ZDM", "剪贴板里有下载链接，已复制到新建下载输入框（回车开始）。",
+                    QSystemTrayIcon.Information, 4000,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
     def _notify_failures(self):
         """任务失败时弹系统通知（窗口可能缩在托盘里，用户看不到表格里的红字）。
 
@@ -1888,6 +1984,9 @@ class MainWindow(QMainWindow):
             time_text = f"{head} 开始"
         else:
             time_text = "—"
+        start_at = _num(t.get("start_at"))
+        if status == "queued" and start_at > time.time():
+            time_text = f"定时 {fmt_clock(start_at)}"
         return pct, size_text, label, speed_text, STATUS_TEXT.get(status, status), time_text
 
     def _render(self):
@@ -2742,6 +2841,216 @@ class MainWindow(QMainWindow):
         self._run(self.api.add, payload)
         self._status(f"已加入下载：{title}（{pick}）")
 
+    def _batch_import(self):
+        """Paste many links at once; priority / scheduled start apply to all."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("批量导入")
+        form = QFormLayout(dlg)
+        text = QPlainTextEdit()
+        text.setPlaceholderText("每行一个 http(s) 链接；空行和 # 开头的行会跳过")
+        text.setMinimumSize(620, 280)
+        _zh_standard_menu(text)
+        prio = QSpinBox()
+        prio.setRange(-99, 99)
+        prio.setValue(0)
+        prio.setToolTip("数字越大越先下载；同时下载任务数在「设置」里")
+        start_cb = QCheckBox("定时开始")
+        start_edit = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
+        start_edit.setCalendarPopup(True)
+        start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        start_edit.setEnabled(False)
+        start_cb.toggled.connect(start_edit.setEnabled)
+        form.addRow("链接", text)
+        form.addRow("优先级", prio)
+        form.addRow("", start_cb)
+        form.addRow("开始时间", start_edit)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.button(QDialogButtonBox.Ok).setText("加入队列")
+        box.button(QDialogButtonBox.Cancel).setText("取消")
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        form.addRow(box)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        urls = [
+            line.strip()
+            for line in text.toPlainText().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+            and line.strip().lower().startswith(("http://", "https://"))
+        ]
+        if not urls:
+            self._status("没有找到 http(s) 链接", hold=5)
+            return
+        extra = {"priority": prio.value()}
+        if start_cb.isChecked():
+            extra["start_at"] = int(start_edit.dateTime().toSecsSinceEpoch())
+
+        def work(items, payload_extra):
+            ok = fail = 0
+            for item in items:
+                body = {"url": item}
+                body.update(payload_extra)
+                res = self.api.add(body)
+                if isinstance(res, dict) and res.get("ok"):
+                    ok += 1
+                else:
+                    fail += 1
+            return {"ok": True, "added": ok, "failed": fail}
+
+        self._background(
+            work,
+            lambda res: self._status(
+                f"批量导入：已加入 {res.get('added', 0)} 个"
+                + (f"，{res.get('failed')} 个失败" if res.get("failed") else ""),
+                hold=6,
+            ),
+            urls,
+            extra,
+        )
+
+    def _edit_task(self, t):
+        if t.get("status") in ("completed", "merging"):
+            self._status("已完成/正在合并的任务不能修改，请先重新下载", hold=5)
+            return
+        is_video = bool(t.get("yt_page")) or t.get("kind") == "video"
+        dlg = QDialog(self)
+        dlg.setWindowTitle("修改任务")
+        form = QFormLayout(dlg)
+        url = QLineEdit(t.get("yt_page") or t.get("url") or "")
+        url.setToolTip(
+            "换了下载地址（签名过期 / 镜像换站）时，可以在这里直接改。\n"
+            "已下载的分块会保留；开始时会核对文件长度，对不上才从头下。"
+        )
+        headers = t.get("headers") or {}
+
+        def hget(name):
+            for k, v in headers.items():
+                if str(k).lower() == name.lower():
+                    return str(v)
+            return ""
+
+        referer = QLineEdit(hget("Referer"))
+        referer.setPlaceholderText("留空则不发送")
+        cookie = QLineEdit(hget("Cookie"))
+        cookie.setPlaceholderText("留空则不发送")
+        ua = QLineEdit(hget("User-Agent"))
+        conns = QSpinBox()
+        conns.setRange(1, 32)
+        conns.setValue(int(t.get("connections") or 8))
+        proxy = QLineEdit(t.get("proxy") or "")
+        proxy.setPlaceholderText("留空则使用全局设置")
+        prio = QSpinBox()
+        prio.setRange(-99, 99)
+        prio.setValue(int(t.get("priority") or 0))
+        start_cb = QCheckBox("定时开始")
+        start_edit = QDateTimeEdit()
+        start_edit.setCalendarPopup(True)
+        start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        start_at = float(t.get("start_at") or 0)
+        if start_at:
+            start_edit.setDateTime(QDateTime.fromSecsSinceEpoch(int(start_at)))
+            start_cb.setChecked(True)
+        else:
+            start_edit.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+        start_edit.setEnabled(start_cb.isChecked())
+        start_cb.toggled.connect(start_edit.setEnabled)
+        # 选段只对走 yt-dlp 的视频页任务有意义；普通文件任务藏起来，
+        # 免得用户以为填了就能只下一段压缩包。
+        sec_box = QGroupBox("选段下载（只下视频的一段）")
+        sf = QHBoxLayout(sec_box)
+        sf.setContentsMargins(8, 6, 8, 6)
+        sec_start = QLineEdit()
+        sec_start.setPlaceholderText("开始，如 00:01:00")
+        sec_end = QLineEdit()
+        sec_end.setPlaceholderText("结束，如 00:05:00")
+        sf.addWidget(sec_start)
+        sf.addWidget(QLabel("→"))
+        sf.addWidget(sec_end)
+        s0, s1 = _split_section(t.get("section"))
+        sec_start.setText(s0)
+        sec_end.setText(s1)
+        sec_box.setVisible(is_video)
+        for w in (url, referer, cookie, ua, proxy, sec_start, sec_end):
+            _zh_standard_menu(w)
+        form.addRow("下载地址", url)
+        form.addRow("Referer", referer)
+        form.addRow("Cookie", cookie)
+        form.addRow("User-Agent", ua)
+        form.addRow("连接数", conns)
+        form.addRow("代理", proxy)
+        form.addRow("优先级", prio)
+        form.addRow("", start_cb)
+        form.addRow("开始时间", start_edit)
+        form.addRow(sec_box)
+        box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        box.button(QDialogButtonBox.Save).setText("保存")
+        box.button(QDialogButtonBox.Cancel).setText("取消")
+
+        def validate_and_accept():
+            if not url.text().strip():
+                QMessageBox.warning(dlg, "下载地址不能为空", "请填写要下载的链接。")
+                return
+            if is_video:
+                try:
+                    _section_range(sec_start.text(), sec_end.text())
+                except ValueError as e:
+                    QMessageBox.warning(dlg, "选段时间不对", str(e))
+                    return
+            dlg.accept()
+
+        box.accepted.connect(validate_and_accept)
+        box.rejected.connect(dlg.reject)
+        form.addRow(box)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        # 保留任务自带的其它请求头（Origin / Accept-Language 等），只改这三个
+        # —— 否则改个 Cookie 会把扩展一起带过来的防盗链头全抹掉。
+        new_headers = dict(headers)
+
+        def hset(name, value):
+            for k in list(new_headers):
+                if str(k).lower() == name.lower():
+                    del new_headers[k]
+            if value:
+                new_headers[name] = value
+
+        hset("Referer", referer.text().strip())
+        hset("Cookie", cookie.text().strip())
+        hset("User-Agent", ua.text().strip())
+        new_url = url.text().strip()
+        payload = {
+            "headers": new_headers,
+            "proxy": proxy.text().strip(),
+            "connections": conns.value(),
+            "priority": prio.value(),
+        }
+        # 地址没改就不回传：扩展推的直链任务同时带 yt_page，回传展示的
+        # 页面地址会把「被拦时退回直链」的兜底地址换掉。
+        if new_url and new_url != (t.get("yt_page") or t.get("url") or ""):
+            payload["url"] = new_url
+        # 同理：时间控件只到分钟，没动过就别回传，否则原定 10:30:45
+        # 会被提前成 10:30:00。
+        orig_start = (
+            QDateTime.fromSecsSinceEpoch(int(start_at)).toString("yyyy-MM-dd HH:mm")
+            if start_at else ""
+        )
+        shown_start = (
+            start_edit.dateTime().toString("yyyy-MM-dd HH:mm")
+            if start_cb.isChecked() else ""
+        )
+        if shown_start != orig_start:
+            payload["start_at"] = (
+                int(start_edit.dateTime().toSecsSinceEpoch())
+                if start_cb.isChecked() else ""
+            )
+        if is_video:
+            # 保存前已经校验过；空值表示「下整段」。
+            new_section = _section_range(sec_start.text(), sec_end.text())
+            if new_section != _section_range(s0, s1):
+                payload["section"] = new_section
+        self._run(self.api.edit, t["id"], payload)
+        self._status("已保存修改", hold=4)
+
     def _new_download(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("新建下载")
@@ -2777,25 +3086,68 @@ class MainWindow(QMainWindow):
             "少数站点（如 B站 视频 CDN）会检查它做防盗链，缺失就直接 403；\n"
             "普通文件下载、YouTube 视频都不需要填。"
         )
-        for w in (url, name, directory, referer):
+        prio = QSpinBox()
+        prio.setRange(-99, 99)
+        prio.setValue(0)
+        prio.setToolTip("数字越大越先下载；同时下载任务数在「设置」里")
+        schedule_cb = QCheckBox("定时开始")
+        schedule = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
+        schedule.setCalendarPopup(True)
+        schedule.setDisplayFormat("yyyy-MM-dd HH:mm")
+        schedule.setEnabled(False)
+        schedule_cb.toggled.connect(schedule.setEnabled)
+        sec_box = QGroupBox("选段下载（只下视频的一段，可选）")
+        sf = QHBoxLayout(sec_box)
+        sf.setContentsMargins(8, 6, 8, 6)
+        sec_start = QLineEdit()
+        sec_start.setPlaceholderText("开始，如 00:01:00")
+        sec_end = QLineEdit()
+        sec_end.setPlaceholderText("结束，如 00:05:00")
+        sf.addWidget(sec_start)
+        sf.addWidget(QLabel("→"))
+        sf.addWidget(sec_end)
+        for w in (url, name, directory, referer, sec_start, sec_end):
             _zh_standard_menu(w)
         form.addRow("链接 URL", url)
         form.addRow("保存为", name)
         form.addRow("连接数", conns)
         form.addRow("保存到", row)
         form.addRow("Referer（来源页，可选）", referer)
+        form.addRow("优先级", prio)
+        form.addRow("", schedule_cb)
+        form.addRow("开始时间", schedule)
+        form.addRow(sec_box)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Ok).setText("确定")
         box.button(QDialogButtonBox.Cancel).setText("取消")
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
         form.addRow(box)
-        if dlg.exec_() != QDialog.Accepted:
-            return
-        u = url.text().strip()
-        if not u:
-            return
-        extra = {"connections": conns.value()}
+        while True:
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            u = url.text().strip()
+            if not u:
+                return
+            section = ""
+            if sec_start.text().strip() or sec_end.text().strip():
+                if not (is_youtube(u) or is_video_page(u)):
+                    QMessageBox.warning(
+                        dlg, "选段不支持",
+                        "选段下载只适用于 YouTube / B站 等视频页面链接。",
+                    )
+                    continue
+                try:
+                    section = _section_range(sec_start.text(), sec_end.text())
+                except ValueError as e:
+                    QMessageBox.warning(dlg, "选段时间不对", str(e))
+                    continue
+            break
+        extra = {"connections": conns.value(), "priority": prio.value()}
+        if schedule_cb.isChecked():
+            extra["start_at"] = int(schedule.dateTime().toSecsSinceEpoch())
+        if section:
+            extra["section"] = section
         if name.text().strip():
             extra["filename"] = name.text().strip()
         if directory.text().strip():
@@ -2850,6 +3202,18 @@ class MainWindow(QMainWindow):
         )
         close_tray_cb = QCheckBox("关闭窗口时最小化到托盘（不退出程序）")
         close_tray_cb.setChecked(bool(_gui_cfg("close_to_tray", False)))
+        clip_cb = QCheckBox("监听剪贴板，自动把链接填进输入框（不会自动下载）")
+        clip_cb.setToolTip(
+            "开启后，复制到剪贴板的 http(s) 链接会出现在顶部输入框，回车才开始下载。\n"
+            "默认关闭：读取剪贴板涉及其它应用的内容，应该由用户主动选择。"
+        )
+        clip_cb.setChecked(bool(cfg.get("clipboard_monitor", False)))
+        mirror_cb = QCheckBox("GitHub / Hugging Face 链接走镜像加速（失败自动退回直连）")
+        mirror_cb.setToolTip(
+            "使用公共镜像站加速：github.com 的 Release/归档/raw 文件走 gh-proxy，\n"
+            "huggingface.co 的模型文件走 hf-mirror。镜像站不可用时会自动换回原地址。"
+        )
+        mirror_cb.setChecked(bool(cfg.get("mirror_accel", False)))
         # ---- appearance: follow the OS appearance by default ----
         appearance = QComboBox()
         for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
@@ -2872,6 +3236,8 @@ class MainWindow(QMainWindow):
         form.addRow("", autostart_cb)
         form.addRow("", auto_gui_cb)
         form.addRow("", close_tray_cb)
+        form.addRow("", clip_cb)
+        form.addRow("", mirror_cb)
         # ---- site cookies (YouTube / Bilibili need a logged-in session) ----
         cookies_box = QGroupBox("站点 Cookie（用于需要登录的视频站）")
         cookies_box.setToolTip(
@@ -2953,6 +3319,8 @@ class MainWindow(QMainWindow):
             "auto_resume": auto.isChecked(),
             "auto_show_gui": auto_gui_cb.isChecked(),
             "check_updates": update_cb.isChecked(),
+            "clipboard_monitor": clip_cb.isChecked(),
+            "mirror_accel": mirror_cb.isChecked(),
             "site_cookies": {
                 "youtube": yt_cookie.toPlainText().strip(),
                 "bilibili": bili_cookie.toPlainText().strip(),
@@ -3067,6 +3435,8 @@ class MainWindow(QMainWindow):
         if t.get("status") == "completed":
             menu.addAction("打开文件", lambda: self._open_task(t["id"], False))
             menu.addAction("在文件夹中显示", lambda: self._open_task(t["id"], True))
+        if t.get("status") not in ("completed", "merging"):
+            menu.addAction("修改任务…", lambda: self._edit_task(t))
         menu.addSeparator()
         menu.addAction("暂停", lambda: self._act(t["id"], "pause"))
         menu.addAction("继续", lambda: self._act(t["id"], "resume"))

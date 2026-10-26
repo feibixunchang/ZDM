@@ -29,6 +29,9 @@
   input,select{font:inherit;padding:7px 10px;border:1px solid var(--border);border-radius:8px;
     background:#fff;color:var(--text);outline:none}
   input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  textarea{font:inherit;padding:7px 10px;border:1px solid var(--border);border-radius:8px;
+    background:#fff;color:var(--text);outline:none;resize:vertical;width:100%}
+  textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
   main{max-width:1180px;margin:0 auto;padding:18px 20px 60px}
   .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
     box-shadow:var(--shadow)}
@@ -101,9 +104,12 @@
 <main>
   <div class="card addbar">
     <input class="url" id="url" placeholder="粘贴下载链接 http(s)://…  支持直接拖入链接">
-    <input id="fname" placeholder="文件名（可选）" style="width:180px">
-    <input id="fconn" type="number" min="1" max="32" placeholder="连接数" style="width:88px" title="连接数，留空用默认">
+    <input id="fname" placeholder="文件名（可选）" style="width:150px">
+    <input id="fconn" type="number" min="1" max="32" placeholder="连接数" style="width:80px" title="连接数，留空用默认">
+    <input id="fprio" type="number" min="-99" max="99" placeholder="优先级" style="width:78px" title="数字越大越先下载，默认 0">
+    <input id="fstart" type="datetime-local" style="width:186px" title="定时开始，留空立即开始">
     <button class="primary" id="btnGo">下载</button>
+    <button id="btnBatch" title="一次粘贴多行链接">批量…</button>
   </div>
 
   <div class="card">
@@ -151,10 +157,44 @@
     <div class="field"><label>代理 (http://host:port)</label><input id="cfgProxy" placeholder="留空则不使用代理"></div>
     <div class="field"><label>服务端口</label><input id="cfgPort" type="number" min="1024" max="65535"></div>
     <div class="field full"><label><input type="checkbox" id="cfgAuto"> 重启后自动继续未完成任务</label></div>
+    <div class="field full"><label><input type="checkbox" id="cfgMirror"> GitHub / Hugging Face 链接走镜像加速（失败自动退回直连）</label></div>
   </div>
   <div class="dlg-f">
     <button id="btnOpenDir">打开下载目录</button>
     <button class="primary" id="btnSaveCfg">保存</button>
+  </div>
+</dialog>
+
+<dialog id="dlgBatch">
+  <div class="dlg-h">批量导入</div>
+  <div class="dlg-b" style="grid-template-columns:1fr">
+    <div class="field full">
+      <label>每行一个链接（空行和 # 开头的注释会跳过）</label>
+      <textarea id="batchUrls" rows="10" placeholder="https://example.com/a.zip&#10;https://example.com/b.mp4"></textarea>
+    </div>
+  </div>
+  <div class="dlg-f">
+    <button id="btnBatchCancel">取消</button>
+    <button class="primary" id="btnBatchGo">加入队列</button>
+  </div>
+</dialog>
+
+<dialog id="dlgEdit">
+  <div class="dlg-h">修改任务 <span id="editName" style="font-weight:400;color:var(--muted)"></span></div>
+  <div class="dlg-b">
+    <div class="field full"><label>下载地址</label><input id="editUrl"></div>
+    <div class="field full"><label>Referer</label><input id="editReferer" placeholder="留空则不发送"></div>
+    <div class="field full"><label>Cookie</label><input id="editCookie" placeholder="留空则不发送"></div>
+    <div class="field"><label>User-Agent</label><input id="editUA" placeholder="默认"></div>
+    <div class="field"><label>连接数</label><input id="editConn" type="number" min="1" max="32"></div>
+    <div class="field"><label>代理</label><input id="editProxy" placeholder="留空则使用全局设置"></div>
+    <div class="field"><label>优先级</label><input id="editPrio" type="number" min="-99" max="99"></div>
+    <div class="field"><label>定时开始</label><input id="editStart" type="datetime-local"></div>
+    <div class="field full" id="editSectionRow"><label>选段（视频页任务，如 00:01:00-00:05:00；留空下整段）</label><input id="editSection"></div>
+  </div>
+  <div class="dlg-f">
+    <button id="btnEditCancel">取消</button>
+    <button class="primary" id="btnEditSave">保存</button>
   </div>
 </dialog>
 
@@ -194,6 +234,16 @@ const badge = (t) => {
   if (k) h += `<span class="knd">${k}</span>`;
   return h;
 };
+const schedText = t => {
+  if (!t.start_at || t.status !== 'queued') return '';
+  const when = new Date(num(t.start_at) * 1000);
+  if (when.getTime() <= Date.now()) return '';
+  const pad = n => String(n).padStart(2, '0');
+  const sameDay = when.toDateString() === new Date().toDateString();
+  return ' · ' + (sameDay
+    ? pad(when.getHours()) + ':' + pad(when.getMinutes())
+    : when.toLocaleString()) + ' 开始';
+};
 
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2200); }
@@ -228,12 +278,13 @@ function render(){
       <td>
         <div class="bar"><i style="width:${pct}%;background:${done?'var(--ok)':'var(--accent)'}"></i></div>
         <div class="sub">${pct.toFixed(1)}% · <span class="pill s-${esc(t.status)}">${statusText[t.status]||esc(t.status)}</span>
-        ${t.status==='downloading' ? '· 剩余 '+fmtTime(t.eta) : ''}</div>
+        ${t.status==='downloading' ? '· 剩余 '+fmtTime(t.eta) : ''}${schedText(t)}${t.priority ? ' · 优先级 '+num(t.priority) : ''}</div>
       </td>
       <td>${t.status==='downloading' ? fmtSize(num(t.speed))+'/s' : '—'}</td>
       <td><div class="actions">
         ${canPause ? `<button class="icon" data-a="pause" data-id="${esc(t.id)}" title="暂停">⏸</button>` : ''}
         ${canResume ? `<button class="icon" data-a="resume" data-id="${esc(t.id)}" title="继续">▶</button>` : ''}
+        ${!done && !merging ? `<button class="icon" data-a="edit" data-id="${esc(t.id)}" title="修改链接/请求头/代理/定时">✎</button>` : ''}
         ${!done && !merging ? `<button class="icon" data-a="restart" data-id="${esc(t.id)}" title="重新下载">⟳</button>` : ''}
         ${done ? `<button class="icon" data-a="open" data-id="${esc(t.id)}" title="打开文件">📂</button>` : ''}
         ${done ? `<button class="icon" data-a="reveal" data-id="${esc(t.id)}" title="在文件夹中显示">🗂</button>` : ''}
@@ -249,8 +300,12 @@ function render(){
 $('#rows').addEventListener('click', async e => {
   const b = e.target.closest('button[data-a]'); if (!b) return;
   const id = b.dataset.id, a = b.dataset.a;
+  const t = tasks.find(x => x.id === id);
+  if (a === 'edit'){
+    if (t) openEdit(t);
+    return;
+  }
   if (a === 'del'){
-    const t = tasks.find(x => x.id === id);
     const name = t && t.filename ? `「${t.filename}」` : '这个任务';
     // 浏览器里没有可靠的「删文件」确认层级，默认只删记录；
     // 已下载的文件保留在磁盘上，用户可以自己处理。
@@ -264,6 +319,84 @@ $('#rows').addEventListener('click', async e => {
   }
   refresh();
 });
+
+const toLocalInput = ts => {
+  if (!ts) return '';
+  const d = new Date(num(ts) * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+const fromLocalInput = v => v ? Math.floor(new Date(v).getTime() / 1000) : '';
+
+let editingId = '';
+let editingOrig = { url: '', start: '', section: '' };
+function openEdit(t){
+  editingId = t.id;
+  const h = t.headers || {};
+  const get = name => {
+    const k = Object.keys(h).find(x => x.toLowerCase() === name.toLowerCase());
+    return k ? h[k] : '';
+  };
+  $('#editName').textContent = t.filename || '';
+  $('#editUrl').value = t.yt_page || t.url || '';
+  $('#editReferer').value = get('Referer');
+  $('#editCookie').value = get('Cookie');
+  $('#editUA').value = get('User-Agent');
+  $('#editConn').value = t.connections || '';
+  $('#editProxy').value = t.proxy || '';
+  $('#editPrio').value = num(t.priority);
+  $('#editStart').value = toLocalInput(t.start_at);
+  $('#editSection').value = String(t.section || '').replace(/^\*/, '');
+  $('#editSectionRow').style.display = (t.yt_page || t.kind === 'video') ? '' : 'none';
+  // 记下原值：URL 没改就不回传。扩展推的直链任务同时带页面地址，
+  // 回传页面地址会把「被拦时退回直链」的兜底地址换掉。
+  editingOrig = {
+    url: $('#editUrl').value,
+    start: $('#editStart').value,
+    section: $('#editSection').value,
+  };
+  $('#dlgEdit').showModal();
+}
+$('#btnEditCancel').onclick = () => $('#dlgEdit').close();
+$('#btnEditSave').onclick = async () => {
+  if (!editingId) return;
+  const orig = tasks.find(x => x.id === editingId) || {};
+  // 保留任务自带的其它请求头（Origin / Accept-Language 等），只改这三个。
+  const headers = { ...(orig.headers || {}) };
+  const setH = (name, value) => {
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === name.toLowerCase()) delete headers[k];
+    }
+    if (value) headers[name] = value;
+  };
+  setH('Referer', $('#editReferer').value.trim());
+  setH('Cookie', $('#editCookie').value.trim());
+  setH('User-Agent', $('#editUA').value.trim());
+  const url = $('#editUrl').value.trim();
+  if (!url) return toast('下载地址不能为空');
+  const body = {
+    headers,
+    proxy: $('#editProxy').value.trim(),
+    priority: Number($('#editPrio').value || 0),
+  };
+  if (url !== editingOrig.url) body.url = url;
+  // 只改 headers 等字段时不要把定时时间回传：datetime-local 只到分钟，
+  // 回传会把原定 10:30:45 提前成 10:30:00。
+  if ($('#editStart').value !== editingOrig.start){
+    body.start_at = fromLocalInput($('#editStart').value);
+  }
+  const conns = $('#editConn').value;
+  if (conns) body.connections = Number(conns);
+  const section = $('#editSection').value.trim();
+  if ($('#editSectionRow').style.display !== 'none' && section !== editingOrig.section){
+    body.section = section;
+  }
+  const r = await api('POST', `tasks/${encodeURIComponent(editingId)}/edit`, body);
+  if (!r.ok) return toast(r.error || '保存失败');
+  $('#dlgEdit').close();
+  toast(r.kept ? '已更新，已下载进度保留（开始时自动核对文件）' : '已更新');
+  refresh();
+};
 
 async function refresh(){
   try{
@@ -280,15 +413,41 @@ async function addDownload(){
   const body = { url, source: 'webui' };
   if ($('#fname').value.trim()) body.filename = $('#fname').value.trim();
   if ($('#fconn').value) body.connections = Number($('#fconn').value);
+  if ($('#fprio').value) body.priority = Number($('#fprio').value);
+  const startAt = fromLocalInput($('#fstart').value);
+  if (startAt) body.start_at = startAt;
   const r = await api('POST','tasks',body);
   if (!r.ok) return toast(r.error || '添加失败');
   $('#url').value = ''; $('#fname').value = '';
-  toast('已加入队列');
+  toast(startAt ? '已加入队列，到点开始' : '已加入队列');
   refresh();
 }
 $('#btnGo').onclick = addDownload;
 $('#url').addEventListener('keydown', e => { if (e.key === 'Enter') addDownload(); });
 $('#btnAdd').onclick = () => $('#url').focus();
+
+$('#btnBatch').onclick = () => { $('#batchUrls').value = ''; $('#dlgBatch').showModal(); };
+$('#btnBatchCancel').onclick = () => $('#dlgBatch').close();
+$('#btnBatchGo').onclick = async () => {
+  const lines = $('#batchUrls').value.split(/\r?\n/)
+    .map(x => x.trim())
+    .filter(x => x && !x.startsWith('#'))
+    .filter(x => /^https?:\/\//i.test(x));
+  if (!lines.length) return toast('没有找到 http(s) 链接');
+  const prio = $('#fprio').value;
+  const startAt = fromLocalInput($('#fstart').value);
+  let ok = 0, fail = 0;
+  for (const url of lines){
+    const body = { url, source: 'webui' };
+    if (prio) body.priority = Number(prio);
+    if (startAt) body.start_at = startAt;
+    const r = await api('POST','tasks',body);
+    if (r.ok) ok++; else fail++;
+  }
+  $('#dlgBatch').close();
+  toast(`已加入 ${ok} 个任务` + (fail ? `，${fail} 个失败` : ''));
+  refresh();
+};
 
 // drag & drop a link
 document.addEventListener('dragover', e => e.preventDefault());
@@ -316,6 +475,7 @@ $('#btnSettings').onclick = () => {
   $('#cfgProxy').value = config.proxy || '';
   $('#cfgPort').value = config.port || 9000;
   $('#cfgAuto').checked = !!config.auto_resume;
+  $('#cfgMirror').checked = !!config.mirror_accel;
   $('#dlgSettings').showModal();
 };
 $('#btnSaveCfg').onclick = async () => {
@@ -328,6 +488,7 @@ $('#btnSaveCfg').onclick = async () => {
     proxy: $('#cfgProxy').value.trim(),
     port: Number($('#cfgPort').value),
     auto_resume: $('#cfgAuto').checked,
+    mirror_accel: $('#cfgMirror').checked,
   });
   if (r.ok){ toast('已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }
   else toast(r.error || '保存失败');

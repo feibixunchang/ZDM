@@ -138,6 +138,9 @@ zdm start --daemon                       # 后台启动
 zdm status                               # 服务与任务状态
 zdm add "https://example.com/a.iso" -c 16 -o ~/Downloads
 zdm add URL -H "Referer: https://site/page" -H "Cookie: k=v"
+zdm add URL -p 10                     # 优先级：数字越大越先下载
+zdm add URL --start-at 2026-10-27T02:00:00   # 定时开始（也接受 Unix 时间戳）
+zdm add "https://www.bilibili.com/video/BV..." --section 00:01:00-00:05:00
 zdm list --json
 zdm pause <id> / zdm resume <id> / zdm restart <id> / zdm remove <id>
 zdm config connections 16
@@ -151,7 +154,8 @@ zdm stop
 |---|---|---|
 | GET | `/api/state` | 配置 + 任务列表 |
 | GET | `/api/tasks` | 任务列表 |
-| POST | `/api/tasks` | `{url, filename?, dir?, connections?, headers?, proxy?, speed_limit?, paused?}` |
+| POST | `/api/tasks` | `{url, filename?, dir?, connections?, headers?, proxy?, speed_limit?, paused?, priority?, start_at?, section?}` |
+| POST | `/api/tasks/{id}/edit` | 改 `{url?, headers?, proxy?, connections?, priority?, start_at?, section?}`，已下载进度尽量保留 |
 | POST | `/api/tasks/{id}/pause\|resume\|restart\|cancel\|open` | 任务操作 |
 | DELETE | `/api/tasks/{id}?files=0` | 删除任务（`files=0` 保留文件） |
 | POST | `/api/config` | 修改配置 |
@@ -165,7 +169,8 @@ zdm stop
 ## 配置项（`~/.config/zdm/state.json`）
 
 `download_dir`、`connections`(8)、`max_active`(3)、`speed_limit`(bytes/s)、`proxy`、
-`max_retries`(5)、`timeout`(30)、`port`(9000)、`auto_resume`。
+`max_retries`(5)、`timeout`(30)、`port`(9000)、`auto_resume`、`clipboard_monitor`、
+`mirror_accel`。
 
 ## 结构
 

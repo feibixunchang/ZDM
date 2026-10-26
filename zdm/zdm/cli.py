@@ -174,6 +174,12 @@ def cmd_add(args) -> int:
         payload["filename"] = args.name
     if args.connections:
         payload["connections"] = int(args.connections)
+    if args.priority:
+        payload["priority"] = int(args.priority)
+    if args.start_at:
+        payload["start_at"] = args.start_at
+    if args.section:
+        payload["section"] = args.section
     if args.header:
         headers = {}
         for h in args.header:
@@ -492,6 +498,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", "--name", help="file name")
     s.add_argument("-c", "--connections", type=int)
     s.add_argument("-H", "--header", action="append", help="extra header, e.g. 'Referer: https://x'")
+    s.add_argument("-p", "--priority", type=int, help="queue priority, higher goes first")
+    s.add_argument("--start-at", help="scheduled start: Unix time or ISO-8601")
+    s.add_argument("--section", help="video section, e.g. 00:01:00-00:05:00")
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_add)
 

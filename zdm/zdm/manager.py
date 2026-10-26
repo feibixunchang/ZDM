@@ -61,6 +61,13 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "auto_show_gui": True,
     # Look for a newer release on startup (GitHub Releases).
     "check_updates": True,
+    # Watch the system clipboard for http(s) links and offer them in the add
+    # bar. Off by default: reading the clipboard of every app is a real
+    # privacy trade-off and should be an explicit opt-in.
+    "clipboard_monitor": False,
+    # Rewrite GitHub / Hugging Face links through a public mirror. Off by
+    # default; the original URL is kept so failures fall back to direct.
+    "mirror_accel": False,
     # Cookies for sites that need a logged-in session (YouTube / Bilibili).
     # Shape: {"youtube": "SID=...", "bilibili": "SESSDATA=..."}
     # The browser extension normally sends the page's own cookie along with
@@ -154,10 +161,24 @@ class Manager:
         audio_only: bool = False,
         yt_page: Optional[str] = None,
         yt_height: Optional[int] = None,
+        section: Optional[str] = None,
+        priority: int = 0,
+        start_at: float = 0,
     ) -> Download:
         if not url or not str(url).startswith(("http://", "https://")):
             raise ValueError("只支持 http/https 链接")
         cfg = self.config
+        original_url = ""
+        if cfg.get("mirror_accel"):
+            try:
+                from .mirror import accelerate
+
+                mirrored = accelerate(str(url))
+            except Exception:  # noqa: BLE001
+                mirrored = ""
+            if mirrored:
+                original_url = str(url)
+                url = mirrored
         if filename:
             from .http import sanitize_filename
 
@@ -180,6 +201,10 @@ class Manager:
             # 有页面地址就走 yt-dlp 通道（YouTube 直链不能分块下载）
             yt_page=(yt_page or "") if str(yt_page or "").startswith("http") else "",
             yt_height=int(yt_height or 0),
+            section=str(section or ""),
+            priority=int(priority or 0),
+            start_at=float(start_at or 0),
+            original_url=original_url,
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter
@@ -228,9 +253,73 @@ class Manager:
         if d.status not in ("paused", "error", "canceled"):
             return False
         self._wait_idle(d)
+        # 保留 start_at：定时任务被「全部暂停」后再继续，应该回到原定时间，
+        # 而不是整批挤到现在一起下。要立刻开始请编辑任务把时间清空。
         d.resume()
         self._emit("resumed", d)
         return True
+
+    def edit(
+        self,
+        task_id: str,
+        url: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        proxy: Optional[str] = None,
+        start_at: Optional[float] = None,
+        priority: Optional[int] = None,
+        section: Optional[str] = None,
+        connections: Optional[int] = None,
+    ) -> Dict[str, object]:
+        """Edit a task in place. Partial data survives when the URL still fits.
+
+        The caller is responsible for normalising headers; this only decides
+        what to do with the running state. An actively running task is paused
+        first (so no worker is mid-write), edited, then queued again — the
+        user did not ask for a pause, so it must keep running afterwards.
+        """
+        d = self.get(task_id)
+        if not d:
+            raise ValueError("任务不存在")
+        if d.status in ("completed", "merging"):
+            raise ValueError("已完成或正在合并的任务不能修改，请先重新下载")
+        if url is not None:
+            url = str(url).strip()
+            if url and not url.startswith(("http://", "https://")):
+                raise ValueError("只支持 http/https 链接")
+        was_active = d.status in ("downloading", "queued")
+        was_error = d.status == "error"
+        if was_active and not self.pause(task_id):
+            raise ValueError("任务状态已变化，请稍后再试")
+        kept = False
+        if url:
+            res = d.retarget(url=url, headers=headers, proxy=proxy, section=section)
+            kept = bool(res.get("kept"))
+            if d.yt_page:
+                # yt-dlp 通道认的是页面地址；任务列表里那一条 URL 也得跟着换，
+                # 否则用户看到的新链接和实际下载的页面是两回事。
+                d.yt_page = url
+        elif headers is not None or proxy is not None or section is not None:
+            d.retarget(headers=headers, proxy=proxy, section=section)
+        if connections:
+            d.connections = max(1, min(32, int(connections)))
+            if d.segmenter is not None:
+                d.segmenter.balance(d.connections)
+        if priority is not None:
+            d.priority = int(priority)
+        if start_at is not None:
+            d.start_at = max(0.0, float(start_at or 0))
+        # 正在跑 / 出错的任务编辑完直接回队列，别让用户再点一次「继续」。
+        # 原来是暂停的则保持暂停，除非刚设了定时开始时间。
+        if was_active or was_error or (d.status == "paused" and d.start_at):
+            d.error = None
+            d.resume()
+        self._emit("edited", d)
+        self.save_state()
+        return {
+            "kept": kept,
+            "resumed": d.status == "queued",
+            "downloaded": d.downloaded,
+        }
 
     def restart(self, task_id: str) -> bool:
         d = self.get(task_id)
@@ -360,6 +449,7 @@ class Manager:
         for tid in [k for k, v in self._workers.items() if not v.is_alive()]:
             self._workers.pop(tid, None)
         max_active = int(self.config.get("max_active") or 3)
+        now = time.time()
         with self._lock:
             running = [d for d in self.downloads.values() if d.is_active()]
             if len(running) >= max_active:
@@ -367,9 +457,13 @@ class Manager:
             candidates = [
                 d
                 for d in self.downloads.values()
-                if d.status == "queued" and d.id not in self._workers
+                if d.status == "queued"
+                and d.id not in self._workers
+                and (not d.start_at or d.start_at <= now)
             ]
-            candidates.sort(key=lambda x: x.created_at)
+            # 高优先级先下；同级按创建时间先来先下。定时只是「不早于」，
+            # 不是插队 —— 想插队请调优先级。
+            candidates.sort(key=lambda x: (-x.priority, x.created_at))
             for d in candidates[: max_active - len(running)]:
                 d.status = "downloading"
                 t = threading.Thread(target=self._run_task, args=(d,), daemon=True)
@@ -395,7 +489,14 @@ class Manager:
                         v = int(v)  # type: ignore[arg-type]
                     elif k == "timeout":
                         v = float(v)  # type: ignore[arg-type]
-                    elif k == "auto_resume":
+                    elif k in (
+                        "auto_resume",
+                        "clipboard_monitor",
+                        "mirror_accel",
+                        "intercept_browser",
+                        "auto_show_gui",
+                        "check_updates",
+                    ):
                         v = bool(v)
                     self.config[k] = v
             if "download_dir" in patch:
@@ -477,7 +578,14 @@ class Manager:
                     v = int(v)
                 elif k == "timeout":
                     v = float(v)
-                elif k == "auto_resume":
+                elif k in (
+                    "auto_resume",
+                    "clipboard_monitor",
+                    "mirror_accel",
+                    "intercept_browser",
+                    "auto_show_gui",
+                    "check_updates",
+                ):
                     v = bool(v)
             except (TypeError, ValueError):
                 continue
@@ -506,11 +614,25 @@ class Manager:
                 id=t["id"], url=t["url"],
                 directory=t.get("directory") or str(self.config["download_dir"]),
                 filename=t.get("filename"), connections=int(t.get("connections") or 1),
+                headers=t.get("headers") or {},
+                proxy=t.get("proxy"),
+                speed_limit=int(t.get("speed_limit") or 0),
                 source=t.get("source") or "manual",
                 kind=t.get("kind") or "",
+                audio_url=t.get("audio_url") or "",
                 audio_only=bool(t.get("audio_only")),
+                # 历史任务也可能是 YouTube/B站：不恢复这几个字段，「重新下载」
+                # 会拿页面 HTML 当视频存下来（页面前的任务地址是 page URL）。
+                yt_page=t.get("yt_page") or "",
+                yt_height=int(t.get("yt_height") or 0),
+                section=t.get("section") or "",
+                priority=int(t.get("priority") or 0),
+                start_at=float(t.get("start_at") or 0),
+                original_url=t.get("original_url") or "",
             )
             d.size = int(t.get("size") or 0)
+            d.final_url = t.get("final_url") or t["url"]
+            d.supports_range = bool(t.get("supports_range"))
             d.status = "completed"
             d.completed_at = t.get("completed_at") or time.time()
             d.created_at = t.get("created_at", time.time())
@@ -534,6 +656,12 @@ class Manager:
             kind=t.get("kind") or "",
             audio_url=t.get("audio_url") or "",
             audio_only=bool(t.get("audio_only")),
+            yt_page=t.get("yt_page") or "",
+            yt_height=int(t.get("yt_height") or 0),
+            section=t.get("section") or "",
+            priority=int(t.get("priority") or 0),
+            start_at=float(t.get("start_at") or 0),
+            original_url=t.get("original_url") or "",
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter

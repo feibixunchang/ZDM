@@ -24,6 +24,33 @@ from .videopage import video_page_filename, video_page_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
+
+def _parse_start_at(value) -> float:
+    """Accept epoch seconds or ISO-8601 (local time); "" / None means ASAP."""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    text = str(value).strip()
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    from datetime import datetime
+
+    try:
+        return max(0.0, datetime.fromisoformat(text).timestamp())
+    except ValueError as e:
+        raise ValueError("start_at 需要 Unix 时间戳或 ISO 时间") from e
+
+
+def _parse_section(value) -> str:
+    """Normalise a yt-dlp section range ("00:01:00-00:05:00" → "*…")."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text if text.startswith("*") else "*" + text
+
 # Pinned by the ``key`` field in extension/manifest.json, so it survives
 # reloads and updates. Only this extension may fetch the API token.
 EXTENSION_ID = "mpodbnemeeghjpllgphpemhoogddfhjg"
@@ -485,6 +512,44 @@ class Handler(BaseHTTPRequestHandler):
                 return value.strip()
         return ""
 
+    def _normalize_headers(self, body: dict, url: str, auto_cookie: bool = True) -> dict:
+        """Build request headers from the loose shapes callers send.
+
+        The extension may hand over a Netscape cookie file (YouTube does) and
+        older callers use lowercase short names. Anything not compressed here
+        reaches urllib as an invalid header value and the task fails at probe.
+        """
+        headers = body.get("headers") or {}
+        if not isinstance(headers, dict):
+            headers = {}
+        headers = dict(headers)
+        for src, dst in (
+            ("referer", "Referer"),
+            ("referrer", "Referer"),
+            ("cookie", "Cookie"),
+            ("useragent", "User-Agent"),
+            ("user_agent", "User-Agent"),
+        ):
+            if body.get(src):
+                headers[dst] = body[src]
+        # 新增任务时用设置里的站点 Cookie 兜底；编辑任务时不能用 ——
+        # 用户手动清空 Cookie 的意思就是不要它了。
+        if auto_cookie and not headers.get("Cookie"):
+            auto_cookie_value = self._site_cookie_for(url)
+            if auto_cookie_value:
+                headers["Cookie"] = auto_cookie_value
+                if not headers.get("Referer"):
+                    headers["Referer"] = _site_referer(url)
+        if headers.get("Cookie"):
+            from .core import _cookie_header
+
+            try:
+                host = (urlparse(url).hostname or "").lower()
+            except Exception:  # noqa: BLE001
+                host = ""
+            headers["Cookie"] = _cookie_header(headers["Cookie"], host)
+        return headers
+
     def _api_post(self, parts):
         body = self._body()
 
@@ -492,37 +557,7 @@ class Handler(BaseHTTPRequestHandler):
             url = (body.get("url") or "").strip()
             if not url:
                 return self._error(400, "缺少下载链接")
-            headers = body.get("headers") or {}
-            for src, dst in (
-                ("referer", "Referer"),
-                ("referrer", "Referer"),
-                ("cookie", "Cookie"),
-                ("useragent", "User-Agent"),
-                ("user_agent", "User-Agent"),
-            ):
-                if body.get(src):
-                    headers[dst] = body[src]
-            # Fall back to the cookie configured in Settings when the caller
-            # did not send one. Never override an explicit cookie.
-            if not headers.get("Cookie"):
-                auto_cookie = self._site_cookie_for(url)
-                if auto_cookie:
-                    headers["Cookie"] = auto_cookie
-                    # A first-party session is only accepted with the matching
-                    # Referer; without it the server answers 403.
-                    if not headers.get("Referer"):
-                        headers["Referer"] = _site_referer(url)
-            # 扩展传过来的可能是 Netscape 文件格式的完整 cookie 导出
-            # （YouTube 就是这样）。原样塞进请求头会被 urllib 以
-            # "Invalid header value" 拒掉 —— 表现为任务「probe failed」，
-            # 一个字节都下不来。统一压成 header 形式。
-            if headers.get("Cookie"):
-                from .core import _cookie_header
-                try:
-                    _host = (urlparse(url).hostname or "").lower()
-                except Exception:  # noqa: BLE001
-                    _host = ""
-                headers["Cookie"] = _cookie_header(headers["Cookie"], _host)
+            headers = self._normalize_headers(body, url)
             # 视频**页面**链接（YouTube/B站…）不能当普通文件下：那样存下来的
             # 是一个叫 watch 的 HTML。桌面端、网页版、CLI 都在这里汇合，所以
             # 在服务端统一转成页面任务交给 yt-dlp；扩展推的媒体直链不会命中。
@@ -598,6 +633,9 @@ class Handler(BaseHTTPRequestHandler):
                     # YouTube：给了页面地址就走 yt-dlp 下载通道
                     yt_page=body.get("yt_page") or body.get("page_url"),
                     yt_height=body.get("yt_height") or body.get("height"),
+                    section=_parse_section(body.get("section")),
+                    priority=int(body.get("priority") or 0),
+                    start_at=_parse_start_at(body.get("start_at")),
                 )
             except (ValueError, TypeError) as e:
                 # TypeError as well as ValueError: the body is untrusted JSON,
@@ -621,6 +659,50 @@ class Handler(BaseHTTPRequestHandler):
             d = self.manager.get(tid)
             if not d:
                 return self._error(404, "task not found")
+            if action == "edit":
+                try:
+                    eu = (body.get("url") or "").strip()
+                    header_keys = (
+                        "headers", "referer", "referrer", "cookie",
+                        "useragent", "user_agent",
+                    )
+                    hdrs = None
+                    if any(k in body for k in header_keys):
+                        hdrs = self._normalize_headers(
+                            body, eu or d.url, auto_cookie=False
+                        )
+                    proxy = body.get("proxy") if "proxy" in body else None
+                    start_at = (
+                        _parse_start_at(body.get("start_at"))
+                        if "start_at" in body
+                        else None
+                    )
+                    priority = (
+                        int(body.get("priority"))
+                        if body.get("priority") not in (None, "")
+                        else None
+                    )
+                    section = (
+                        _parse_section(body.get("section"))
+                        if "section" in body
+                        else None
+                    )
+                    conns = body.get("connections")
+                    info = self.manager.edit(
+                        tid,
+                        url=eu or None,
+                        headers=hdrs,
+                        proxy=proxy,
+                        start_at=start_at,
+                        priority=priority,
+                        section=section,
+                        connections=(
+                            int(conns) if conns not in (None, "") else None
+                        ),
+                    )
+                except (ValueError, TypeError) as e:
+                    return self._error(400, str(e))
+                return self._json({"ok": True, **info, "task": d.to_dict()})
             if action == "pause":
                 self.manager.pause(tid)
             elif action == "resume":

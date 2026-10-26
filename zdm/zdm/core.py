@@ -639,6 +639,10 @@ class Download:
         audio_only: bool = False,
         yt_page: str = "",
         yt_height: int = 0,
+        section: str = "",
+        priority: int = 0,
+        start_at: float = 0.0,
+        original_url: str = "",
     ):
         self.id = id
         self.url = url
@@ -666,6 +670,16 @@ class Download:
         # 下载（原因见 _run_ytdlp）。普通下载这两个字段都是空。
         self.yt_page = yt_page or ""
         self.yt_height = int(yt_height or 0)
+        # yt-dlp 的选段参数（"*00:01:00-00:05:00"）。只对 yt_page 任务生效。
+        self.section = str(section or "")
+        # 队列顺序：数字大的先下；start_at 是 Unix 时间戳，到点前调度器不碰它。
+        self.priority = int(priority or 0)
+        self.start_at = float(start_at or 0)
+        # 开了镜像加速时这里存用户原本的地址；镜像失败要能退回直连。
+        self.original_url = original_url or ""
+        # 编辑过地址、但还没跟分块数据核对过（见 _prepare）。
+        self._retarget_pending = False
+        self._mirror_fallback_used = False
         self._yt_bytes = 0        # 当前这一路流已下载的字节
         self._yt_completed = 0    # 之前几路流（视频轨）已完成的字节
         self._yt_speed = 0.0
@@ -789,6 +803,10 @@ class Download:
             "audio_only": self.audio_only,
             "yt_page": self.yt_page,
             "yt_height": self.yt_height,
+            "section": self.section,
+            "priority": self.priority,
+            "start_at": self.start_at,
+            "original_url": self.original_url,
             "chunks": seg,
         }
 
@@ -810,6 +828,11 @@ class Download:
             "audio_only": self.audio_only,
             "yt_page": self.yt_page,
             "yt_height": self.yt_height,
+            "section": self.section,
+            "priority": self.priority,
+            "start_at": self.start_at,
+            "original_url": self.original_url,
+            "retarget": self._retarget_pending,
             "chunks": self.segmenter.snapshot() if self.segmenter else [],
         }
 
@@ -832,6 +855,11 @@ class Download:
         self.audio_only = bool(data.get("audio_only") or self.audio_only)
         self.yt_page = str(data.get("yt_page") or self.yt_page or "")
         self.yt_height = int(data.get("yt_height") or self.yt_height or 0)
+        self.section = str(data.get("section") or self.section or "")
+        self.priority = int(data.get("priority") or self.priority or 0)
+        self.start_at = float(data.get("start_at") or self.start_at or 0)
+        self.original_url = str(data.get("original_url") or self.original_url or "")
+        self._retarget_pending = bool(data.get("retarget"))
         self.limiter.set_rate(self.speed_limit)
         # Tasks persisted before 1.12.0 have no source/kind; keep "manual".
         self.source = normalize_source(data.get("source"), self.source)
@@ -913,6 +941,47 @@ class Download:
     def set_event_callback(self, cb: Optional[Callable[[str, "Download"], None]]) -> None:
         self._on_event = cb
 
+    def retarget(
+        self,
+        url: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        proxy: Optional[str] = None,
+        section: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """Change the address/headers of a stopped task, keeping its partial data.
+
+        Only ``.part`` + chunk metadata can survive an address change, because
+        the offsets must still describe the same bytes. So the chunks are kept
+        and flagged; the worker verifies the new URL's total size in
+        ``_prepare`` before reusing them, and starts over when it differs.
+        Streaming (HLS/DASH) and yt-dlp tasks have no resumable chunk map and
+        simply re-run against the new address.
+        """
+        changed = bool(url) and str(url) != self.url
+        if url:
+            self.url = str(url)
+            self.final_url = str(url)
+        if headers is not None:
+            self.headers = dict(headers)
+        if proxy is not None:
+            self.proxy = proxy or None
+        if section is not None:
+            self.section = str(section or "")
+        kept = False
+        if changed:
+            # 用户手动换的地址就是最终地址；旧的镜像原始链接不再适用，
+            # 留着反而会在失败时把任务带回上一个文件。
+            self.original_url = ""
+            self._mirror_fallback_used = False
+            if self.segmenter is not None and self.segmenter.downloaded() > 0:
+                self._retarget_pending = True
+                kept = True
+        if self.segmenter is not None:
+            # 立即落盘：下次 start 时 _prepare 读的就是这份 meta。里面同时
+            # 带着新地址、新请求头和 retarget 标记。
+            self._save_meta()
+        return {"kept": kept, "changed": changed}
+
     def _emit(self, event: str) -> None:
         if event == "error":
             _log_download_error(self)
@@ -932,12 +1001,58 @@ class Download:
             except Exception:
                 pass
 
+        def probe(u: str):
+            return transport_mod.probe_with_fallback(
+                u, self._http_headers(), self.timeout, self.proxy
+            )
+
+        def probe_or_original(u: str):
+            """镜像地址失败时退回用户原本的地址再问一次。"""
+            try:
+                return probe(u)
+            except Exception:
+                if self.original_url and self.original_url != u:
+                    self._mirror_fallback_used = True
+                    self.url = self.final_url = self.original_url
+                    return probe(self.original_url)
+                raise
+
+        if self._retarget_pending:
+            # 地址被改过：旧分块的偏移只有在新地址仍是同一个文件时才有效。
+            # 用一次轻量 probe 核对总长度；对不上就按新文件重下，而不是把
+            # 旧字节拼进新文件（会得到一个体积对但内容坏掉的成品）。
+            try:
+                t, info = probe_or_original(self.final_url or self.url)
+            except Exception as e:
+                raise ConnectionError(f"probe failed: {e}") from e
+            total = int(info["size"] or 0)
+            supports = bool(info["supports_range"]) and total > 0
+            same_file = (
+                total > 0
+                and total == self.size
+                and supports
+                and self.supports_range
+            )
+            self.transport_name = t.name
+            self._transport = t
+            self.final_url = info["final_url"]
+            self._retarget_pending = False
+            if not same_file:
+                self.size = total
+                self.supports_range = supports
+                self.segmenter = Segmenter(total) if supports else None
+                self.retries = 0
+                try:
+                    os.remove(self.meta_path)
+                except OSError:
+                    pass
+            else:
+                self._save_meta()
+
         if self.segmenter is None:
             url = self.final_url or self.url
             try:
-                t, info = transport_mod.probe_with_fallback(
-                    url, self._http_headers(), self.timeout, self.proxy
-                )
+                t, info = probe_or_original(url)
             except Exception as e:
                 raise ConnectionError(f"probe failed: {e}") from e
 
@@ -1104,6 +1219,26 @@ class Download:
                             else self._run_single()
                         )
                         continue
+                    # 镜像加速失败（镜像站限流/挂掉）时退回用户原本的地址；
+                    # 两边是同一个文件，分块偏移可以照用，不用从头下。
+                    if (
+                        self.original_url
+                        and self.original_url != self.url
+                        and not self._mirror_fallback_used
+                    ):
+                        self._mirror_fallback_used = True
+                        self.url = self.final_url = self.original_url
+                        self.retries = 0
+                        self.error = None
+                        for c in self.segmenter.chunks:
+                            c.attempts = 0
+                        self._threads = []
+                        (
+                            self._run_segmented()
+                            if self.supports_range and self.size
+                            else self._run_single()
+                        )
+                        continue
                     self.status = "error"
                     self.error = self.error or "download stalled"
                     self._close_fd()
@@ -1122,6 +1257,10 @@ class Download:
         （googlevideo 只认从头的连续段，并发分片必 403，见 needs_sequential），
         音轨用 format 自带的 audio_url 在 _finish 里 ffmpeg 合流。
         """
+        if self.section:
+            # 直链兜底会把整条视频下下来，选段任务不能走这条路 ——
+            # 否则用户要 5 分钟，拿到的却是两小时的完整视频。
+            return False
         try:
             from . import yt_resolve
 
@@ -1749,6 +1888,12 @@ class Download:
             return
 
         stem = "zdm-" + self.id
+        # 选段任务在临时名里带区间：同一个视频下两段时不会互相覆盖，
+        # 也方便从文件名看出是哪一段。Windows 不允许 ':' 进文件名。
+        out_stem = stem
+        if self.section:
+            tag = self.section.lstrip("*").replace(":", ".").replace("/", "_")
+            out_stem = f"{stem} [{tag}]"
         cookie = (self.headers or {}).get("Cookie") or ""
         cookie_path = None
         if cookie:
@@ -1767,7 +1912,7 @@ class Download:
 
         common = dict(
             fmt=yt_resolve.format_selector(self.yt_height, self.audio_only),
-            outtmpl=os.path.join(self.directory, stem + ".%(ext)s"),
+            outtmpl=os.path.join(self.directory, out_stem + ".%(ext)s"),
             ffmpeg=_find_ffmpeg(),
             cookie_path=cookie_path,
             proxy=self.proxy,
@@ -1805,6 +1950,10 @@ class Download:
                     if self._stop.is_set():
                         break
                 extras = list(extra_args or [])
+                if self.section:
+                    # 例如 *00:01:00-00:05:00。yt-dlp 只取落在区间内的分片，
+                    # 再用 ffmpeg 精准切掉两端。
+                    extras += ["--download-sections", self.section]
                 if self.audio_only:
                     # 选择器已限定音频；-x 再兜一层：站点只剩合轨格式时
                     # 也能从里面抽出音频，而不是交出带画面的「m4a」。
@@ -1837,18 +1986,18 @@ class Download:
                     pass
 
         if self.status == "canceled":
-            self._yt_cleanup(stem)
+            self._yt_cleanup(out_stem)
             self._emit("canceled")
             return
         if self._stop.is_set():
-            self._yt_cleanup(stem, keep_partial=True)
+            self._yt_cleanup(out_stem, keep_partial=True)
             self.status = "paused"
             self._emit("paused")
             return
 
-        path = self._yt_output(stem)
+        path = self._yt_output(out_stem)
         if (rc != 0 or err) or not path:
-            self._yt_cleanup(stem)
+            self._yt_cleanup(out_stem)
             # 最后兜底：yt-dlp 的下载通道被 SABR 拦死（重试链全灭）时，
             # 解析通道往往还拿得到可用直链 —— 原地切换成内置引擎顺序
             # 下载直链（嗅探推送就是这条路，全平台实测可用）。
@@ -1884,6 +2033,11 @@ class Download:
         # .m4a/.mp3，旧兜底名却是 .mp4；把 m4a 改名成 mp4 后部分播放器
         # 打不开。以实际文件为准，保留标题。
         want = _with_ext(want, path)
+        if self.section:
+            # 同一视频下多段时，成品名要能区分，而不是靠系统的「(1)」。
+            base, ext = os.path.splitext(want)
+            tag = self.section.lstrip("*").replace(":", ".").replace("/", "_")
+            want = f"{base} [{tag}]{ext}"
         final = _unique_name(self.directory, want)
         target = os.path.join(self.directory, final)
         moved = None
@@ -1920,8 +2074,10 @@ class Download:
         """找出 yt-dlp 真正产出的那个文件（合并后是 stem.mp4）。"""
         import glob
 
+        # 选段任务的临时名带区间 "[0.00-0.03]"，glob 会把方括号当字符集：
+        # 不转义就永远匹配不到真实文件，任务下完了却报「没有产出文件」。
         cands = []
-        for p in glob.glob(os.path.join(self.directory, stem + ".*")):
+        for p in glob.glob(os.path.join(self.directory, glob.escape(stem) + ".*")):
             if not os.path.isfile(p):
                 continue
             if p.endswith((".part", ".ytdl", ".temp", ".tmp")):
@@ -1936,7 +2092,7 @@ class Download:
         """清掉 yt-dlp 的临时文件。暂停时保留 .part，方便续传。"""
         import glob
 
-        for p in glob.glob(os.path.join(self.directory, stem + ".*")):
+        for p in glob.glob(os.path.join(self.directory, glob.escape(stem) + ".*")):
             base = os.path.basename(p)
             if keep_partial and (base.endswith(".part") or base.endswith(".ytdl")):
                 continue
