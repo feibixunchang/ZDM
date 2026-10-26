@@ -339,20 +339,9 @@ EOF
 </dict>
 </plist>
 EOF
-  # macOS 13+ removed `launchctl load`; use bootstrap + kickstart (fallback to load on older macOS)
-  launchctl bootout "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
-  # KeepAlive restarts the job with the *new* files once bootstrapped; before
-  # that, make sure neither the data-dir copy nor the bundle-native copy (the
-  # GUI auto-starts that one) still holds :9000 with old code.
-  pkill -f "$APP_DIR/zdm.py" >/dev/null 2>&1 || true
-  pkill -f "$APP/Contents/Resources/zdm.py" >/dev/null 2>&1 || true
-  if launchctl bootstrap "gui/$(id -u)" "$LA/com.zdm.service.plist" 2>/dev/null; then
-    launchctl kickstart -k "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
-  else
-    launchctl unload -w "$LA/com.zdm.service.plist" 2>/dev/null || true
-    launchctl load -w "$LA/com.zdm.service.plist" 2>/dev/null || true
-  fi
-  echo "==> 已注册 LaunchAgent（登录自启 + 崩溃重启）"
+  # launchd 的注册/重启放到本函数末尾：那时 $APP 才解析成 /Applications，
+  # bundle 内的代码也已同步，pkill 才能同时命中「数据目录服务」和
+  # 「GUI 自动拉起的 bundle 服务」这两种进程。
 
   # icon
   local ICNS="$APP_DIR/zdm.icns"
@@ -513,6 +502,21 @@ EOF
   codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
   # clear the quarantine flag so a double click opens it right away
   xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+
+  # Bundle is final now: (re)start launchd and evict any service the old GUI
+  # spawned. Order matters - bootout first (KeepAlive would otherwise respawn
+  # the old job), then kill leftovers, then bootstrap the new one.
+  launchctl bootout "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
+  pkill -f "$APP_DIR/zdm.py" >/dev/null 2>&1 || true
+  pkill -f "$RES/zdm.py" >/dev/null 2>&1 || true
+  sleep 0.3
+  if launchctl bootstrap "gui/$(id -u)" "$LA/com.zdm.service.plist" 2>/dev/null; then
+    launchctl kickstart -k "gui/$(id -u)/com.zdm.service" 2>/dev/null || true
+  else
+    launchctl unload -w "$LA/com.zdm.service.plist" 2>/dev/null || true
+    launchctl load -w "$LA/com.zdm.service.plist" 2>/dev/null || true
+  fi
+  echo "==> 已注册 LaunchAgent（登录自启 + 崩溃重启）"
   echo "==> 已生成 $APP"
   install_pyqt "$PY"
   EXT_DIR="$APP_DIR/extension"
