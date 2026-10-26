@@ -319,12 +319,12 @@ public sealed class ApiServer : IDisposable
         app.MapDelete("/api/tasks/{id}", async Task<IResult> (HttpContext ctx, string id) =>
         {
             // ?files=0 keeps the partial data while dropping the task.
-            var keepFiles = !(ctx.Request.Query.ContainsKey("files")
-                              && ctx.Request.Query["files"] == "0");
+            var removeFiles = !(ctx.Request.Query.ContainsKey("files")
+                                && ctx.Request.Query["files"] == "0");
             // Async, not GetAwaiter().GetResult(): RemoveAsync waits for the
             // workers to wind down (up to 12s), and blocking a Kestrel thread
             // per delete is how the thread pool gets exhausted.
-            var ok = await manager.RemoveAsync(id, keepFiles);
+            var ok = await manager.RemoveAsync(id, removeFiles);
             return Results.Json(new JsonObject { ["ok"] = ok });
         });
 

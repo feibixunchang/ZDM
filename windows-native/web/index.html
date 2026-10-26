@@ -195,6 +195,7 @@ function render(){
     const canPause = ['downloading','queued'].includes(t.status);
     const canResume = ['paused','error','canceled'].includes(t.status);
     const done = t.status==='completed';
+    const merging = t.status==='merging';
     html += `<tr>
       <td>
         <div class="fname">${esc(t.filename)}</div>
@@ -203,16 +204,16 @@ function render(){
       <td>${fmtSize(t.downloaded)} / ${t.size ? fmtSize(t.size) : '未知'}</td>
       <td>
         <div class="bar"><i style="width:${pct}%;background:${done?'var(--ok)':'var(--accent)'}"></i></div>
-        <div class="sub">${pct.toFixed(1)}% · <span class="pill s-${t.status}">${statusText[t.status]||t.status}</span>
+        <div class="sub">${pct.toFixed(1)}% · <span class="pill s-${esc(t.status)}">${statusText[t.status]||esc(t.status)}</span>
         ${t.status==='downloading' ? '· 剩余 '+fmtTime(t.eta) : ''}</div>
       </td>
       <td>${t.status==='downloading' ? fmtSize(t.speed)+'/s' : '—'}</td>
       <td><div class="actions">
-        ${canPause ? `<button class="icon" data-a="pause" data-id="${t.id}" title="暂停">⏸</button>` : ''}
-        ${canResume ? `<button class="icon" data-a="resume" data-id="${t.id}" title="继续">▶</button>` : ''}
-        ${!done ? `<button class="icon" data-a="restart" data-id="${t.id}" title="重新下载">⟳</button>` : ''}
-        ${done ? `<button class="icon" data-a="open" data-id="${t.id}" title="打开文件位置">📂</button>` : ''}
-        <button class="icon" data-a="del" data-id="${t.id}" title="删除">✕</button>
+        ${canPause ? `<button class="icon" data-a="pause" data-id="${esc(t.id)}" title="暂停">⏸</button>` : ''}
+        ${canResume ? `<button class="icon" data-a="resume" data-id="${esc(t.id)}" title="继续">▶</button>` : ''}
+        ${!done && !merging ? `<button class="icon" data-a="restart" data-id="${esc(t.id)}" title="重新下载">⟳</button>` : ''}
+        ${done ? `<button class="icon" data-a="open" data-id="${esc(t.id)}" title="打开文件位置">📂</button>` : ''}
+        <button class="icon" data-a="del" data-id="${esc(t.id)}" title="删除任务（保留文件）">✕</button>
       </div></td>
     </tr>`;
   }
@@ -225,10 +226,16 @@ $('#rows').addEventListener('click', async e => {
   const b = e.target.closest('button[data-a]'); if (!b) return;
   const id = b.dataset.id, a = b.dataset.a;
   if (a === 'del'){
-    const keep = await api('DELETE', 'tasks/' + id);
+    const t = tasks.find(x => x.id === id);
+    const name = t && t.filename ? `「${t.filename}」` : '这个任务';
+    // 浏览器里没有可靠的「删文件」确认层级，默认只删记录；
+    // 已下载的文件保留在磁盘上，用户可以自己处理。
+    if (!confirm(`删除${name}？\n\n只删除任务记录，已下载的文件会保留。`)) return;
+    const r = await api('DELETE', `tasks/${encodeURIComponent(id)}?files=0`);
+    if (!r.ok) { toast(r.error || '删除失败'); return; }
     tasks = tasks.filter(t => t.id !== id);
   } else {
-    const r = await api('POST', `tasks/${id}/${a}`, {});
+    const r = await api('POST', `tasks/${encodeURIComponent(id)}/${a}`, {});
     if (!r.ok) toast(r.error || '操作失败');
   }
   refresh();

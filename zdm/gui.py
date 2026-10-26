@@ -1052,6 +1052,14 @@ class ProgressCell(QWidget):
         self.setMinimumHeight(34)
         self.update()
 
+    def set_values(self, pct: float, text: str, color: str = ""):
+        """Update an existing row in place (the 0.8s poll must not rebuild it)."""
+        self.pct = max(0.0, min(100.0, pct))
+        self.text = text
+        if color:
+            self.color = QColor(color)
+        self.update()
+
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -1326,6 +1334,10 @@ class MainWindow(QMainWindow):
         self.tasks = []
         self.config = {}
         self._rows = {}
+        self._row_ids = []
+        # 0.8s 轮询只更新单元格，不在每次 tick 重建整张表。只有「行集合 /
+        # 行顺序 / 状态 / 文件名」变了才全量重建（见 _render）。
+        self._render_sig = None
         self._workers = []
         self.autostart_action = None
         self.filter = "all"
@@ -1765,6 +1777,7 @@ class MainWindow(QMainWindow):
         self.filter = key
         for k, b in self.filter_btns.items():
             b.setChecked(k == key)
+        self._render_sig = None
         self._render()
 
     def _visible(self):
@@ -1803,6 +1816,7 @@ class MainWindow(QMainWindow):
         # Row buttons draw their glyph pixmaps from the palette, and _render()
         # rebuilds them (plus the global pause/resume glyphs) with the new
         # colours.
+        self._render_sig = None
         self._render()
 
     def _release_row_widgets(self):
@@ -1825,11 +1839,68 @@ class MainWindow(QMainWindow):
                     w.hide()
                     w.deleteLater()
 
+    def _row_values(self, t: dict, status: str):
+        """Everything that changes while a task is running, for one table row."""
+        pct = min(100.0, _num(t.get("progress")))
+        # 已完成就只报最终文件大小：合流后文件比视频轨大，
+        # 「54.5 MB / 57.2 MB」这种写法会让人以为没下完。
+        if status == "completed" and t.get("size"):
+            size_text = fmt_size(t.get("size"))
+        elif t.get("size"):
+            size_text = fmt_pair(t.get("downloaded"), t.get("size"))
+        else:
+            size_text = f"{fmt_size(t.get('downloaded'))} / 未知"
+
+        label = f"{pct:.1f}%"
+        if status == "downloading" and t.get("eta"):
+            # 「剩余」缩成「剩」：进度列窄了，两个字的差别正好是一行放不放得下。
+            label += f" · 剩 {fmt_eta(t['eta'])}"
+        elif status == "error" and t.get("error"):
+            label = str(t["error"])[:46]
+
+        speed_text = (
+            f"{fmt_size(t.get('speed'))}/s" if status == "downloading" else "—"
+        )
+        # 时间列：几点开始下载、预计/实际几点完成。
+        #   进行中  14:03 → 预计 14:25
+        #   合并中  14:03 → 合并中…
+        #   已完成  14:03 → 14:25
+        #   失败/暂停/取消  14:03 开始
+        # 用箭头而不是「开始 … · … 完成」：后者 218px 宽，这一列只有 158px。
+        started = t.get("started_at") or t.get("created_at") or 0
+        head = fmt_clock(started) if started else ""
+        tail = ""
+        if status == "downloading":
+            if t.get("eta"):
+                tail = f"预计 {fmt_clock(time.time() + _num(t['eta']))}"
+        elif status == "merging":
+            tail = "合并中…"
+        elif status == "completed" and t.get("completed_at"):
+            tail = fmt_clock(t["completed_at"])
+        if head and tail:
+            time_text = f"{head} → {tail}"
+        elif head:
+            time_text = f"{head} 开始"
+        else:
+            time_text = "—"
+        return pct, size_text, label, speed_text, STATUS_TEXT.get(status, status), time_text
+
     def _render(self):
         items = self._visible()
         # created_at may be missing on a task restored from an old state file;
         # a KeyError in the sort key would abort the whole render.
         items.sort(key=lambda t: t.get("created_at") or 0, reverse=True)
+        # Rebuilding the table (and every cell widget) twice a second used to
+        # drop hover/tooltips and burn CPU. The poll only needs to repaint the
+        # values that change; structure changes still take the full path.
+        sig = tuple(
+            (t.get("id"), t.get("status"), t.get("filename"), t.get("source"))
+            for t in items
+        )
+        if sig == self._render_sig and self.table.rowCount() == len(items):
+            self._update_rows(items)
+            return
+        self._render_sig = sig
         self._sync_bulk_buttons()
         self._release_row_widgets()
         self.table.setRowCount(len(items))
@@ -1841,17 +1912,16 @@ class MainWindow(QMainWindow):
             "merging": pal.status_merging,
         }
         for row, t in enumerate(items):
-            pct = min(100.0, _num(t.get("progress")))
             status = t.get("status") or "queued"
             color = colors.get(status, pal.status_downloading)
+            pct, size_text, label, speed_text, st_text, time_text = self._row_values(
+                t, status
+            )
 
             # Where the task came from, as a coloured tag after the name. Only
             # the non-default sources get one: tagging every "manual" row would
             # be noise, and the point is to spot the extension/sniffer ones.
             #
-            # The name cell holds a QLabel rather than a QTableWidgetItem
-            # because only the label renders the <span> markup that colours
-            # the tag; a table item would show the raw tags as text.
             # The name cell holds a widget rather than a QTableWidgetItem so the
             # filename can be elided with "…" while the source badge stays
             # visible, and the tooltip can still show the full name.
@@ -1861,61 +1931,22 @@ class MainWindow(QMainWindow):
             # client (or a half-written state file) may be missing "speed" or
             # "downloaded", and a KeyError here would take down the whole
             # table render instead of just that one row.
-            size_item = QTableWidgetItem(
-                # 已完成就只报最终文件大小：合流后文件比视频轨大，
-                # 「54.5 MB / 57.2 MB」这种写法会让人以为没下完。
-                fmt_size(t.get("size"))
-                if status == "completed" and t.get("size")
-                else fmt_pair(t.get("downloaded"), t.get("size"))
-                if t.get("size")
-                else f"{fmt_size(t.get('downloaded'))} / 未知"
-            )
+            size_item = QTableWidgetItem(size_text)
             size_item.setForeground(QColor(pal.text_muted))
             size_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.table.setItem(row, 1, size_item)
 
-            label = f"{pct:.1f}%"
-            if status == "downloading" and t.get("eta"):
-                # 「剩余」缩成「剩」：进度列窄了，两个字的差别正好是一行放不放得下。
-                label += f" · 剩 {fmt_eta(t['eta'])}"
-            elif status == "error" and t.get("error"):
-                label = str(t["error"])[:46]
             self.table.setCellWidget(row, 2, ProgressCell(pct, label, color))
 
-            speed_text = (
-                f"{fmt_size(t.get('speed'))}/s" if status == "downloading" else "—"
-            )
             speed_item = QTableWidgetItem(speed_text)
             speed_item.setForeground(QColor(pal.text_strong))
             self.table.setItem(row, 3, speed_item)
 
-            st_item = QTableWidgetItem(STATUS_TEXT.get(status, status))
+            st_item = QTableWidgetItem(st_text)
             st_item.setForeground(QColor(color))
             st_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.table.setItem(row, 4, st_item)
 
-            # 时间列：几点开始下载、预计/实际几点完成。
-            #   进行中  14:03 → 预计 14:25
-            #   合并中  14:03 → 合并中…
-            #   已完成  14:03 → 14:25
-            #   失败/暂停/取消  14:03 开始
-            # 用箭头而不是「开始 … · … 完成」：后者 218px 宽，这一列只有 158px。
-            started = t.get("started_at") or t.get("created_at") or 0
-            head = fmt_clock(started) if started else ""
-            tail = ""
-            if status == "downloading":
-                if t.get("eta"):
-                    tail = f"预计 {fmt_clock(time.time() + _num(t['eta']))}"
-            elif status == "merging":
-                tail = "合并中…"
-            elif status == "completed" and t.get("completed_at"):
-                tail = fmt_clock(t["completed_at"])
-            if head and tail:
-                time_text = f"{head} → {tail}"
-            elif head:
-                time_text = f"{head} 开始"
-            else:
-                time_text = "—"
             time_item = QTableWidgetItem(time_text)
             time_item.setForeground(QColor(pal.text_muted))
             time_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1942,7 +1973,10 @@ class MainWindow(QMainWindow):
                 self._btn(hl, "打开", lambda _=False, i=t["id"]: self._open_task(i, False))
                 self._btn(hl, "目录", lambda _=False, i=t["id"]: self._open_task(i, True))
             else:
-                self._btn(hl, "重下", lambda _=False, i=t["id"]: self._act(i, "restart"))
+                # 合并中重启会和正在跑的 ffmpeg 抢同一个输出文件（还会把已经
+                # 落盘的成品留在目录里），等它结束再操作。
+                if status != "merging":
+                    self._btn(hl, "重下", lambda _=False, i=t["id"]: self._act(i, "restart"))
                 # 失败行额外给一个「原因」按钮：点开是二级弹窗，看完整错误
                 if status == "error" and t.get("error"):
                     self._btn(hl, "原因", lambda _=False, i=t["id"]: self._show_error_detail(i))
@@ -1952,6 +1986,57 @@ class MainWindow(QMainWindow):
             self.table.setRowHeight(row, 46)
         self._rows = {t["id"]: r for r, t in enumerate(items)}
         self._row_ids = [t["id"] for t in items]
+
+    def _update_rows(self, items):
+        """Refresh an unchanged table in place (same rows, same order)."""
+        pal = palette()
+        colors = {
+            "downloading": pal.status_downloading, "completed": pal.status_completed,
+            "paused": pal.status_paused, "error": pal.status_error,
+            "queued": pal.status_queued, "canceled": pal.status_canceled,
+            "merging": pal.status_merging,
+        }
+        for row, t in enumerate(items):
+            status = t.get("status") or "queued"
+            color = colors.get(status, pal.status_downloading)
+            pct, size_text, label, speed_text, st_text, time_text = self._row_values(
+                t, status
+            )
+
+            item = self.table.item(row, 1)
+            if item is None:
+                item = QTableWidgetItem()
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                self.table.setItem(row, 1, item)
+            item.setText(size_text)
+            item.setForeground(QColor(pal.text_muted))
+
+            cell = self.table.cellWidget(row, 2)
+            if isinstance(cell, ProgressCell):
+                cell.set_values(pct, label, color)
+
+            item = self.table.item(row, 3)
+            if item is None:
+                item = QTableWidgetItem()
+                self.table.setItem(row, 3, item)
+            item.setText(speed_text)
+            item.setForeground(QColor(pal.text_strong))
+
+            item = self.table.item(row, 4)
+            if item is None:
+                item = QTableWidgetItem()
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                self.table.setItem(row, 4, item)
+            item.setText(st_text)
+            item.setForeground(QColor(color))
+
+            item = self.table.item(row, 5)
+            if item is None:
+                item = QTableWidgetItem()
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                self.table.setItem(row, 5, item)
+            item.setText(time_text)
+            item.setForeground(QColor(pal.text_muted))
 
     def _btn(self, layout, text, fn):
         b = QPushButton(text)

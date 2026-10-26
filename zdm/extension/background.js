@@ -124,10 +124,25 @@ function stripRange(u) {
   }
 }
 
+/** 常见「两段式」公共后缀。没有完整 PSL 也能挡住最常踩的坑：
+ *  a.example.co.uk / b.example.co.uk 的主域是 example.co.uk，不是 co.uk。 */
+const MULTI_PART_SUFFIX = new Set([
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk",
+  "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+  "com.au", "net.au", "org.au", "edu.au",
+  "co.jp", "ne.jp", "or.jp", "ac.jp",
+  "co.kr", "or.kr", "com.tw", "com.hk", "com.sg", "com.my",
+  "com.br", "com.mx", "com.ar", "com.tr", "co.in", "co.nz", "co.za",
+]);
+
 /** 可解析主域（去掉子域）：a.b.com / c.b.com → b.com */
 function registrableDomain(host) {
-  const p = String(host || "").split(".").filter(Boolean);
-  return p.length <= 2 ? p.join(".") : p.slice(-2).join(".");
+  const p = String(host || "").toLowerCase().split(".").filter(Boolean);
+  if (p.length <= 2) return p.join(".");
+  const last2 = p.slice(-2).join(".");
+  return MULTI_PART_SUFFIX.has(last2) && p.length >= 3
+    ? p.slice(-3).join(".")
+    : last2;
 }
 /** URL 路径的前 n 段。/20241010/ab/xyz.mp4 → "20241010/ab" */
 function pathHead(u, n) {
@@ -861,7 +876,10 @@ function registerSitesScript() {
         js: [{ file: "sites.js" }],
         world: "MAIN",
         runAt: "document_start",
-        allFrames: false,
+        // 嵌入播放器（新闻站 / 博客里的 YouTube、B站 iframe）里也要能读到
+        // 页面自己的 __playinfo__；按钮脚本在 iframe 内运行，桥接就得在
+        // 同一个 frame 里就绪。
+        allFrames: true,
       },
     ]);
     // 同 ID 重复注册是覆盖写、不报错；这里只兜「返回了 promise 但被拒」
@@ -889,8 +907,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false });
       return false;
     }
+    // 只补发到发消息的那个 frame：按钮脚本在 iframe 里时，别的 frame
+    // 不需要 sites.js，往整页所有 frame 灌一遍纯属浪费。
+    const target = sender.frameId == null
+      ? { tabId }
+      : { tabId, frameIds: [sender.frameId] };
     chrome.scripting.executeScript(
-      { target: { tabId }, files: ["sites.js"], world: "MAIN" },
+      { target, files: ["sites.js"], world: "MAIN" },
       () => {
         const e = chrome.runtime.lastError;
         sendResponse(e ? { ok: false, error: e.message } : { ok: true });
@@ -989,16 +1012,17 @@ function netscapeCookieLine(c) {
  *  extra 是要一并带上的关联域（YouTube 的 SSO 票据有一部分在 google.com）。
  */
 const FULL_COOKIE_SITES = [
-  { re: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/, extra: ["google.com"] },
-  { re: /(^|\.)douyin\.com$|(^|\.)iesdouyin\.com$/, extra: ["amemv.com"] },
-  { re: /(^|\.)kuaishou\.com$|(^|\.)gifshow\.com$/, extra: [] },
-  { re: /(^|\.)xiaohongshu\.com$|(^|\.)xhslink\.com$/, extra: [] },
-  { re: /(^|\.)twitter\.com$|(^|\.)x\.com$/, extra: ["twitter.com"] },
+  { re: /(^|\.)youtube\.com$|(^|\.)youtu\.be$/, base: ["youtube.com", "youtu.be"], extra: ["google.com"] },
+  { re: /(^|\.)douyin\.com$|(^|\.)iesdouyin\.com$/, base: ["douyin.com", "iesdouyin.com"], extra: ["amemv.com"] },
+  { re: /(^|\.)kuaishou\.com$|(^|\.)gifshow\.com$/, base: ["kuaishou.com", "gifshow.com"], extra: [] },
+  { re: /(^|\.)xiaohongshu\.com$|(^|\.)xhslink\.com$/, base: ["xiaohongshu.com", "xhslink.com"], extra: [] },
+  { re: /(^|\.)twitter\.com$|(^|\.)x\.com$/, base: ["twitter.com", "x.com"], extra: ["twitter.com"] },
   {
     re: /(^|\.)facebook\.com$|(^|\.)instagram\.com$|(^|\.)fb\.com$/,
+    base: ["facebook.com", "instagram.com", "fb.com"],
     extra: ["facebook.com"],
   },
-  { re: /(^|\.)bilibili\.com$|(^|\.)bilibili\.tv$/, extra: [] },
+  { re: /(^|\.)bilibili\.com$|(^|\.)bilibili\.tv$/, base: ["bilibili.com", "bilibili.tv"], extra: [] },
 ];
 
 /** 按目标站点导出完整 cookie（Netscape 格式）。不在名单里返回空串。 */
@@ -1021,10 +1045,9 @@ async function siteCookieText(host) {
     });
   // domain 过滤是精确匹配域名，所以主域也要单独取一份
   // （cookie 记在 .douyin.com 上，而页面是 www.douyin.com）。
-  const domains = new Set([h]);
-  const parts = h.split(".");
-  if (parts.length >= 2) domains.add(parts.slice(-2).join("."));
-  spec.extra.forEach((d) => domains.add(d));
+  // 主域列表写在 base 里，不能用 parts.slice(-2) 猜：co.uk / com.cn 这类
+  // 公共后缀会被当成主域，把同一后缀下**别的站点**的 cookie 一起导出去。
+  const domains = new Set([h, ...spec.base, ...spec.extra]);
   const reqs = [getAll({ url: "https://" + h + "/" })];
   for (const d of domains) reqs.push(getAll({ domain: d }));
   const groups = await Promise.all(reqs);

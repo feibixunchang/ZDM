@@ -367,9 +367,26 @@ public partial class MainWindow : Window
     /// </summary>
     private TaskRow? MenuRow => _menuRow ?? Selected;
 
+    // Which row actions make sense for a given state. The icon buttons stay
+    // visible for every row (a disabled button with no explanation is worse
+    // than a no-op), so the handlers themselves consult these.
+    private static bool CanPause(Core.TaskStatus s) =>
+        s is Core.TaskStatus.Downloading or Core.TaskStatus.Queued;
+
+    private static bool CanResume(Core.TaskStatus s) =>
+        s is Core.TaskStatus.Paused or Core.TaskStatus.Error or Core.TaskStatus.Canceled;
+
+    // Restart re-downloads from scratch, so it applies to finished and failed
+    // tasks too — but never while ffmpeg owns the file.
+    private static bool CanRestart(Core.TaskStatus s) => s != Core.TaskStatus.Merging;
+
+    private static bool CanCancel(Core.TaskStatus s) =>
+        s is Core.TaskStatus.Queued or Core.TaskStatus.Downloading or Core.TaskStatus.Merging;
+
     private void OnPauseSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
+        if (!CanPause(row.Status)) return;
         _ = _manager.PauseAsync(row.Id);
         // Reflect immediately; the manager finishes winding down in
         // the background so the grid never feels stuck.
@@ -379,6 +396,7 @@ public partial class MainWindow : Window
     private void OnResumeSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
+        if (!CanResume(row.Status)) return;
         _ = _manager.ResumeAsync(row.Id);
         // Reflect immediately; the manager finishes winding down in
         // the background so the grid never feels stuck.
@@ -388,6 +406,7 @@ public partial class MainWindow : Window
     private void OnRestartSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
+        if (!CanRestart(row.Status)) return;
         _ = _manager.RestartAsync(row.Id);
         // Reflect immediately; the manager finishes winding down in
         // the background so the grid never feels stuck.
@@ -397,7 +416,21 @@ public partial class MainWindow : Window
     private void OnDeleteSelected(object sender, RoutedEventArgs e)
     {
         if (MenuRow is not { } row) return;
-        _ = _manager.RemoveAsync(row.Id);
+
+        // Deleting a task is the one action here that destroys data. Ask first,
+        // and default to keeping the file: Cancel is the safe way out, "No" is
+        // the safe confirmation.
+        var name = string.IsNullOrWhiteSpace(row.Filename) ? "这个任务" : $"“{row.Filename}”";
+        var choice = MessageBox.Show(this,
+            $"要删除{name}吗？\n\n" +
+            "是：连同已下载的文件一起删除（不可恢复）\n" +
+            "否：只删除任务记录，保留文件\n" +
+            "取消：什么都不做",
+            "删除任务", MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Warning, MessageBoxResult.No);
+        if (choice == MessageBoxResult.Cancel) return;
+
+        _ = _manager.RemoveAsync(row.Id, removeFiles: choice == MessageBoxResult.Yes);
         // Reflect immediately; the manager finishes winding down in
         // the background so the grid never feels stuck.
         Poll();
@@ -522,12 +555,19 @@ public partial class MainWindow : Window
 
         TaskGrid.SelectedItem = hit;
 
-        // Only "open file" needs the file to exist; everything else applies
-        // regardless of state.
+        // Grey out the actions that do not apply to this row's state instead
+        // of letting the click silently do nothing.
         foreach (var item in RowMenu.Items.OfType<MenuItem>())
         {
-            if (item.Header as string == "打开文件")
-                item.IsEnabled = hit.Status == Core.TaskStatus.Completed;
+            item.IsEnabled = (item.Header as string) switch
+            {
+                "打开文件" => hit.Status == Core.TaskStatus.Completed,
+                "暂停" => CanPause(hit.Status),
+                "继续" => CanResume(hit.Status),
+                "重新下载" => CanRestart(hit.Status),
+                "取消（保留文件）" => CanCancel(hit.Status),
+                _ => true,
+            };
         }
     }
 

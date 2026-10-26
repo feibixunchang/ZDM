@@ -50,6 +50,10 @@ public sealed class Download
 
     public long Size { get; set; }
     public TaskStatus Status { get; set; } = TaskStatus.Queued;
+    /// <summary>True once the .part has been moved to TargetPath. Lets the
+    /// manager delete the file of a task cancelled during merging without
+    /// ever touching an unrelated pre-existing file.</summary>
+    public bool FileReady { get; set; }
     public string? Error { get; set; }
     public bool SupportsRange { get; set; }
     public double CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
@@ -567,6 +571,9 @@ public sealed class Download
     {
         Status = TaskStatus.Merging;
         Emit("progress");
+        // Cancelled while the last bytes were still being written: leave the
+        // task canceled instead of resurrecting it as completed below.
+        if (_stop.IsCancellationRequested) return;
 
         if (Size > 0 && File.Exists(PartPath))
         {
@@ -583,6 +590,7 @@ public sealed class Download
         try
         {
             File.Move(PartPath, TargetPath, overwrite: true);
+            FileReady = true;
         }
         catch (Exception ex)
         {
@@ -605,6 +613,7 @@ public sealed class Download
         if (!string.IsNullOrWhiteSpace(AudioUrl) && !MuxAudio())
             Error = "音频轨合并失败（缺少 ffmpeg 或音频下载失败），视频已保存但无声音";
 
+        if (_stop.IsCancellationRequested) return;
         Status = TaskStatus.Completed;
         CompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         Emit("completed");
@@ -661,7 +670,23 @@ public sealed class Download
             using (var proc = Process.Start(psi))
             {
                 if (proc is null) return false;
-                proc.WaitForExit(600_000);
+                // Poll instead of one long WaitForExit: 取消/重下要能立刻
+                // 杀掉 ffmpeg，否则任务会卡在「合并中」直到它自己跑完。
+                var deadline = DateTime.UtcNow.AddSeconds(600);
+                while (!proc.HasExited && DateTime.UtcNow < deadline)
+                {
+                    if (_stop.IsCancellationRequested)
+                    {
+                        try { proc.Kill(entireProcessTree: true); } catch { }
+                        return false;
+                    }
+                    proc.WaitForExit(200);
+                }
+                if (!proc.HasExited)
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                    return false;
+                }
                 if (proc.ExitCode != 0 || !File.Exists(outPath)) return false;
             }
             File.Move(outPath, TargetPath, overwrite: true);
@@ -716,6 +741,10 @@ public sealed class Download
             var old = _stop;
             _stop = fresh;
             try { old.Dispose(); } catch { /* best effort */ }
+            // A resumed run has not written TargetPath yet. Carrying the flag
+            // over from a merge that was cancelled earlier would let a later
+            // cancel delete a file this run never produced.
+            FileReady = false;
             Status = TaskStatus.Queued;
         }
     }

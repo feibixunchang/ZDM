@@ -667,6 +667,11 @@ class Download:
         self.mux_error: Optional[str] = None
         # HLS / DASH 通道的状态（ffmpeg 子进程 + 进度）
         self._stream_proc = None
+        # 音轨合流用的 ffmpeg（取消/重下要能 terminate）
+        self._mux_proc = None
+        # .part 是否已经改名成正式文件：合并阶段取消任务时，只有为真才允许
+        # 删除 target_path，免得把同名旧文件当成任务产物删掉。
+        self.file_ready = False
         self._stream_bytes = 0
         self._stream_time = 0.0
         self._stream_duration = 0.0
@@ -979,6 +984,9 @@ class Download:
 
     def start(self) -> None:
         """Run the download to completion in the calling thread."""
+        # 新一轮下载还没写出正式文件。file_ready 只描述「本轮」：
+        # 沿用上一轮的值会让合并阶段取消时误删 target_path。
+        self.file_ready = False
         # 调度器可能刚把 status 改成 downloading 就撞上用户暂停：暂停意图
         # 还在，就不要再清 _stop 开跑，否则「暂停排队任务」会变成空操作。
         if self._pause_requested.is_set():
@@ -2049,6 +2057,10 @@ class Download:
                     "没配上配套音频）。B站可点「下载此视频」重下；"
                     "嗅探请等列表里出现音频条目后再推送。"
                 )
+        # 取消/重下可能发生在合并过程中：ffmpeg 被杀掉后这条线程仍会走到
+        # 这里，不能再把已经取消（甚至已从列表删除）的任务改回 completed。
+        if self._stop.is_set() or self.status == "canceled":
+            return
         self.status = "completed"
         self.completed_at = time.time()
         self._emit("completed")
@@ -2083,6 +2095,7 @@ class Download:
             try:
                 os.replace(self.part_path, target)
                 self.filename = os.path.basename(target)
+                self.file_ready = True
                 return None
             except OSError as e:
                 last = e
@@ -2101,6 +2114,7 @@ class Download:
             except OSError:
                 pass
             self.filename = os.path.basename(target)
+            self.file_ready = True
             return None
         except OSError as e:
             return f"cannot save file: {last or e}（文件已在 {self.directory} 保留为 {os.path.basename(self.part_path)}）"
@@ -2272,16 +2286,29 @@ class Download:
                 out_path,
             ]
             try:
-                proc = subprocess.run(
-                    cmd, capture_output=True, timeout=600,
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     env={**os.environ, "PATH": os.environ.get("PATH", "")},
                     **_no_window(),
                 )
+                # 用 Popen 而不是 subprocess.run：取消/重下要从另一个线程
+                # terminate 它，run() 会把句柄藏在内部，只能干等 600 秒。
+                self._mux_proc = proc
+                try:
+                    _out, err = proc.communicate(timeout=600)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    _out, err = proc.communicate()
             except Exception as e:
                 self.mux_error = f"ffmpeg 执行失败：{e}"
                 return False
+            finally:
+                self._mux_proc = None
+            if self._stop.is_set() or self.status == "canceled":
+                self.mux_error = "已取消"
+                return False
             if proc.returncode != 0 or not os.path.exists(out_path):
-                raw = (proc.stderr or b"").decode("utf-8", "ignore").strip()
+                raw = (err or b"").decode("utf-8", "ignore").strip()
                 tail = raw.splitlines()[-1] if raw else f"返回码 {proc.returncode}"
                 self.mux_error = f"ffmpeg 合并失败：{tail}"
                 return False
@@ -2396,19 +2423,20 @@ class Download:
             pass
 
     def _kill_stream_proc(self) -> None:
-        """停掉 ffmpeg 子进程（流媒体任务）。"""
-        proc = getattr(self, "_stream_proc", None)
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except Exception:  # noqa: BLE001
-                    proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
+        """停掉流媒体/合并阶段的 ffmpeg 子进程。"""
+        for name in ("_stream_proc", "_mux_proc"):
+            proc = getattr(self, name, None)
+            if proc is None:
+                continue
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:  # noqa: BLE001
+                        proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _log_download_error(d) -> None:

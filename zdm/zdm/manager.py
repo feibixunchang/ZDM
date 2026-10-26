@@ -236,8 +236,24 @@ class Manager:
         d = self.get(task_id)
         if not d:
             return False
+        # 合并中/已完成的任务已经（或正在）写出目标文件。不先停掉合并并删掉它，
+        # 重下会另存成「文件名(1).mp4」，用户会以为旧文件没删干净。
+        was = d.status
+        produced = was == "completed" or (
+            was == "merging" and getattr(d, "file_ready", False)
+        )
         d.cancel(remove_files=True)
         self._wait_idle(d)
+        # 取消发生在「.part 已改名、ffmpeg 还没跑完」的窗口里时，file_ready
+        # 是等线程退出后才有答案的，所以要在 wait 之后再看一次。
+        produced = produced or (
+            was == "merging" and getattr(d, "file_ready", False)
+        )
+        if produced:
+            try:
+                os.remove(d.target_path)
+            except OSError:
+                pass
         d.segmenter = None
         d.meter.reset()
         d.retries = 0
@@ -250,16 +266,46 @@ class Manager:
         d = self.get(task_id)
         if not d:
             return False
+        was = d.status
+        produced = was == "merging" and getattr(d, "file_ready", False)
         d.cancel(remove_files=remove_files)
         self._wait_idle(d)
+        produced = produced or (
+            was == "merging" and getattr(d, "file_ready", False)
+        )
+        if remove_files and produced:
+            try:
+                os.remove(d.target_path)
+            except OSError:
+                pass
         return True
 
     def remove(self, task_id: str, remove_files: bool = True) -> bool:
         d = self.get(task_id)
         if not d:
             return False
-        if d.status in ("downloading", "queued"):
+        was = d.status
+        produced = was == "completed" or (
+            was == "merging" and getattr(d, "file_ready", False)
+        )
+        if was in ("downloading", "queued", "merging"):
+            # 合并中也是「还在写文件」的状态。以前只把它当普通记录删掉：
+            # ffmpeg 随后仍会把成品写回目录，任务却已经从列表里消失。
             d.cancel(remove_files=remove_files)
+            self._wait_idle(d)
+            produced = produced or (
+                was == "merging" and getattr(d, "file_ready", False)
+            )
+            if remove_files:
+                paths = [d.part_path, d.meta_path]
+                if produced:
+                    paths.append(d.target_path)
+                for p in paths:
+                    try:
+                        if p and os.path.isfile(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
         else:
             if remove_files:
                 # ``part_path``/``meta_path`` only exist for unfinished tasks;
@@ -267,7 +313,7 @@ class Manager:
                 # used to leave the finished file behind (the GUI's "删除" then
                 # looked like a no-op on disk).
                 paths = [d.part_path, d.meta_path]
-                if d.status == "completed":
+                if produced:
                     paths.append(d.target_path)
                 for p in paths:
                     try:
@@ -363,14 +409,20 @@ class Manager:
         with self._state_lock:
             with self._lock:
                 tasks = []
-                limit = int(self.config.get("history_limit") or 200)
-                finished = [
-                    d for d in self.downloads.values() if d.status == "completed"
+                limit = max(1, int(self.config.get("history_limit") or 200))
+                # 失败/取消也是历史记录。以前只裁剪 completed，错误和取消
+                # 的任务会无限堆积在 state.json 里，越启动越慢。
+                terminal = [
+                    d for d in self.downloads.values()
+                    if d.status in ("completed", "error", "canceled")
                 ]
-                finished.sort(key=lambda x: x.completed_at or 0, reverse=True)
-                keep = {d.id for d in finished[:limit]}
+                terminal.sort(
+                    key=lambda x: x.completed_at or x.created_at or 0,
+                    reverse=True,
+                )
+                keep = {d.id for d in terminal[:limit]}
                 for d in self.downloads.values():
-                    if d.status == "completed" and d.id not in keep:
+                    if d.status in ("completed", "error", "canceled") and d.id not in keep:
                         continue
                     meta = d.to_dict()
                     meta.pop("chunks", None)

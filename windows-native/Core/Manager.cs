@@ -234,8 +234,15 @@ public sealed class Manager
     {
         var d = Get(id);
         if (d is null) return false;
+        // 合并中/已完成的任务已经写出目标文件；不先删掉它，重下会落成
+        //「文件名(1).mp4」，用户会以为旧文件没删干净（与 Python 端一致）。
+        var was = d.Status;
+        var produced = was == TaskStatus.Completed
+            || (was == TaskStatus.Merging && d.FileReady);
         d.Cancel(removeFiles: true);
         await WaitIdleAsync(d);
+        produced = produced || (was == TaskStatus.Merging && d.FileReady);
+        if (produced) TryDelete(d.TargetPath);
         // Cancel() leaves the CancellationTokenSource in the cancelled state.
         // Resume() swaps in a fresh one - without it the next probe is
         // cancelled immediately and the "restarted" task lands in paused
@@ -245,6 +252,7 @@ public sealed class Manager
         d.Meter.Reset();
         d.Retries = 0;
         d.Error = null;
+        d.FileReady = false;
         d.Status = TaskStatus.Queued;
         Emit("restarted", d);
         return true;
@@ -254,8 +262,12 @@ public sealed class Manager
     {
         var d = Get(id);
         if (d is null) return false;
+        var was = d.Status;
+        var produced = was == TaskStatus.Merging && d.FileReady;
         d.Cancel(removeFiles);
         await WaitIdleAsync(d);
+        produced = produced || (was == TaskStatus.Merging && d.FileReady);
+        if (removeFiles && produced) TryDelete(d.TargetPath);
         return true;
     }
 
@@ -263,20 +275,24 @@ public sealed class Manager
     {
         var d = Get(id);
         if (d is null) return false;
-        if (d.Status is TaskStatus.Downloading or TaskStatus.Queued)
+        var was = d.Status;
+        var produced = was == TaskStatus.Completed
+            || (was == TaskStatus.Merging && d.FileReady);
+        if (was is TaskStatus.Downloading or TaskStatus.Queued or TaskStatus.Merging)
         {
             d.Cancel(removeFiles);
             await WaitIdleAsync(d);
+            produced = produced || (was == TaskStatus.Merging && d.FileReady);
             // Cancel() tried to delete the .part while workers still had the
             // file open (FileShare without Delete), so it failed silently.
             // The workers are gone now - try again.
-            if (removeFiles) DeleteTaskFiles(d);
+            if (removeFiles) DeleteTaskFiles(d, produced);
         }
         else if (removeFiles)
         {
             // A completed download owns TargetPath; deleting only the .part
             // left the finished file behind (Python fixed this in v1.11.1).
-            DeleteTaskFiles(d);
+            DeleteTaskFiles(d, produced);
         }
         lock (_gate) _tasks.Remove(id);
         Emit("removed", d);
@@ -284,15 +300,17 @@ public sealed class Manager
         return true;
     }
 
-    private static void DeleteTaskFiles(Download d)
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
+    }
+
+    private static void DeleteTaskFiles(Download d, bool includeTarget = false)
     {
         var paths = new List<string> { d.PartPath, d.MetaPath };
-        if (d.Status == TaskStatus.Completed)
+        if (includeTarget || d.Status == TaskStatus.Completed)
             paths.Add(d.TargetPath);
-        foreach (var p in paths)
-        {
-            try { if (File.Exists(p)) File.Delete(p); } catch { /* best effort */ }
-        }
+        foreach (var p in paths) TryDelete(p);
     }
 
     public async Task PauseAllAsync()
@@ -475,8 +493,12 @@ public sealed class Manager
                 lock (_gate)
                 {
                     var limit = Math.Max(1, Config.HistoryLimit);
-                    foreach (var d in _tasks.Values.Where(x => x.Status == TaskStatus.Completed)
-                                 .OrderByDescending(x => x.CompletedAt ?? 0))
+                    // 失败/取消也算历史。只裁剪 completed 会让错误任务在
+                    // state.json 里无限增长，重启越来越慢（与 Python 端一致）。
+                    foreach (var d in _tasks.Values
+                                 .Where(x => x.Status is TaskStatus.Completed
+                                     or TaskStatus.Error or TaskStatus.Canceled)
+                                 .OrderByDescending(x => x.CompletedAt ?? x.CreatedAt))
                     {
                         if (keep.Count >= limit) break;
                         keep.Add(d.Id);
@@ -485,7 +507,9 @@ public sealed class Manager
 
                     foreach (var d in _tasks.Values)
                     {
-                        if (d.Status == TaskStatus.Completed && !keep.Contains(d.Id))
+                        if ((d.Status is TaskStatus.Completed or TaskStatus.Error
+                                 or TaskStatus.Canceled)
+                            && !keep.Contains(d.Id))
                             continue;
                         tasks.Add(JsonSerializer.SerializeToNode(d.Snapshot()));
                     }
