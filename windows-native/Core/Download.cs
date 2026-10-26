@@ -21,6 +21,10 @@ public sealed class Download
     /// </summary>
     private CancellationTokenSource _stop = new();
 
+    /// <summary>Set by Cancel(); Finish() must not resurrect the task as
+    /// Completed even if it briefly overwrote Status with Merging.</summary>
+    private volatile bool _cancelRequested;
+
     /// <summary>
     /// Token for the current run. Read through a property so a swap by
     /// Resume() is picked up by workers on their next loop iteration.
@@ -569,11 +573,16 @@ public sealed class Download
 
     private void Finish()
     {
+        // Cancel/restart wins over everything. A pause that landed after the
+        // final byte is different: StartAsync calls Finish() on purpose so the
+        // completed data still becomes a real file, so do NOT test _stop here.
+        if (_cancelRequested || Status == TaskStatus.Canceled)
+        {
+            Status = TaskStatus.Canceled;
+            return;
+        }
         Status = TaskStatus.Merging;
         Emit("progress");
-        // Cancelled while the last bytes were still being written: leave the
-        // task canceled instead of resurrecting it as completed below.
-        if (_stop.IsCancellationRequested) return;
 
         if (Size > 0 && File.Exists(PartPath))
         {
@@ -609,11 +618,22 @@ public sealed class Download
             // best effort
         }
 
+        // Cancelled after the move: do not start a mux that will be killed.
+        if (_cancelRequested || Status == TaskStatus.Canceled)
+        {
+            Status = TaskStatus.Canceled;
+            return;
+        }
+
         // A DASH video track is silent until the audio track is muxed in.
         if (!string.IsNullOrWhiteSpace(AudioUrl) && !MuxAudio())
             Error = "音频轨合并失败（缺少 ffmpeg 或音频下载失败），视频已保存但无声音";
 
-        if (_stop.IsCancellationRequested) return;
+        if (_cancelRequested || Status == TaskStatus.Canceled)
+        {
+            Status = TaskStatus.Canceled;
+            return;
+        }
         Status = TaskStatus.Completed;
         CompletedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         Emit("completed");
@@ -625,6 +645,7 @@ public sealed class Download
     /// </summary>
     private bool MuxAudio()
     {
+        if (_cancelRequested || Status == TaskStatus.Canceled) return false;
         var ffmpeg = FindFfmpeg();
         if (ffmpeg is null) return false;
         if (!File.Exists(TargetPath)) return false;
@@ -658,6 +679,10 @@ public sealed class Download
                 resp.Content.CopyToAsync(fs).GetAwaiter().GetResult();
             }
 
+            // Cancelled while the audio track was downloading: do not start
+            // an ffmpeg that would be killed on its first poll.
+            if (_cancelRequested || Status == TaskStatus.Canceled) return false;
+
             var psi = new ProcessStartInfo(ffmpeg)
             {
                 RedirectStandardError = true,
@@ -675,7 +700,9 @@ public sealed class Download
                 var deadline = DateTime.UtcNow.AddSeconds(600);
                 while (!proc.HasExited && DateTime.UtcNow < deadline)
                 {
-                    if (_stop.IsCancellationRequested)
+                    // 只看显式取消：停在最后几个字节的暂停仍要走完收尾，
+                    // 否则音频轨会被误杀、任务变成「已完成但无声」。
+                    if (_cancelRequested || Status == TaskStatus.Canceled)
                     {
                         try { proc.Kill(entireProcessTree: true); } catch { }
                         return false;
@@ -745,12 +772,14 @@ public sealed class Download
             // over from a merge that was cancelled earlier would let a later
             // cancel delete a file this run never produced.
             FileReady = false;
+            _cancelRequested = false;
             Status = TaskStatus.Queued;
         }
     }
 
     public void Cancel(bool removeFiles = true)
     {
+        _cancelRequested = true;
         _stop.Cancel();
         Status = TaskStatus.Canceled;
         if (removeFiles)

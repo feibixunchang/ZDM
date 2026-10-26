@@ -672,6 +672,9 @@ class Download:
         # .part 是否已经改名成正式文件：合并阶段取消任务时，只有为真才允许
         # 删除 target_path，免得把同名旧文件当成任务产物删掉。
         self.file_ready = False
+        # 显式的取消意图。status 在 _finish 里会先被改成 merging，单看
+        # status 会漏掉「取消恰好发生在 _finish 进门之后」的窗口。
+        self._cancel_requested = False
         self._stream_bytes = 0
         self._stream_time = 0.0
         self._stream_duration = 0.0
@@ -987,6 +990,7 @@ class Download:
         # 新一轮下载还没写出正式文件。file_ready 只描述「本轮」：
         # 沿用上一轮的值会让合并阶段取消时误删 target_path。
         self.file_ready = False
+        self._cancel_requested = False
         # 调度器可能刚把 status 改成 downloading 就撞上用户暂停：暂停意图
         # 还在，就不要再清 _stop 开跑，否则「暂停排队任务」会变成空操作。
         if self._pause_requested.is_set():
@@ -2010,6 +2014,13 @@ class Download:
                 self.error = str(e)
 
     def _finish(self) -> None:
+        # 取消/重下可能发生在合并过程中：先看显式取消意图，不能因为
+        # status 随后被改成 merging 就把已取消的任务复活成 completed。
+        # 注意停在「最后几个字节」的暂停不算取消 —— 调用方就是靠 _finish
+        # 把已完成的数据收尾成正式文件，不能在这里再检查 _stop。
+        if self._cancel_requested or self.status == "canceled":
+            self.status = "canceled"
+            return
         self.status = "merging"
         self._emit("progress")
         self._close_fd()
@@ -2034,6 +2045,10 @@ class Download:
             os.remove(self.meta_path)
         except OSError:
             pass
+        # 取消可能在改名/meta 清理之后才到：别再启动音轨合流。
+        if self._cancel_requested or self.status == "canceled":
+            self.status = "canceled"
+            return
         # A DASH video track has no sound until the audio track is muxed in.
         # 嗅探路径只拿得到画面轨。B站可以用 URL 里的 cid + Referer 里的 BV
         # 号反查一条音轨，先试着补齐，补到了就照常合流。
@@ -2059,7 +2074,8 @@ class Download:
                 )
         # 取消/重下可能发生在合并过程中：ffmpeg 被杀掉后这条线程仍会走到
         # 这里，不能再把已经取消（甚至已从列表删除）的任务改回 completed。
-        if self._stop.is_set() or self.status == "canceled":
+        if self._cancel_requested or self.status == "canceled":
+            self.status = "canceled"
             return
         self.status = "completed"
         self.completed_at = time.time()
@@ -2195,6 +2211,9 @@ class Download:
         import tempfile
 
         self.mux_error = ""
+        if self._cancel_requested or self.status == "canceled":
+            self.mux_error = "已取消"
+            return False
         ffmpeg = _find_ffmpeg()
         if not ffmpeg:
             self.mux_error = "找不到 ffmpeg，无法把音轨合进视频"
@@ -2277,6 +2296,11 @@ class Download:
                     return False
                 audio_input = ["-i", audio_path]
 
+            # 取消可能发生在音轨下载期间；别再启动一个马上会被杀掉的 ffmpeg。
+            if self._cancel_requested or self.status == "canceled":
+                self.mux_error = "已取消"
+                return False
+
             # 2) 合并
             cmd = [
                 ffmpeg, "-y", "-loglevel", "error",
@@ -2304,7 +2328,9 @@ class Download:
                 return False
             finally:
                 self._mux_proc = None
-            if self._stop.is_set() or self.status == "canceled":
+            # 暂停落在「最后几个字节」时 _stop 也是置位的，那种情况
+            # 调用方就是要收尾成完成态；只有显式取消才丢弃合并结果。
+            if self._cancel_requested or self.status == "canceled":
                 self.mux_error = "已取消"
                 return False
             if proc.returncode != 0 or not os.path.exists(out_path):
@@ -2390,11 +2416,13 @@ class Download:
         if self.status in ("paused", "error", "canceled"):
             self._join_workers()
             self._pause_requested.clear()
+            self._cancel_requested = False
             self.error = None
             self.status = "queued"
 
     def cancel(self, remove_files: bool = True) -> None:
         self._pause_requested.clear()
+        self._cancel_requested = True
         self._stop.set()
         self._kill_yt_proc()
         self._kill_stream_proc()
