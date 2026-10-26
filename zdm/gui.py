@@ -1079,8 +1079,27 @@ class NameCell(QWidget):
             )
             lay.addWidget(badge, 0)
 
+        try:
+            prio = int(task.get("priority") or 0)
+        except (TypeError, ValueError):
+            prio = 0
+        if prio:
+            lay.addWidget(self._prio_badge(prio, pal), 0)
+
         url = task.get("url") or ""
         self.setToolTip(name + (("\n" + url) if url else ""))
+
+    def _prio_badge(self, prio: int, pal):
+        """优先级徽标：列表按创建时间排，不标出来就看不出谁先出队。"""
+        badge = QLabel(f"P{prio:+d}")
+        bf = QFont(badge.font())
+        bf.setPointSizeF(max(8.0, bf.pointSizeF() - 1.0))
+        badge.setFont(bf)
+        badge.setStyleSheet(
+            f"color: {pal.text_muted}; background: transparent;"
+        )
+        badge.setToolTip(f"队列优先级 {prio:+d}（数字越大越先下载）")
+        return badge
 
 
 class ProgressCell(QWidget):
@@ -1998,7 +2017,8 @@ class MainWindow(QMainWindow):
         # drop hover/tooltips and burn CPU. The poll only needs to repaint the
         # values that change; structure changes still take the full path.
         sig = tuple(
-            (t.get("id"), t.get("status"), t.get("filename"), t.get("source"))
+            (t.get("id"), t.get("status"), t.get("filename"), t.get("source"),
+             t.get("priority"))
             for t in items
         )
         if sig == self._render_sig and self.table.rowCount() == len(items):

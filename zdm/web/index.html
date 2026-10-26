@@ -172,6 +172,14 @@
       <label>每行一个链接（空行和 # 开头的注释会跳过）</label>
       <textarea id="batchUrls" rows="10" placeholder="https://example.com/a.zip&#10;https://example.com/b.mp4"></textarea>
     </div>
+    <div class="field full">
+      <label>优先级（数字越大越先下载，留空按 0）</label>
+      <input id="batchPrio" type="number" min="-99" max="99">
+    </div>
+    <div class="field full">
+      <label>定时开始（留空 = 立即开始，作用于本批全部链接）</label>
+      <input id="batchStart" type="datetime-local">
+    </div>
   </div>
   <div class="dlg-f">
     <button id="btnBatchCancel">取消</button>
@@ -436,7 +444,13 @@ $('#btnGo').onclick = addDownload;
 $('#url').addEventListener('keydown', e => { if (e.key === 'Enter') addDownload(); });
 $('#btnAdd').onclick = () => $('#url').focus();
 
-$('#btnBatch').onclick = () => { $('#batchUrls').value = ''; $('#dlgBatch').showModal(); };
+$('#btnBatch').onclick = () => {
+  $('#batchUrls').value = '';
+  // 把输入条上当前的优先级/定时带进对话框：不显示就等于在偷偷套用。
+  $('#batchPrio').value = $('#fprio').value;
+  $('#batchStart').value = $('#fstart').value;
+  $('#dlgBatch').showModal();
+};
 $('#btnBatchCancel').onclick = () => $('#dlgBatch').close();
 $('#btnBatchGo').onclick = async () => {
   const lines = $('#batchUrls').value.split(/\r?\n/)
@@ -444,18 +458,18 @@ $('#btnBatchGo').onclick = async () => {
     .filter(x => x && !x.startsWith('#'))
     .filter(x => /^https?:\/\//i.test(x));
   if (!lines.length) return toast('没有找到 http(s) 链接');
-  const prio = $('#fprio').value;
-  const startAt = fromLocalInput($('#fstart').value);
-  let ok = 0, fail = 0;
+  const prio = $('#batchPrio').value;
+  const startAt = fromLocalInput($('#batchStart').value);
+  let ok = 0, fail = 0, firstErr = '';
   for (const url of lines){
     const body = { url, source: 'webui' };
     if (prio) body.priority = Number(prio);
     if (startAt) body.start_at = startAt;
     const r = await api('POST','tasks',body);
-    if (r.ok) ok++; else fail++;
+    if (r.ok) ok++; else { fail++; if (!firstErr) firstErr = r.error || '未知错误'; }
   }
   $('#dlgBatch').close();
-  toast(`已加入 ${ok} 个任务` + (fail ? `，${fail} 个失败` : ''));
+  toast(`已加入 ${ok} 个任务` + (fail ? `，${fail} 个失败：${firstErr}` : ''));
   refresh();
 };
 

@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.16.2**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.16.3**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.16.2_amd64.deb` | `sudo apt install ./zdm_1.16.2_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.16.3_amd64.deb` | `sudo apt install ./zdm_1.16.3_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.16.2.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.16.3.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.16.2
+bash zdm/build_linux_app.sh ./linux-build 1.16.3
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -188,9 +188,11 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
   代理、连接数、优先级与定时时间。已下载的分块保留，重启时核对新地址的文件长度：
   一致就续传，不一致才自动从头下载（不会把两个文件的字节拼在一起）
 - **定时开始与优先级队列**：新建、批量导入和「修改任务」都能设开始时间与优先级。
-  优先级高的先出队；定时任务到点才开始。「全部暂停 → 全部继续」会保留原定时间
+  优先级高的先出队（桌面端列表用 `P+5` 徽标标出，网页版写在任务副标题里）；
+  定时任务到点才开始。「全部暂停 → 全部继续」会保留原定时间
 - **批量导入**：桌面端工具栏「批量导入」与网页版「批量…」可一次粘贴多行链接
-  （空行和 `#` 注释自动跳过），统一设置优先级 / 定时开始
+  （空行和 `#` 注释自动跳过），优先级 / 定时开始在对话框里当面对好，
+  不会悄悄套用输入条上残留的值
 - **视频选段下载**：YouTube / B站 等视频页任务可只下一段（如 `00:01:00-00:05:00`），
   桌面端、网页版、CLI 都支持；成品名带区间，同一视频下多段不会互相覆盖。
   普通文件链接填选段会被明确拒绝（而不是静默下整包）
