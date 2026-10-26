@@ -37,6 +37,14 @@
     box-shadow:var(--shadow)}
   .addbar{display:flex;gap:8px;padding:12px;margin-bottom:14px;flex-wrap:wrap}
   .addbar input.url{flex:1;min-width:260px}
+  /* 轨道选择单独一行（flex-wrap 下 width:100% 就是自己一行），只在 m3u8/mpd 时出现 */
+  .trkbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;width:100%}
+  /* .trkbar 的 display:flex 比 UA 样式的 [hidden]{display:none} 优先级高，
+     不补这一条，粘贴非 m3u8 链接时轨道条也一直挂着。 */
+  .trkbar[hidden]{display:none}
+  .trkbar span{font-size:12px;color:var(--muted)}
+  .trkbar input,.trkbar select{width:168px;font-size:12px}
+  .trkline{font-size:11px;color:var(--muted)}
   .toolbar{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border);
     flex-wrap:wrap}
   .tabs{display:flex;gap:4px}
@@ -98,6 +106,17 @@
     <input id="fname" placeholder="文件名（可选）" style="width:180px">
     <input id="fconn" type="number" min="1" max="32" placeholder="连接数" style="width:88px" title="连接数，留空用默认">
     <button class="primary" id="btnGo">下载</button>
+    <div class="trkbar" id="trkBar" hidden>
+      <span>HLS/DASH 轨道（留空＝自动挑最佳；只在内置流媒体引擎下生效）</span>
+      <input id="fsv" placeholder='视频轨 如 res="1280"' title='引擎的轨道选择语法：子键=值，多个用冒号分隔。常用子键：id / lang / name / codecs / res / for；也可整体写 all / best / best2 / worst1。命中 0 条轨道时任务会失败。'>
+      <input id="fsa" placeholder='音频轨 如 lang="spa"' title='同上，例：lang="eng" 或 best'>
+      <input id="fss" placeholder='字幕轨 如 lang="eng"' title='同上，例：lang="eng" 或 all'>
+      <select id="fsf" title="字幕落成的格式">
+        <option value="">字幕格式：引擎默认</option>
+        <option value="SRT">字幕格式：SRT</option>
+        <option value="VTT">字幕格式：VTT</option>
+      </select>
+    </div>
   </div>
 
   <div class="card">
@@ -173,6 +192,24 @@ const fmtTime = s => {
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const statusText = {queued:'排队中',downloading:'下载中',paused:'已暂停',completed:'已完成',error:'失败',canceled:'已取消',merging:'合并中'};
 
+// 轨道选择只对 m3u8/mpd 直链有意义（带查询串的真实地址也要认，所以不截 ?）。
+const STREAM_URL_HINT = /\.(m3u8|mpd)(\?|#|$)/i;
+const isStreamUrl = u => STREAM_URL_HINT.test(String(u || '').trim());
+function toggleTrkBar(){
+  // 只切可见性，不清空输入框：URL 是边打边校验的，中途退掉一个字符就把
+  // 用户填好的选择器抹掉，比留着更伤人。提交时靠「轨道条是否可见」决定发不发。
+  $('#trkBar').hidden = !isStreamUrl($('#url').value);
+}
+$('#url').addEventListener('input', toggleTrkBar);
+function tracksSummary(t){
+  const p = [];
+  if (t.stream_video) p.push('视频=' + t.stream_video);
+  if (t.stream_audio) p.push('音频=' + t.stream_audio);
+  if (t.stream_subtitle) p.push('字幕=' + t.stream_subtitle);
+  if (t.stream_sub_format) p.push('字幕格式=' + t.stream_sub_format);
+  return p.length ? '轨道 ' + p.join(' ') : '';
+}
+
 let stateWarn = '';
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2200); }
@@ -219,7 +256,7 @@ function render(){
     html += `<tr>
       <td>
         <div class="fname">${esc(t.filename)}</div>
-        <div class="sub">${esc(t.url)}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}</div>
+        <div class="sub">${esc(t.url)}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}${t.stream_note ? ' · <span style="color:var(--warn)" title="换引擎的理由">'+esc(t.stream_note)+'</span>' : ''}${tracksSummary(t) ? ' · <span class="trkline">'+esc(tracksSummary(t))+'</span>' : ''}</div>
       </td>
       <td>${fmtSize(t.downloaded)} / ${t.size ? fmtSize(t.size) : '未知'}</td>
       <td>
@@ -278,9 +315,21 @@ async function addDownload(){
   const body = { url };
   if ($('#fname').value.trim()) body.filename = $('#fname').value.trim();
   if ($('#fconn').value) body.connections = Number($('#fconn').value);
+  // 拖拽进来的链接不会触发 input 事件，这里按真正要下的链接对齐一次轨道条；
+  // 轨道条收起时不读输入框，免得上一条链接留下的选择器跟着新链接发出去。
+  toggleTrkBar();
+  if (!$('#trkBar').hidden){
+    if ($('#fsv').value.trim()) body.stream_video = $('#fsv').value.trim();
+    if ($('#fsa').value.trim()) body.stream_audio = $('#fsa').value.trim();
+    if ($('#fss').value.trim()) body.stream_subtitle = $('#fss').value.trim();
+    if ($('#fsf').value) body.stream_sub_format = $('#fsf').value;
+  }
   const r = await api('POST','tasks',body);
   if (!r.ok) return toast(r.error || '添加失败');
   $('#url').value = ''; $('#fname').value = '';
+  ['fsv','fsa','fss'].forEach(id => { $('#'+id).value = ''; });
+  $('#fsf').value = '';
+  toggleTrkBar();
   toast('已加入队列');
   refresh();
 }

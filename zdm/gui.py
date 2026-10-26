@@ -383,6 +383,36 @@ def _split_section(value: str):
     return start, end
 
 
+TRACK_SYNTAX_TIP = (
+    "这几种写法是内置流媒体引擎 N_m3u8DL-RE 的轨道选择语法，多个条件用冒号\n"
+    "分隔，如 lang=\"eng\":codecs=\"mp4a\"。可用条件：id / lang / name / codecs /\n"
+    "res / frame / channel / range / url / role / for / segsMin / segsMax / bwoff，\n"
+    "也可以整体写 all / best / best2 / worst1。命中 0 条轨道时任务会失败。\n"
+    "只有「设置 → 流媒体引擎」是自动或 N_m3u8DL-RE 时才生效；选 ffmpeg 会拒绝。"
+)
+
+
+def _tracks_summary(t: dict) -> str:
+    """任务上挂的轨道选择，一句话说清（列表面板的 tooltip 用）。
+
+    只在看板里露一次就够了：挑了「只要西班牙语」的用户事后必须能看出这条
+    任务到底按什么挑的，不然「下出来还是默认音轨」会变成一次无法复盘的谜。
+    """
+    parts = []
+    for key, label in (
+        ("stream_video", "视频"),
+        ("stream_audio", "音频"),
+        ("stream_subtitle", "字幕"),
+    ):
+        v = str(t.get(key) or "").strip()
+        if v:
+            parts.append("%s=%s" % (label, v))
+    fmt = str(t.get("stream_sub_format") or "").strip()
+    if fmt:
+        parts.append("字幕格式=" + fmt)
+    return "轨道 " + " ".join(parts) if parts else ""
+
+
 # 来源徽标：只给非「手动」的任务打，颜色取自主题调色板（不在代码里写死，
 # 深浅色切换时才不会留下一块异色）。见 _render() 里的用法。
 SOURCE_BADGES = {
@@ -2089,8 +2119,9 @@ class MainWindow(QMainWindow):
             st_item.setForeground(QColor(color))
             st_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             note = str(t.get("stream_note") or "").strip()
-            if note:
-                st_item.setToolTip(note)
+            tip = "\n".join(x for x in (note, _tracks_summary(t)) if x)
+            if tip:
+                st_item.setToolTip(tip)
             self.table.setItem(row, 4, st_item)
 
             time_item = QTableWidgetItem(time_text)
@@ -2178,8 +2209,9 @@ class MainWindow(QMainWindow):
             # 换过引擎（或没找到引擎）的理由挂在状态列上：任务照样下完了，但
             # 「用的是哪个、为什么不是设置里那个」必须能查到，不能只在日志里。
             note = str(t.get("stream_note") or "").strip()
-            if note:
-                item.setToolTip(note)
+            tip = "\n".join(x for x in (note, _tracks_summary(t)) if x)
+            if tip:
+                item.setToolTip(tip)
             elif item.toolTip():
                 item.setToolTip("")
 
@@ -3025,7 +3057,36 @@ class MainWindow(QMainWindow):
         sec_start.setText(s0)
         sec_end.setText(s1)
         sec_box.setVisible(is_video)
-        for w in (url, referer, cookie, ua, proxy, sec_start, sec_end):
+        # 轨道选择只认 m3u8/mpd 直链，且只有内置 N_m3u8DL-RE 通道看得懂。
+        is_stream_url = str(t.get("url") or "").lower().split("?")[0].endswith(
+            (".m3u8", ".mpd")
+        )
+        trk_box = QGroupBox("HLS/DASH 轨道选择（留空 = 自动挑最佳）")
+        tf = QFormLayout(trk_box)
+        tf.setContentsMargins(8, 6, 8, 6)
+        trk_video = QLineEdit(str(t.get("stream_video") or ""))
+        trk_audio = QLineEdit(str(t.get("stream_audio") or ""))
+        trk_sub = QLineEdit(str(t.get("stream_subtitle") or ""))
+        trk_fmt = QComboBox()
+        trk_fmt.addItems(["引擎默认（SRT）", "SRT", "VTT"])
+        trk_fmt.setCurrentIndex(
+            {"SRT": 1, "VTT": 2}.get(str(t.get("stream_sub_format") or "").upper(), 0)
+        )
+        for w, label, hint in (
+            (trk_video, "视频轨", '如 res="1280" 或 best；留空自动'),
+            (trk_audio, "音频轨", '如 lang="spa" 或 best；留空自动'),
+            (trk_sub, "字幕轨", '如 lang="eng" 或 all；留空不要字幕'),
+        ):
+            w.setPlaceholderText(hint)
+            w.setToolTip(TRACK_SYNTAX_TIP)
+            tf.addRow(label, w)
+        tf.addRow("字幕格式", trk_fmt)
+        trk_box.setVisible(is_stream_url and not is_video)
+        # 对话框关闭后 isVisible() 永远是 False（父窗口已隐藏），提交时要靠这个
+        # 变量而不是控件自己的可见性。
+        show_tracks = bool(is_stream_url and not is_video)
+        for w in (url, referer, cookie, ua, proxy, sec_start, sec_end,
+                  trk_video, trk_audio, trk_sub):
             _zh_standard_menu(w)
         form.addRow("下载地址", url)
         form.addRow("Referer", referer)
@@ -3037,6 +3098,7 @@ class MainWindow(QMainWindow):
         form.addRow("", start_cb)
         form.addRow("开始时间", start_edit)
         form.addRow(sec_box)
+        form.addRow(trk_box)
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Save).setText("保存")
         box.button(QDialogButtonBox.Cancel).setText("取消")
@@ -3113,6 +3175,13 @@ class MainWindow(QMainWindow):
                 return
             if new_section:
                 payload["section"] = new_section
+        if show_tracks:
+            payload["stream_video"] = trk_video.text().strip()
+            payload["stream_audio"] = trk_audio.text().strip()
+            payload["stream_subtitle"] = trk_sub.text().strip()
+            payload["stream_sub_format"] = (
+                trk_fmt.currentText() if trk_fmt.currentIndex() else ""
+            )
         self._run(self.api.edit, t["id"], payload)
         self._status("正在保存修改…", hold=4)
 
@@ -3171,7 +3240,26 @@ class MainWindow(QMainWindow):
         sf.addWidget(sec_start)
         sf.addWidget(QLabel("→"))
         sf.addWidget(sec_end)
-        for w in (url, name, directory, referer, sec_start, sec_end):
+        trk_box = QGroupBox("HLS/DASH 轨道选择（可选，留空 = 自动挑最佳）")
+        tf = QFormLayout(trk_box)
+        tf.setContentsMargins(8, 6, 8, 6)
+        trk_video = QLineEdit()
+        trk_video.setPlaceholderText('如 res="1280" 或 best；留空自动')
+        trk_audio = QLineEdit()
+        trk_audio.setPlaceholderText('如 lang="spa" 或 best；留空自动')
+        trk_sub = QLineEdit()
+        trk_sub.setPlaceholderText('如 lang="eng" 或 all；留空不要字幕')
+        trk_fmt = QComboBox()
+        trk_fmt.addItems(["引擎默认（SRT）", "SRT", "VTT"])
+        for w in (trk_video, trk_audio, trk_sub):
+            w.setToolTip(TRACK_SYNTAX_TIP)
+        trk_fmt.setToolTip("字幕落成什么格式（只影响单独的字幕文件；混进 mp4 时由容器决定）。")
+        tf.addRow("视频轨", trk_video)
+        tf.addRow("音频轨", trk_audio)
+        tf.addRow("字幕轨", trk_sub)
+        tf.addRow("字幕格式", trk_fmt)
+        for w in (url, name, directory, referer, sec_start, sec_end,
+                  trk_video, trk_audio, trk_sub):
             _zh_standard_menu(w)
         form.addRow("链接 URL", url)
         form.addRow("保存为", name)
@@ -3182,6 +3270,7 @@ class MainWindow(QMainWindow):
         form.addRow("", schedule_cb)
         form.addRow("开始时间", schedule)
         form.addRow(sec_box)
+        form.addRow(trk_box)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Ok).setText("确定")
         box.button(QDialogButtonBox.Cancel).setText("取消")
@@ -3213,6 +3302,14 @@ class MainWindow(QMainWindow):
             extra["start_at"] = int(schedule.dateTime().toSecsSinceEpoch())
         if section:
             extra["section"] = section
+        if trk_video.text().strip():
+            extra["stream_video"] = trk_video.text().strip()
+        if trk_audio.text().strip():
+            extra["stream_audio"] = trk_audio.text().strip()
+        if trk_sub.text().strip():
+            extra["stream_subtitle"] = trk_sub.text().strip()
+        if trk_fmt.currentIndex():
+            extra["stream_sub_format"] = trk_fmt.currentText()
         if name.text().strip():
             extra["filename"] = name.text().strip()
         if directory.text().strip():

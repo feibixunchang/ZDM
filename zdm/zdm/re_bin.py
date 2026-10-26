@@ -50,10 +50,15 @@ _MSG_RE = re.compile(
 )
 # 引擎的进度条带 ANSI 控制序列（关掉颜色时仍可能有光标显隐序列粘在文案尾部）。
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
-# 合流阶段的锚点（实测：20:12:14.035 INFO : ffmpeg merging...）。这时进度帧
-# 停在最后一帧的分片百分比上不再变化，调用方需要知道「不动了 ≠ 卡住了」。
-_MERGE_RE = re.compile(r"ffmpeg merging")
+# 合流阶段的锚点。两种写法都要认（实测同一版引擎）：
+#   不混流时：20:12:14.035 INFO : ffmpeg merging...
+#   开了 -M 后：21:56:32.747 WARN : Muxing to x.MUX.mp4
+# 这时进度帧停在最后一帧的分片百分比上不再变化，调用方需要知道「不动了 ≠ 卡住了」。
+_MERGE_RE = re.compile(r"ffmpeg merging|Muxing to")
 _MERGE_MSG = "ffmpeg merging..."
+# 分离轨的混流目标（-M format=）。只认 mkv/mp4/ts 三种容器，选 mp4：
+# 和 ffmpeg 兜底通道的产物一致，QuickTime/浏览器也能直接放。
+MUX_FORMAT = "mp4"
 
 _UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}
 
@@ -119,6 +124,82 @@ def drop_work_dir(task_id: str) -> None:
         pass
 
 
+# 引擎的选择器值是一段「子键=值」串（冒号分隔），或整体简写 all / best / best2 / worst1。
+# 键名照 --morehelp 里列的那组来；写错键名（lagu="eng"）引擎不报错，只是命中 0 条，
+# 然后甩一句英文异常退出 —— 所以在入口就按这份表拒掉，比让用户猜引擎的语法有用。
+SELECTOR_KEYS = frozenset((
+    "id", "lang", "name", "codecs", "res", "frame", "channel", "range", "url", "role",
+    "for", "segsmin", "segsmax", "pkdmin", "pkdmax", "plstdurmin", "plstdurmax",
+    "bwoff", "bwmin", "bwmax",
+))
+_SELECTOR_SHORT_RE = re.compile(r"^(?:all|best\d*|worst\d*)$", re.I)
+_SELECTOR_PAIR_RE = re.compile(r'^(?P<k>[A-Za-z]+)=(?P<v>.+)$')
+# 归一空白专用：和上面那条的差别是**允许等号两侧有空格**（值里的空格保留，
+# name="Product Info" 这类轨道名本来就带空格）。check_tracks 用的是严格版，
+# 先由 clean_track 把空白抹掉，才轮到它判定语法。
+_PAIR_SP_RE = re.compile(r'^(?P<k>[A-Za-z_]+)\s*=\s*(?P<v>.+?)\s*$')
+TRACK_LEN_LIMIT = 200
+TRACK_FIELDS = ("video", "audio", "subtitle")
+SUB_FORMATS = ("", "SRT", "VTT")
+
+
+def clean_track(value: object) -> str:
+    """去掉轨道选择里各处可有可无的空白：' res = "1280" : lang = "eng" ' → 'res="1280":lang="eng"'。
+
+    引擎是拿整个值去比对轨道属性的，'res = "1280"' 在它眼里不是 'res="1280"'，
+    结果就是「命中 0 条轨道 + 一句 No stream found to download」。用户在输入框
+    里多打一个空格是很常见的事，这一层空白必须在交给引擎之前抹掉。
+    """
+    text = str(value or "").strip()
+    if not text or _SELECTOR_SHORT_RE.match(text):
+        return text
+    parts: List[str] = []
+    for seg in text.split(":"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        m = _PAIR_SP_RE.match(seg)
+        if m:
+            seg = "%s=%s" % (m.group("k"), m.group("v"))
+        parts.append(seg)
+    return ":".join(parts)
+
+
+def check_tracks(tracks: Dict[str, str]) -> str:
+    """校验轨道选择，返回中文错误说明；空串表示通过。
+
+    这里只管**语法**（能不能被引擎理解、键名有没有拼错、有没有塞进换行/控制字符），
+    不管轨道在不在 —— 在不在要联网解析播放列表才知道，那是引擎的活。
+    """
+    tracks = tracks or {}
+    for field in TRACK_FIELDS:
+        value = str(tracks.get(field) or "").strip()
+        if not value:
+            continue
+        if len(value) > TRACK_LEN_LIMIT:
+            return "%s 轨道选择太长（%d 字，上限 %d）" % (field, len(value), TRACK_LEN_LIMIT)
+        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+            return "%s 轨道选择不能包含换行或控制字符" % field
+        if _SELECTOR_SHORT_RE.match(value):
+            continue
+        bad = []
+        for part in value.split(":"):
+            part = part.strip()
+            if not part:
+                continue
+            m = _SELECTOR_PAIR_RE.match(part)
+            if not m or m.group("k").lower() not in SELECTOR_KEYS:
+                bad.append(part)
+        if bad:
+            return ("%s 轨道选择看不懂：%s。写法应是 子键=值（多个用冒号分隔），"
+                    "可用子键如 id / lang / name / codecs / res / for，"
+                    "或整体简写 all / best / best2 / worst1") % (field, "、".join(bad[:3]))
+    fmt = str(tracks.get("sub_format") or "").strip().upper()
+    if fmt not in SUB_FORMATS:
+        return "字幕格式只能是 SRT 或 VTT，不能是 %r" % fmt
+    return ""
+
+
 def build_cmd(
     binp: str,
     url: str,
@@ -131,6 +212,7 @@ def build_cmd(
     threads: int = 0,
     rate_limit: int = 0,
     ffmpeg: str = "",
+    tracks: Optional[Dict[str, str]] = None,
     extra: Optional[List[str]] = None,
 ) -> List[str]:
     """拼一条「下到 save_dir/save_name.<容器>，分片放 tmp_dir」的命令。
@@ -138,7 +220,13 @@ def build_cmd(
     --ui-language en-US：解析锚点（"ffmpeg merging..." / "Done" / ERROR 文案）
     按中文匹配会随上游改词失效；英文文案更稳定，也便于原样写进
     download-errors.log（用户看到的仍是中文，那是引擎自己的本地化，不受影响）。
+
+    tracks 给了任一选择器时**必须撤掉 --auto-select**：实测两者同传时引擎照旧按
+    auto-select 的结果下，显式的 -sv/-sa/-ss 被静默忽略 —— 用户勾了「只要西班牙语」
+    却拿到默认音轨，比报错更难查。
     """
+    tracks = tracks or {}
+    sel = {k: str(v or "").strip() for k, v in tracks.items() if str(v or "").strip()}
     cmd = [
         binp,
         url,
@@ -151,9 +239,26 @@ def build_cmd(
         "--disable-update-check",
         "--ui-language",
         "en-US",
-        # 步骤 1 只做「整条流下下来再合流」，与 ffmpeg 通道等价：自动挑最佳轨道。
-        "--auto-select",
     ]
+    if sel:
+        for key, flag in (
+            ("video", "-sv"),
+            ("audio", "-sa"),
+            ("subtitle", "-ss"),
+        ):
+            if key in sel:
+                cmd += [flag, sel[key]]
+    else:
+        # 没点名轨道时保持步骤 1 的行为：自动挑最佳，与 ffmpeg 通道等价。
+        cmd.append("--auto-select")
+    fmt = str(tracks.get("sub_format") or "").strip().upper()
+    if fmt in ("SRT", "VTT"):
+        cmd += ["--sub-format", fmt]
+    # 把分离出来的音轨/字幕混进一个容器。不开 -M 时引擎**不合流**（实测多音轨
+    # master + --auto-select 会产出「纯视频 mp4 + 两个 .m4a + 一个 .srt」），
+    # 用户拿到的是没声的画面，还以为是自己挑错了。-M 会把中间分片和 sidecar
+    # 一起清掉，最后只剩 <save-name>.mp4。
+    cmd += ["-M", "format=" + MUX_FORMAT]
     if threads > 0:
         cmd += ["--thread-count", str(max(1, min(int(threads), 64)))]
     if rate_limit > 0:

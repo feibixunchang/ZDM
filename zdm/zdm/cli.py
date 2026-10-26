@@ -180,6 +180,15 @@ def cmd_add(args) -> int:
         payload["start_at"] = args.start_at
     if args.section:
         payload["section"] = args.section
+    for _flag, _key in (
+        ("select_video", "stream_video"),
+        ("select_audio", "stream_audio"),
+        ("select_subtitle", "stream_subtitle"),
+        ("sub_format", "stream_sub_format"),
+    ):
+        _v = str(getattr(args, _flag, "") or "").strip()
+        if _v:
+            payload[_key] = _v
     if args.header:
         headers = {}
         for h in args.header:
@@ -517,7 +526,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_status)
 
-    s = sub.add_parser("add", help="add a download")
+    s = sub.add_parser(
+        "add",
+        help="add a download",
+        description="add a download (HLS/DASH track selectors need "
+        "stream_engine=auto/re in settings)",
+        epilog='track selector keys: id lang name codecs res frame channel '
+        'range url role for segsMin segsMax pkdMin pkdMax bwoff bwmin bwmax, '
+        'shorthands: all best best2 worst1',
+    )
     s.add_argument("url")
     s.add_argument("-o", "--dir", help="output directory")
     s.add_argument("-n", "--name", help="file name")
@@ -526,6 +543,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-p", "--priority", type=int, help="queue priority, higher goes first")
     s.add_argument("--start-at", help="scheduled start: Unix time or ISO-8601")
     s.add_argument("--section", help="video section, e.g. 00:01:00-00:05:00")
+    # HLS/DASH 轨道选择（只有 N_m3u8DL-RE 认）：值原样传给引擎的 -sv/-sa/-ss。
+    s.add_argument(
+        "--select-video",
+        dest="select_video",
+        help='HLS/DASH video track, e.g. \'res="1280"\' or best / all',
+    )
+    s.add_argument(
+        "--select-audio",
+        dest="select_audio",
+        help='HLS/DASH audio track, e.g. \'lang="spa"\' or best',
+    )
+    s.add_argument(
+        "--select-subtitle",
+        dest="select_subtitle",
+        help='HLS/DASH subtitle track, e.g. \'lang="eng"\' or all',
+    )
+    s.add_argument("--sub-format", dest="sub_format", help="subtitle format: SRT or VTT")
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_add)
 

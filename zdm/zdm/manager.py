@@ -77,6 +77,44 @@ def to_connections(value, default: int, name: str = "连接数") -> int:
     return max(1, min(MAX_CONNECTIONS, num))
 
 
+def normalize_tracks(cfg: Dict[str, object], raw: Dict[str, object]) -> Dict[str, str]:
+    """校验并归一轨道选择，返回 Download 的四个 stream_* 关键字参数。
+
+    放在 manager 而不是各端入口：GUI / 网页 / 命令行 / 扩展写的是同一个
+    manager.add，校验在这里做一次，四端才不会有人能绕过（和 normalize_section
+    一个套路）。引擎看不懂坏语法时不报错，只是命中 0 条轨道然后甩一句英文
+    异常，用户根本不知道是自己少打了个引号。
+    """
+    from . import re_bin
+
+    out = {
+        "stream_video": re_bin.clean_track(raw.get("video")),
+        "stream_audio": re_bin.clean_track(raw.get("audio")),
+        "stream_subtitle": re_bin.clean_track(raw.get("subtitle")),
+        "stream_sub_format": str(raw.get("sub_format") or "").strip().upper(),
+    }
+    if not any(out.values()):
+        return out
+    engine = str(cfg.get("stream_engine") or "auto").strip().lower()
+    if engine == "ffmpeg":
+        raise ValueError(
+            "轨道选择（视频/音频/字幕）只有 N_m3u8DL-RE 认，"
+            "当前设置里的流媒体引擎是 ffmpeg。请把流媒体引擎改成「自动」或 "
+            "N_m3u8DL-RE 再试。"
+        )
+    bad = re_bin.check_tracks(
+        {
+            "video": out["stream_video"],
+            "audio": out["stream_audio"],
+            "subtitle": out["stream_subtitle"],
+            "sub_format": out["stream_sub_format"],
+        }
+    )
+    if bad:
+        raise ValueError(bad)
+    return out
+
+
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
@@ -354,10 +392,23 @@ class Manager:
         section: Optional[str] = None,
         priority: int = 0,
         start_at: float = 0,
+        stream_video: Optional[str] = None,
+        stream_audio: Optional[str] = None,
+        stream_subtitle: Optional[str] = None,
+        stream_sub_format: Optional[str] = None,
     ) -> Download:
         if not url or not str(url).startswith(("http://", "https://")):
             raise ValueError("只支持 http/https 链接")
         cfg = self.config
+        tracks = normalize_tracks(
+            cfg,
+            {
+                "video": stream_video,
+                "audio": stream_audio,
+                "subtitle": stream_subtitle,
+                "sub_format": stream_sub_format,
+            },
+        )
         original_url = ""
         if cfg.get("mirror_accel"):
             try:
@@ -395,6 +446,7 @@ class Manager:
             priority=to_priority(priority),
             start_at=float(start_at or 0),
             original_url=original_url,
+            **tracks
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter
@@ -460,6 +512,10 @@ class Manager:
         priority: Optional[int] = None,
         section: Optional[str] = None,
         connections: Optional[int] = None,
+        stream_video: Optional[str] = None,
+        stream_audio: Optional[str] = None,
+        stream_subtitle: Optional[str] = None,
+        stream_sub_format: Optional[str] = None,
     ) -> Dict[str, object]:
         """Edit a task in place. Partial data survives when the URL still fits.
 
@@ -471,6 +527,7 @@ class Manager:
         d = self.get(task_id)
         if not d:
             raise ValueError("任务不存在")
+        _t_raw = (stream_video, stream_audio, stream_subtitle, stream_sub_format)
         if d.status in ("completed", "merging"):
             raise ValueError("已完成或正在合并的任务不能修改，请先重新下载")
         if url is not None:
@@ -520,6 +577,29 @@ class Manager:
             d.connections = to_connections(connections, d.connections)
             if d.segmenter is not None:
                 d.segmenter.balance(d.connections)
+        if any(v is not None for v in _t_raw):
+            # None = 这次没改这一项，留原值；空串 = 用户明确要清掉选择。
+            # 改了轨道等于换了要下的内容，已经下完的分片不能续 —— 先删掉。
+            tracks = normalize_tracks(
+                self.config,
+                {
+                    "video": _t_raw[0] if _t_raw[0] is not None else d.stream_video,
+                    "audio": _t_raw[1] if _t_raw[1] is not None else d.stream_audio,
+                    "subtitle": _t_raw[2] if _t_raw[2] is not None else d.stream_subtitle,
+                    "sub_format": (
+                        _t_raw[3] if _t_raw[3] is not None else d.stream_sub_format
+                    ),
+                },
+            )
+            if tracks != {
+                "stream_video": d.stream_video,
+                "stream_audio": d.stream_audio,
+                "stream_subtitle": d.stream_subtitle,
+                "stream_sub_format": d.stream_sub_format,
+            }:
+                for k, v in tracks.items():
+                    setattr(d, k, v)
+                self._drop_re_work(task_id)
         if priority is not None:
             d.priority = to_priority(priority)
         if start_at is not None:

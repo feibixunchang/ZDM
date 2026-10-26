@@ -604,6 +604,22 @@ def normalize_kind(value) -> str:
     return v if v in KINDS else ""
 
 
+def playlist_kind(url: str) -> str:
+    """从地址后缀看出这是不是一份播放列表（hls / dash），看不出来返回 ""。
+
+    手填 / 网页版 / CLI 粘一个 .m3u8 时没人给 kind，于是走普通文件通道：
+    把那几百字节的播放列表文本存成 movie.mp4，状态还是「已完成」——典型的
+    假成功。播放列表必须整条交给流媒体引擎取分片、解密、合流。
+    只在调用方**没给** kind 时用这里的推断：扩展/yt 解析给的 kind 是它们
+    按格式表挑的，其中 DASH 的「视频轨 + 单独音频轨」要靠 audio_url 走
+    两段合流，覆盖掉反而会走错通道。
+    """
+    m = _PLAYLIST_URL_RE.search((url or "").strip())
+    if not m:
+        return ""
+    return "hls" if m.group(1).lower() == "m3u8" else "dash"
+
+
 def needs_sequential(url: str) -> bool:
     """YouTube 的 googlevideo 直链只能**从头顺序**读。
 
@@ -696,6 +712,10 @@ class Download:
         priority: int = 0,
         start_at: float = 0.0,
         original_url: str = "",
+        stream_video: str = "",
+        stream_audio: str = "",
+        stream_subtitle: str = "",
+        stream_sub_format: str = "",
     ):
         self.id = id
         self.url = url
@@ -710,7 +730,7 @@ class Download:
         self.speed_limit = speed_limit
         # Provenance: who asked for this task, and what kind of payload it is.
         self.source = normalize_source(source)
-        self.kind = normalize_kind(kind)
+        self.kind = normalize_kind(kind) or playlist_kind(url)
         # DASH streams (Bilibili / YouTube adaptive) ship video and audio as
         # separate files. When the caller supplies the matching audio track we
         # download it too and mux the two with ffmpeg — otherwise the video
@@ -760,6 +780,14 @@ class Download:
         # 用哪条流媒体通道：auto（有引擎就用引擎，没有退回 ffmpeg）/ re / ffmpeg。
         # manager 建任务和恢复老任务时按配置写入（和 global_limiter 同一套路）。
         self.stream_engine = "auto"
+        # 挑哪几路轨道，交给 N_m3u8DL-RE 的 -sv/-sa/-ss（原样传，语法由 re_bin
+        # 在入口校验）。空 = 不点名，用 --auto-select。ffmpeg 通道看不懂这些，
+        # 所以只在 re 通道生效，三端都要能看见和改。
+        self.stream_video = str(stream_video or "")
+        self.stream_audio = str(stream_audio or "")
+        self.stream_subtitle = str(stream_subtitle or "")
+        # 字幕落成的格式（SRT / VTT），空 = 引擎默认（SRT）。
+        self.stream_sub_format = str(stream_sub_format or "")
         # 本轮**实际**走了哪条通道，以及换通道的理由。失败了不能说悄悄换个引擎
         # 跑完就当没事发生：界面上要能看出「这次不是用你选的那个下下来的」。
         self.stream_engine_used = ""
@@ -864,6 +892,11 @@ class Download:
             # 这一轮真正用的流媒体通道，以及换通道/降级的原因（三端都要显示）
             "stream_engine_used": self.stream_engine_used,
             "stream_note": self.stream_note,
+            # 轨道选择（三端可见、可改；只有 N_m3u8DL-RE 通道生效）
+            "stream_video": self.stream_video,
+            "stream_audio": self.stream_audio,
+            "stream_subtitle": self.stream_subtitle,
+            "stream_sub_format": self.stream_sub_format,
             "audio_url": self.audio_url,
             "audio_only": self.audio_only,
             "yt_page": self.yt_page,
@@ -894,6 +927,10 @@ class Download:
             "yt_page": self.yt_page,
             "yt_height": self.yt_height,
             "section": self.section,
+            "stream_video": self.stream_video,
+            "stream_audio": self.stream_audio,
+            "stream_subtitle": self.stream_subtitle,
+            "stream_sub_format": self.stream_sub_format,
             "priority": self.priority,
             "start_at": self.start_at,
             "original_url": self.original_url,
@@ -926,6 +963,11 @@ class Download:
         self.yt_page = str(data.get("yt_page") or self.yt_page or "")
         self.yt_height = max(0, record_int(data.get("yt_height"), self.yt_height or 0))
         self.section = str(data.get("section") or self.section or "")
+        for _k in ("video", "audio", "subtitle", "sub_format"):
+            # 空串是「不点名轨道」，是一个有效值：老 meta 没有这个键才保留构造时的
+            # 默认值，键在（哪怕是空串）就照键走，否则用户清空的选择会被复活。
+            if data.get("stream_" + _k) is not None:
+                setattr(self, "stream_" + _k, str(data["stream_" + _k]))
         self.priority = clamp_priority(data.get("priority") or self.priority)
         self.start_at = max(0.0, record_float(data.get("start_at"), self.start_at or 0))
         self.original_url = str(data.get("original_url") or self.original_url or "")
@@ -1611,7 +1653,24 @@ class Download:
         else:
             want = "ffmpeg"
             self.stream_engine_used = "ffmpeg"
+        if self.stream_tracks() and self.stream_engine_used == "ffmpeg":
+            # 轨道选择只有 N_m3u8DL-RE 认（-sv/-sa/-ss），ffmpeg 拉流做不到。
+            # 不能说「按你挑的音轨下好了」：用户挑的是西班牙语，实际拿到默认轨。
+            self.stream_note = (
+                (self.stream_note + "；" if self.stream_note else "")
+                + "本次走的 ffmpeg 通道不支持轨道选择，已按默认轨道下载"
+            )
         self._run_stream()
+
+    def stream_tracks(self) -> Dict[str, str]:
+        """把四个轨道字段收成 re_bin.build_cmd 要的字典（全空时返回 {}）。"""
+        out = {
+            "video": self.stream_video,
+            "audio": self.stream_audio,
+            "subtitle": self.stream_subtitle,
+            "sub_format": self.stream_sub_format,
+        }
+        return {k: v for k, v in out.items() if str(v or "").strip()}
 
     def _run_stream_re(self, binp: str) -> None:
         """HLS / DASH 交给 N_m3u8DL-RE：分片并发、单片重试、暂停后按分片续传。
@@ -1657,6 +1716,7 @@ class Download:
             threads=self.connections,
             rate_limit=limit,
             ffmpeg=_find_ffmpeg() or "",
+            tracks=self.stream_tracks(),
         )
         rc, err_text = re_bin.download(
             cmd,
@@ -1706,10 +1766,48 @@ class Download:
             re_bin.drop_work_dir(self.id)
             self.stream_engine_used = "ffmpeg"
             self.stream_note = "N_m3u8DL-RE 失败（%s），已改用 ffmpeg 重新下载" % reason
+            if self.stream_tracks():
+                self.stream_note += "；轨道选择只有 N_m3u8DL-RE 认，ffmpeg 按默认轨道下载"
             self._run_stream()
             return
         re_bin.drop_work_dir(self.id)
-        self._finish_stream(produced)
+        # 正常收尾时 -M 已经把 sidecar 混进成品并清干净，这里拿到的是空表；
+        # 只有多路视频（-sv '...:for=all'）这类一个任务产出多个文件的情形才有
+        # 余数。余数必须跟着改名搬走，否则用户目录里留着 zdm-<任务id>.spa.m4a
+        # 这种看不懂的名字，删掉又是把已经下到的轨道丢了。
+        extras = [p for p in self._re_outputs(stem) if p != produced]
+        self._finish_stream(produced, extras)
+
+    def _move_stream_extras(self, out: str, final: str, extras: List[str]) -> List[str]:
+        """把引擎额外落下的分离轨改名搬到成品旁边，返回搬走后的文件名。
+
+        引擎给分离轨的命名是 `<stem>.<语言>.<ext>`（字幕/音轨）或 `<stem>.copy.<ext>`
+        （第二路视频）。这里保留 stem 后面那段后缀，只把内部任务名换成用户看的
+        名字：`zdm-1a2b3c.spa.m4a` → `电影.spa.m4a`。
+        """
+        moved: List[str] = []
+        stem = os.path.splitext(os.path.basename(out))[0]
+        want_base = os.path.splitext(final)[0]
+        for path in extras:
+            name = os.path.basename(path)
+            # 分离轨的命名是「成品名去掉后缀 + .<语言|copy>.<后缀>」，不是「成品
+            # 文件名 + …」，所以要比对去后缀的那一段。
+            tail = name[len(stem) + 1:] if name.startswith(stem + ".") else ""
+            if not tail:
+                ext = os.path.splitext(name)[1].lstrip(".")
+                tail = ext or "part"
+            target = os.path.join(
+                self.directory, _unique_name(self.directory, want_base + "." + tail)
+            )
+            try:
+                os.replace(path, target)
+            except OSError:
+                try:
+                    shutil.move(path, target)
+                except OSError:
+                    continue
+            moved.append(os.path.basename(target))
+        return moved
 
     def _re_outputs(self, stem: str) -> List[str]:
         """引擎在本任务目录里产出的 <stem>.<容器> 文件（可能有多个候选）。"""
@@ -2077,8 +2175,12 @@ class Download:
 
         self._finish_stream(out)
 
-    def _finish_stream(self, out: str) -> None:
-        """把通道产出的临时命名文件换成用户看得懂的名字并收尾（两条通道共用）。"""
+    def _finish_stream(self, out: str, extra_files: Optional[List[str]] = None) -> None:
+        """把通道产出的临时命名文件换成用户看得懂的名字并收尾（两条通道共用）。
+
+        extra_files 是同一次下载里引擎额外落下的分离轨（`<stem>.<lang>.<ext>`）。
+        它们要跟着改名搬走，不能留在用户目录里顶着 zdm-<任务id> 的内部名字。
+        """
         # 停在最后一个分片/合流中途时才取消的话，_stop 检查已经过了：这里再挡
         # 一次，否则会把已取消（甚至已删除）的任务改回 completed，还会把用户
         # 刚取消的文件改名成正式名。
@@ -2088,6 +2190,11 @@ class Download:
                 os.remove(out)
             except OSError:
                 pass
+            for extra in extra_files or []:
+                try:
+                    os.remove(extra)
+                except OSError:
+                    pass
             self._emit("canceled")
             return
         # 换成用户看得懂的文件名
@@ -2111,6 +2218,8 @@ class Download:
                 self._emit("error")
                 return
         self.filename = final
+        for extra in self._move_stream_extras(out, final, extra_files or []):
+            self.filename += "、" + extra
         try:
             self.size = os.path.getsize(target)
         except OSError:

@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.17.1**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.17.2**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -21,16 +21,18 @@
 
 | 平台 | 安装包 | 安装方式 |
 |---|---|---|
-| macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
-| macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.17.1_amd64.deb` | `sudo apt install ./zdm_1.17.1_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
+| macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
+| Linux | `zdm_1.17.2_amd64.deb` | `sudo apt install ./zdm_1.17.2_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.17.1.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.17.2.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
-> `ZDM-<version>-<arch>.dmg` 在 `macos-latest` 上构建，`ZDM-Setup-*.exe` 在 `windows-latest` 上构建（由
+> `ZDM-<version>-arm64.dmg` 在 `macos-latest` 上构建，`ZDM-Setup-*.exe` 在 `windows-latest` 上构建（由
 > `.github/workflows/build-packages.yml` 驱动），push main 即构建，推 tag 时产物自动挂到对应 Release。
+> 每个 tag 的 Release 上就是四个文件：arm64 dmg、amd64 deb、linux tar.gz、Setup.exe
+> —— 没有 x64 dmg，也没有 `zdm-macos.zip`。
 >
 > macOS 的 `.dmg` 与 Linux 的 `.deb` 都是**自包含**的：Python 运行时、PyQt5/Qt 与资源全部
 > 打包在产物内，目标机器无需预装 Python、pip 或 `python3-pyqt5`。
@@ -50,7 +52,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.17.1
+bash zdm/build_linux_app.sh ./linux-build 1.17.2
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -244,8 +246,34 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
   CI 额外校验 macOS 那份已签名、没有 quarantine 属性；`install.sh` / `install.ps1`
   里 deno 与该引擎各自补齐（以前 deno 在就整段跳过，升级上来的机器永远补不上流媒体引擎）。
 
-边界仍在：DRM / AES 密钥需要外部解密的流、以及需要选音轨/字幕的多轨道封装，这一版
-还是「整条最佳画质下下来再合流」，和 ffmpeg 通道等价 —— 轨道选择是下一步。
+**多音轨的 m3u8 下成「没声音的视频 + 一地散件」、轨道只能听引擎挑** —— v1.17.2 起，
+HLS / DASH 能点名要哪几路轨，产物固定是**一个**能直接播的文件。
+
+- **`-M format=mp4` 取代散件**：`--auto-select` 碰到多音轨的 master 会产出「仅视频的
+  无声 mp4」+ `<主名>.eng.m4a` + `<主名>.spa.m4a` + `<主名>.eng.srt`，引擎自己不合流。
+  现在每条命令都带 `--mux-after-done format=mp4`，由引擎收尾时混流并清掉中间产物。
+  代价要说清：纯音频流（音乐站、播客）的容器从 `.m4a` 变成 `.mp4`（改名时仍以真正产出的
+  容器为准，不会给你打不开的后缀）；混进 mp4 的轨道不再带 language 标签，字幕也进容器而不是
+  留 sidecar，所以 `--sub-format` 只在容器里装不下那种字幕时才看得出差别。
+- **轨道选择** `-sv` / `-sa` / `-ss`（值就是引擎的「子键=值，多个用冒号分隔」语法，如
+  `lang="eng":codecs="mp4a"`，也可整体写 `all` / `best` / `worst1`）+ `--sub-format SRT|VTT`。
+  给了任一项就**不再发 `--auto-select`**：实测两者同传时引擎照旧按 auto-select 下，显式选择被
+  静默忽略 —— 用户勾了「只要西班牙语」却拿到默认音轨，比直接报错更难查。
+- 入口有**语法**校验（桌面端新建/编辑对话框、网页版地址条下方的轨道条与编辑对话框、
+  `zdm add --select-video/--select-audio/--select-subtitle/--sub-format`、`/api/tasks`）：
+  打错的子键（`lagu=`）、换行/控制字符（不能借参数注入）、超长一律在建任务时就拒，网页版和
+  CLI 直接看到中文原因（HTTP 400）。轨道**在不在**不在这里判 —— 那要联网解析播放列表，是引擎的活。
+- **空白先抹掉**：`res = "1280"` 在引擎眼里不是 `res="1280"`，结果是命中 0 条轨道后甩一句
+  英文 `No stream found to download`。输入框里多打一个空格很常见，这层归一必须在交引擎之前做完。
+- 选 ffmpeg 引擎时给轨道**直接拒绝**（ffmpeg 通道看不懂选择器），而不是默默按默认轨下完再说
+  「按你挑的做完了」；`auto` 退回 ffmpeg 时把这条一并写进 `stream_note`。
+- 编辑任务改轨道会作废 `re-work/<任务 id>` 分片暂存：那些分片是按另一条轨的清单取的，留着续传
+  等于把两次的结果拼在一个文件里。
+- **粘贴 `.m3u8` / `.mpd` 地址现在自动认成流媒体任务**：以前调用方没给 `kind` 就走普通文件通道，
+  把那几百字节的播放列表文本存成 `movie.mp4`，状态还是「已完成」——假成功。扩展与 yt-dlp 显式给的
+  `kind` 照旧优先（DASH 的「视频轨 + 单独音频轨」要靠它走两段合流）。
+
+边界仍在：DRM / 需要外部解密的流；直播流的录制（`.m3u8` 是持续增长的清单时怎么办）是下一步。
 
 **Windows 安装包在 v1.17.0 那次没能构建出来** —— v1.17.1 修的是构建脚本自己：
 `fetch_bin.py` 的进度文案是中文，而 Windows 控制台默认是代码页（CI 上 cp1252），
@@ -335,6 +363,9 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
   `只用 N_m3u8DL-RE` / `只用 ffmpeg`（`zdm config stream_engine re`）。凡是没用上你选的那个引擎，
   任务上会写明理由（桌面端状态列的悬停提示、网页版任务行的橙色提示、`/api/tasks` 的 `stream_note`），
   不静默降级。限速、代理、Cookie / Referer 都会带给引擎；DASH 的音视频分轨场景仍由 ffmpeg 处理。
+  *（多音轨 / 多字幕可点名：轨道选择框在桌面端新建与编辑对话框、网页版地址条下方的轨道条、
+  `zdm add --select-video/--select-audio/--select-subtitle/--sub-format` 三处都有，写法见
+  上方「多音轨的 m3u8」一条。粘贴 `.m3u8` / `.mpd` 地址本身就按流媒体任务处理，不需要额外声明。）*
 - **视频卡片上的「下载此视频」按钮**：B站 / YouTube 的每个视频卡片右上角，鼠标移上去
   会浮出一颗按钮，点开是该视频的**清晰度列表**（1080P / 720P / 音频…），选一个直接推给 ZDM。
   扩展就地解析页面里已加载的媒体数据（YouTube 的 `streamingData`、B站的 `__playinfo__`），

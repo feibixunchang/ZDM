@@ -49,6 +49,30 @@ def _parse_section(value) -> str:
     """Normalise a yt-dlp section range ("00:01:00-00:05:00" → "*…")."""
     return normalize_section(value)
 
+
+# 轨道选择：扩展/网页/CLI 传进来的键名不统一，认这几个别名（第一个是正式名）。
+_TRACK_KEYS = {
+    "stream_video": ("stream_video", "video_track", "select_video"),
+    "stream_audio": ("stream_audio", "audio_track", "select_audio"),
+    "stream_subtitle": ("stream_subtitle", "subtitle_track", "select_subtitle"),
+    "stream_sub_format": ("stream_sub_format", "subtitle_format", "sub_format"),
+}
+
+
+def _track_value(body: dict, key: str):
+    """取一项轨道选择。键都没出现时返回 None —— 编辑接口要靠它区分
+    「这次没改」和「改成空（清掉选择）」，两者行为不同。
+    """
+    for alias in _TRACK_KEYS[key]:
+        if alias in body:
+            value = body[alias]
+            if value is None:
+                return ""
+            if not isinstance(value, str):
+                raise ValueError("%s 需要字符串（收到 %r）" % (key, value))
+            return value
+    return None
+
 # Pinned by the ``key`` field in extension/manifest.json, so it survives
 # reloads and updates. Only this extension may fetch the API token.
 EXTENSION_ID = "mpodbnemeeghjpllgphpemhoogddfhjg"
@@ -658,6 +682,10 @@ class Handler(BaseHTTPRequestHandler):
                     yt_page=body.get("yt_page") or body.get("page_url"),
                     yt_height=body.get("yt_height") or body.get("height"),
                     section=section,
+                    stream_video=_track_value(body, "stream_video"),
+                    stream_audio=_track_value(body, "stream_audio"),
+                    stream_subtitle=_track_value(body, "stream_subtitle"),
+                    stream_sub_format=_track_value(body, "stream_sub_format"),
                     priority=body.get("priority"),
                     start_at=_parse_start_at(body.get("start_at")),
                 )
@@ -726,6 +754,10 @@ class Handler(BaseHTTPRequestHandler):
                         start_at=start_at,
                         priority=priority,
                         section=section,
+                        stream_video=_track_value(body, "stream_video"),
+                        stream_audio=_track_value(body, "stream_audio"),
+                        stream_subtitle=_track_value(body, "stream_subtitle"),
+                        stream_sub_format=_track_value(body, "stream_sub_format"),
                         connections=(
                             conns if conns not in (None, "") else None
                         ),
