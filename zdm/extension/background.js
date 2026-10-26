@@ -1079,8 +1079,46 @@ async function youtubeCookieText() {
   return siteCookieText("youtube.com");
 }
 
+let apiTokenCache = "";
+
+/* The service now requires a per-user token. Only the pinned extension may
+ * fetch it; a page in a normal tab cannot read the response because CORS no
+ * longer answers "*". The token is cached locally so the 0.8s polling does not
+ * turn into an extra round-trip. */
+async function getApiToken(cfg, force = false) {
+  if (apiTokenCache && !force) return apiTokenCache;
+  const key = "zdmApiToken";
+  if (!force) {
+    try {
+      const got = await chrome.storage.local.get(key);
+      if (got && got[key]) {
+        apiTokenCache = got[key];
+        return apiTokenCache;
+      }
+    } catch (_) {}
+  }
+  try {
+    const r = await fetch(baseUrl(cfg) + "/api/extension/token", {
+      cache: "no-store",
+      headers: { "X-ZDM-Extension": chrome.runtime.id },
+    });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.token) {
+        apiTokenCache = j.token;
+        try {
+          await chrome.storage.local.set({ [key]: j.token });
+        } catch (_) {}
+        return apiTokenCache;
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+
 async function api(path, body, method = "POST") {
   const cfg = await getCfg();
+  let token = await getApiToken(cfg);
   const doFetch = () =>
     fetch(baseUrl(cfg) + "/api/" + path.replace(/^\/+/, ""), {
       method,
@@ -1089,6 +1127,7 @@ async function api(path, body, method = "POST") {
         // Lets the client whitelist this extension id for native messaging even
         // if it was reloaded under a different id.
         "X-ZDM-Extension": chrome.runtime.id,
+        ...(token ? { "X-ZDM-Token": token } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
     });
@@ -1099,6 +1138,11 @@ async function api(path, body, method = "POST") {
     // 服务重启（升级）的瞬间连接池里可能全是死 socket：歇 400ms 重试
     // 一次，面板就不用等用户重开浏览器才恢复。
     await new Promise((res) => setTimeout(res, 400));
+    r = await doFetch();
+  }
+  if (r.status === 401) {
+    // Token rotated (reinstall) or a stale cache: refresh once.
+    token = await getApiToken(cfg, true);
     r = await doFetch();
   }
   return r.json();
@@ -1265,8 +1309,10 @@ function buildProtocolUrl(req) {
   if (req.audio_url) q.set("audio_url", req.audio_url);
   if (req.yt_page) q.set("yt_page", req.yt_page);
   if (req.yt_height) q.set("yt_height", String(req.yt_height));
-  // Cookie 也要活过协议跳转：需要登录的视频站，没有它就是 403。
-  if (req.cookie) q.set("cookie", req.cookie);
+  // Cookies must NOT travel through a zdm:// URL: the URL is visible to the
+  // browser history, OS logs and every other app registered for the scheme.
+  // Native messaging (registered by all three installers) carries them; this
+  // fallback is only for non-login-protected media.
   return "zdm://add?" + q.toString();
 }
 
@@ -1298,7 +1344,12 @@ async function waitForServer(cfg, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const r = await fetch(base + "/api/state", { cache: "no-store" });
+      // The unauthenticated heartbeat is enough to prove the service is up;
+      // /api/state now needs the token and would just return 401.
+      const r = await fetch(base + "/api/extension/ping", {
+        cache: "no-store",
+        headers: { "X-ZDM-Extension": chrome.runtime.id },
+      });
       if (r.ok) return true;
     } catch (_) {
       /* 还没起来，继续等 */
@@ -1475,13 +1526,26 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 /* ---- popup helpers ---- */
+const TASK_ACTIONS = new Set(["pause", "resume", "restart", "cancel"]);
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Only our own content scripts/pages may drive the API. Chrome does not
+  // deliver messages from other extensions here, but an explicit check keeps
+  // a future externally_connectable entry from turning this into a proxy.
+  if (!sender || sender.id !== chrome.runtime.id) return;
+  if (!msg || typeof msg.type !== "string") return;
   if (msg.type === "state") {
     api("state", null, "GET").then(sendResponse).catch(() => sendResponse({ ok: false }));
     return true;
   }
   if (msg.type === "task-action") {
-    api(`tasks/${msg.id}/${msg.action}`, {}).then(sendResponse).catch(() => sendResponse({ ok: false }));
+    if (!msg.id || !TASK_ACTIONS.has(msg.action)) {
+      sendResponse({ ok: false, error: "unsupported action" });
+      return true;
+    }
+    api(`tasks/${encodeURIComponent(msg.id)}/${msg.action}`, {})
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false }));
     return true;
   }
   if (msg.type === "wake") {

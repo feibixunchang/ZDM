@@ -1036,6 +1036,11 @@
   //   - attribute 是共享的，但只能放字符串，放不了函数。
   // postMessage 的 event 对象是两个 world 共享的，所以能用它传函数调用。
   window.addEventListener("message", async (ev) => {
+    // Only the isolated content script in this frame may query the bridge.
+    // Without these checks an ad iframe could postMessage to the parent and
+    // read the page's media metadata (and in some paths, cookie-bearing data).
+    if (ev.source !== window) return;
+    if (ev.origin && ev.origin !== location.origin) return;
     const d = ev.data;
     if (!d || d.__zdm !== "query") return;
     let out = null;
@@ -1087,7 +1092,10 @@
     // ev.source 在 MAIN world 里是 isolated world 的 windowproxy，
     // 回传时可能落不到对方的监听器上。直接往 window 发，
     // 两个 world 都能收到（各自按 __zdm/id 过滤）。
-    window.postMessage({ __zdm: "reply", id: d.id, data: out }, "*");
+    window.postMessage(
+      { __zdm: "reply", id: d.id, data: out },
+      location.origin === "null" ? "*" : location.origin
+    );
   });
 
   // 标记桥接已就绪（attribute 跨 world 共享）

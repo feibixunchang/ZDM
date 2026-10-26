@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import queue
 import threading
 import time
 import webbrowser
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import __version__ as VERSION
+from . import apitoken
 from . import desktop
 from . import presence
 from . import runtime
@@ -20,6 +23,10 @@ from .manager import Manager
 from .videopage import video_page_filename, video_page_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
+
+# Pinned by the ``key`` field in extension/manifest.json, so it survives
+# reloads and updates. Only this extension may fetch the API token.
+EXTENSION_ID = "mpodbnemeeghjpllgphpemhoogddfhjg"
 
 # Which configured cookie belongs to which host. The media itself often lives
 # on a CDN (googlevideo.com, bilivideo.com) while the session cookie belongs
@@ -212,17 +219,38 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # silence default stderr logging
         pass
 
+    def _port(self) -> int:
+        try:
+            return int(self.server.server_address[1])  # type: ignore[attr-defined]
+        except Exception:
+            return 0
+
+    def _allowed_origin(self) -> str:
+        """Return the request origin when it is one we explicitly trust."""
+        origin = self.headers.get("Origin") or ""
+        if not origin:
+            return ""
+        port = self._port()
+        allowed = {
+            f"chrome-extension://{EXTENSION_ID}",
+            f"http://127.0.0.1:{port}",
+            f"http://localhost:{port}",
+        }
+        return origin if origin in allowed else ""
+
     def _cors(self) -> None:
         # 本地 API 不需要 keep-alive：开着它，服务重启（升级后 postinst 会
         # 杀掉旧 serve）后浏览器连接池里全是死连接，扩展要重启浏览器才
         # 恢复（实测）。每响应一条就关，客户端下次新建连接，彻底规避。
         self.close_connection = True
         self.send_header("Connection", "close")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # Never answer ``*``: any web page the user visits could otherwise read
+        # the response (site cookies, task headers) from 127.0.0.1.
+        origin = self._allowed_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-        # The browser extension identifies itself with X-ZDM-Extension. It has
-        # to be listed here or a CORS preflight fails for web pages that call
-        # the API directly.
         self.send_header(
             "Access-Control-Allow-Headers", "Content-Type,X-ZDM-Token,X-ZDM-Extension"
         )
@@ -231,18 +259,60 @@ class Handler(BaseHTTPRequestHandler):
         # 而扩展的每个请求要么带 X-ZDM-Extension、要么 Origin 是
         # chrome-extension://。GUI 的「浏览器扩展」对话框就靠这个回答
         # 「扩展装上了没有」——比读注册表/翻浏览器配置目录可靠得多。
-        if self.headers.get("X-ZDM-Extension") or (
+        if self.headers.get("X-ZDM-Extension") == EXTENSION_ID or (
             self.headers.get("Origin") or ""
-        ).startswith("chrome-extension://"):
+        ) == f"chrome-extension://{EXTENSION_ID}":
             presence.note_seen()
+
+    def _supplied_token(self) -> str:
+        header = self.headers.get("X-ZDM-Token") or ""
+        if header:
+            return header
+        raw = self.headers.get("Cookie") or ""
+        if raw:
+            try:
+                jar = SimpleCookie()
+                jar.load(raw)
+                morsel = jar.get("zdm_token")
+                if morsel is not None:
+                    return morsel.value
+            except Exception:
+                pass
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        if query:
+            try:
+                values = parse_qs(query).get("token") or [""]
+                return values[0]
+            except Exception:
+                pass
+        return ""
 
     def _auth_ok(self) -> bool:
         if not self.token:
+            # Fail closed: an empty token means setup went wrong, not "open to
+            # the world". The browser UI still works because the service always
+            # creates a token before listening.
+            return False
+        supplied = self._supplied_token()
+        return bool(supplied) and hmac.compare_digest(supplied, self.token)
+
+    def _extension_ok(self) -> bool:
+        """Only our pinned extension may ask for the token."""
+        origin = self.headers.get("Origin") or ""
+        if origin:
+            return origin == f"chrome-extension://{EXTENSION_ID}"
+        return (self.headers.get("X-ZDM-Extension") or "") == EXTENSION_ID
+
+    def _host_ok(self) -> bool:
+        """Reject DNS-rebinding requests that kept a non-local Host header."""
+        raw = self.headers.get("Host") or ""
+        if not raw:
             return True
-        if self.headers.get("X-ZDM-Token") == self.token:
-            return True
-        q = self.path.split("?", 1)[1] if "?" in self.path else ""
-        return f"token={self.token}" in q
+        try:
+            host = (urlparse("//" + raw).hostname or "").lower()
+        except Exception:
+            return False
+        return host in ("127.0.0.1", "localhost", "::1")
 
     def _send(self, code: int, body: bytes, ctype: str, extra=None) -> None:
         self.send_response(code)
@@ -280,16 +350,24 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- routes ----------
     def do_OPTIONS(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return self._error(403, "forbidden host")
         self.send_response(204)
         self._cors()
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return self._error(403, "forbidden host")
         parts = self._path_parts()
         if not parts:
             return self._serve_static("index.html")
         if parts[0] == "api":
+            if parts == ["api", "extension", "token"]:
+                if not self._extension_ok():
+                    return self._error(403, "not the ZDM extension")
+                return self._json({"ok": True, "token": self.token})
             if parts == ["api", "extension", "ping"]:
                 # 扩展心跳：故意不鉴权（它只记录「扩展来过」，不泄露任何
                 # 东西），否则 token 校验会把最需要这条信号的新装机用户挡在
@@ -312,11 +390,18 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_ok():
                 return self._error(401, "invalid token")
             return self._api_get(parts[1:])
-        if parts[0] == "events" or (parts[0] == "api" and len(parts) > 1 and parts[1] == "events"):
+        if parts[0] == "events":
+            # EventSource cannot set request headers, so the web UI presents
+            # the SameSite cookie set when index.html was served. This used to
+            # be reachable without any credential and streamed site cookies.
+            if not self._auth_ok():
+                return self._error(401, "invalid token")
             return self._sse()
         return self._serve_static("/".join(parts))
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return self._error(403, "forbidden host")
         parts = self._path_parts()
         if not parts or parts[0] != "api":
             return self._error(404, "not found")
@@ -325,6 +410,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._api_post(parts[1:])
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return self._error(403, "forbidden host")
         parts = self._path_parts()
         if len(parts) >= 3 and parts[0] == "api" and parts[1] == "tasks":
             if not self._auth_ok():
@@ -465,10 +552,18 @@ class Handler(BaseHTTPRequestHandler):
             # list renders it as a video and not as an ordinary file.
             if (body.get("yt_page") or body.get("page_url")) and not body.get("kind"):
                 body["kind"] = "video"
+            directory = body.get("dir") or body.get("directory")
+            if directory is not None:
+                if not isinstance(directory, str):
+                    return self._error(400, "directory must be a string")
+                if "\x00" in directory:
+                    return self._error(400, "invalid directory")
+                directory = os.path.abspath(os.path.expanduser(directory.strip()))
+                body["dir"] = directory
             try:
                 d = self.manager.add(
                     url=url,
-                    directory=body.get("dir") or body.get("directory"),
+                    directory=directory,
                     filename=body.get("filename") or body.get("name"),
                     connections=body.get("connections"),
                     headers=headers,
@@ -537,7 +632,10 @@ class Handler(BaseHTTPRequestHandler):
             elif act == "clear_finished":
                 self.manager.clear_finished()
             elif act == "open_folder":
-                self.manager.open_path(body.get("path") or str(self.manager.config["download_dir"]))
+                path = body.get("path") or str(self.manager.config["download_dir"])
+                if not self.manager.can_open_path(path):
+                    return self._error(403, "path outside download directories")
+                self.manager.open_path(path)
             elif act == "shutdown":
                 threading.Timer(0.6, self.server.shutdown).start()
             else:
@@ -550,6 +648,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if parts == ["open"]:
             path = body.get("path") or str(self.manager.config["download_dir"])
+            if not self.manager.can_open_path(path):
+                return self._error(403, "path outside download directories")
             mode = (body.get("mode") or "dir").lower()
             if mode == "file":
                 ok = self.manager.open_file(path)
@@ -605,12 +705,28 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, rel: str) -> None:
         rel = rel.lstrip("/") or "index.html"
         path = os.path.normpath(os.path.join(WEB_DIR, rel))
-        if not path.startswith(WEB_DIR) or not os.path.isfile(path):
+        try:
+            inside = os.path.commonpath(
+                [os.path.realpath(WEB_DIR), os.path.realpath(path)]
+            ) == os.path.realpath(WEB_DIR)
+        except ValueError:  # different drives on Windows
+            inside = False
+        if not inside or not os.path.isfile(path):
             return self._error(404, "not found")
         ext = os.path.splitext(path)[1]
         with open(path, "rb") as f:
             data = f.read()
-        self._send(200, data, MIME.get(ext, "application/octet-stream"))
+        extra = None
+        if rel in ("index.html", "/index.html") and self.token:
+            # Same-origin fetch/EventSource send this automatically. HttpOnly
+            # keeps page scripts from copying the secret; SameSite=Strict stops
+            # other sites from riding on it.
+            extra = {
+                "Set-Cookie": (
+                    f"zdm_token={self.token}; Path=/; HttpOnly; SameSite=Strict"
+                )
+            }
+        self._send(200, data, MIME.get(ext, "application/octet-stream"), extra)
 
     # ---------- SSE ----------
     def _sse(self) -> None:
@@ -652,7 +768,13 @@ class Handler(BaseHTTPRequestHandler):
             self.manager.unsubscribe(q)
 
 
-def make_server(manager: Manager, host: str = "127.0.0.1", port: int = 9000, token: str = ""):
+def make_server(
+    manager: Manager,
+    host: str = "127.0.0.1",
+    port: int = 9000,
+    token: Optional[str] = None,
+):
+    token = apitoken.get_token() if token is None else token
     cls = type(
         "BoundHandler",
         (Handler,),
@@ -669,7 +791,7 @@ def serve(
     manager: Manager,
     host: str = "127.0.0.1",
     port: int = 9000,
-    token: str = "",
+    token: Optional[str] = None,
     open_ui: bool = True,
 ) -> None:
     try:
@@ -707,7 +829,11 @@ def ping(host: str = "127.0.0.1", port: int = 9000) -> Optional[dict]:
             return None
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(f"http://{host}:{port}/api/state?_={time.time()}", timeout=1.5) as r:
+        req = urllib.request.Request(
+            f"http://{host}:{port}/api/state?_={time.time()}",
+            headers=apitoken.header(),
+        )
+        with opener.open(req, timeout=1.5) as r:
             data = json.loads(r.read().decode("utf-8"))
     except Exception:
         return None

@@ -900,7 +900,7 @@
           "请先在浏览器里登录 YouTube 账号，然后刷新本页、<br>" +
           "再点一次「下载此视频」。<br>" +
           "<span style='opacity:.7'>" +
-          (lastYtError || "").slice(0, 140) +
+          escapeHtml((lastYtError || "").slice(0, 140)) +
           "</span></div>";
         return;
       }

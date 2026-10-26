@@ -439,6 +439,40 @@ class Manager:
         self.save_state()
 
     # ---------------- shell helpers ----------------
+    def can_open_path(self, path: str) -> bool:
+        """True when *path* belongs to a task or the configured download dir.
+
+        ``/api/open`` used to launch arbitrary paths; even with the token in
+        place, keeping the reachable set small means a leaked token cannot be
+        used to run a random application.
+        """
+        try:
+            p = os.path.realpath(os.path.abspath(os.path.expanduser(str(path or ""))))
+        except Exception:
+            return False
+        if not p:
+            return False
+        roots = set()
+        try:
+            roots.add(os.path.realpath(str(self.config.get("download_dir") or "")))
+        except Exception:
+            pass
+        for d in self.downloads.values():
+            try:
+                if d.directory:
+                    roots.add(os.path.realpath(d.directory))
+            except Exception:
+                continue
+        for root in roots:
+            if not root:
+                continue
+            try:
+                if os.path.commonpath([p, root]) == root:
+                    return True
+            except ValueError:
+                continue
+        return False
+
     @staticmethod
     def open_file(path: str) -> bool:
         """Open the *file itself* with its default application.

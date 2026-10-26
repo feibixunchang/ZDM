@@ -140,16 +140,22 @@
   function build() {
     host = document.createElement("div");
     host.id = "zdm-playerbtn-host";
+    // The host is resized to the whole video rect; without pointer-events:none
+    // it swallows clicks on the player's own controls (progress bar, volume,
+    // fullscreen) on every generic site.
     host.style.cssText =
-      "all:initial;position:fixed;left:0;top:0;z-index:2147483646;display:none;";
+      "all:initial;position:fixed;left:0;top:0;z-index:2147483646;display:none;" +
+      "pointer-events:none;";
     shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
-        :host{all:initial}
+        :host{all:initial;pointer-events:none}
         .wrap{all:initial;position:absolute;right:10px;top:10px;display:flex;
-          flex-direction:column;align-items:flex-end;gap:8px;font-family:inherit}
+          flex-direction:column;align-items:flex-end;gap:8px;font-family:inherit;
+          pointer-events:none}
         .btn{all:initial;display:flex;align-items:center;gap:6px;height:32px;
           padding:0 12px;border-radius:999px;cursor:pointer;border:none;
+          pointer-events:auto;
           background:rgba(37,99,235,.92);color:#fff;
           font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",sans-serif;
           box-shadow:0 3px 12px rgba(15,23,42,.28);transition:.15s;font-family:inherit}
@@ -157,6 +163,7 @@
         .btn svg{width:14px;height:14px;flex:none}
         .btn[disabled]{background:rgba(100,116,139,.85);cursor:default}
         .pnl{all:initial;display:block;width:268px;border-radius:12px;background:#fff;
+          pointer-events:auto;
           border:1px solid #e3e8ef;box-shadow:0 18px 50px rgba(15,23,42,.22);
           font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",sans-serif;
           color:#1f2937;font-family:inherit;overflow:hidden}

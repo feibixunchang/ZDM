@@ -25,15 +25,14 @@ $("#save").onclick = () => {
   }, () => { $("#msg").textContent = "已保存"; });
 };
 
-$("#test").onclick = async () => {
-  const base = ($("#serverUrl").value.trim() || DEFAULTS.serverUrl).replace(/\/+$/, "");
-  try {
-    const r = await fetch(base + "/api/state", { cache: "no-store" });
-    const j = await r.json();
-    $("#msg").textContent = j.ok ? "连接成功 ✓" : "连接失败";
-    $("#msg").style.color = j.ok ? "#16a34a" : "#dc2626";
-  } catch (e) {
-    $("#msg").textContent = "连接失败：ZDM 未运行（点浏览器里的下载会自动唤醒它，也可手动打开 ZDM 一次）";
-    $("#msg").style.color = "#dc2626";
-  }
+$("#test").onclick = () => {
+  // Go through the background page: it holds the API token. A direct fetch
+  // from an options tab would now get 401.
+  chrome.runtime.sendMessage({ type: "state" }, (j) => {
+    const ok = j && j.ok && !chrome.runtime.lastError;
+    $("#msg").textContent = ok
+      ? "连接成功 ✓"
+      : "连接失败：ZDM 未运行（点浏览器里的下载会自动唤醒它，也可手动打开 ZDM 一次）";
+    $("#msg").style.color = ok ? "#16a34a" : "#dc2626";
+  });
 };

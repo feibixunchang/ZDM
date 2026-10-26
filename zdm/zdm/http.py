@@ -172,8 +172,12 @@ def request(
             # drop authorization-like headers on cross-host redirect
             old_host = urllib.parse.urlparse(current).hostname
             if old_host and parsed.hostname and old_host != parsed.hostname:
-                for k in ("authorization", "cookie"):
-                    req_headers.pop(k, None)
+                # req_headers keeps the caller's spelling ("Cookie", "Authorization");
+                # popping the lowercase names was a no-op and leaked the session
+                # to whatever host the redirect pointed at.
+                for k in list(req_headers):
+                    if k.lower() in ("authorization", "cookie", "proxy-authorization"):
+                        req_headers.pop(k, None)
             continue
 
         resp.url = current  # type: ignore[attr-defined]

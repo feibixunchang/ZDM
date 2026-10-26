@@ -20,7 +20,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from zdm import __version__ as VERSION  # noqa: E402
-from zdm import autostart, desktop, runtime, update  # noqa: E402
+from zdm import apitoken, autostart, desktop, runtime, update  # noqa: E402
 from zdm.videopage import is_video_page, is_youtube  # noqa: E402
 import theme as _theme  # noqa: E402
 
@@ -363,6 +363,7 @@ class Api:
             f"http://127.0.0.1:{self.port}/api/{path.lstrip('/')}", data=data, method=method
         )
         req.add_header("Content-Type", "application/json")
+        req.add_header("X-ZDM-Token", apitoken.get_token())
         try:
             with self._opener.open(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))

@@ -116,12 +116,29 @@ def send(obj) -> None:
     sys.stdout.buffer.flush()
 
 
+def auth_token() -> str:
+    """Read the per-user API token created by the service.
+
+    The host is a separate process launched by the browser; it shares the
+    user's config directory with the desktop app and CLI.
+    """
+    try:
+        from zdm.apitoken import get_token
+
+        return get_token()
+    except Exception:
+        return ""
+
+
 def api(port: int, path: str, body=None, timeout: float = 5.0):
     url = f"http://127.0.0.1:{port}/api/{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
     req.add_header("Content-Type", "application/json")
     req.add_header("X-ZDM-Extension", os.environ.get("ZDM_EXTENSION_ID", ""))
+    token = auth_token()
+    if token:
+        req.add_header("X-ZDM-Token", token)
     # 127.0.0.1 绝不能走系统代理：Windows 上设了公司代理时 urlopen 会把它
     # 当普通 HTTP 请求发出去，等到超时 —— 表现就是「唤醒失败」而服务其实好好的。
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

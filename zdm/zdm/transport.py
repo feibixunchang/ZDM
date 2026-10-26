@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from typing import Dict, Iterator, Optional, Tuple
 
 from . import http as httpmod
@@ -172,7 +173,20 @@ class CurlTransport(Transport):
         }
 
     def stream(self, url, start, end, headers, timeout, proxy):
-        cmd = self._base(proxy) + ["--fail", "-o", "-"]
+        hdr_file = tempfile.NamedTemporaryFile(
+            prefix="zdmcurl", suffix=".hdr", delete=False
+        )
+        hdr_file.close()
+        cmd = self._base(proxy) + [
+            "--fail",
+            "--connect-timeout", str(max(5, int(timeout or 30))),
+            # A peer that stops sending must not pin a worker forever. 60s at
+            # <1KB/s is far below any healthy download but catches black holes.
+            "--speed-limit", "1024",
+            "--speed-time", "60",
+            "-D", hdr_file.name,
+            "-o", "-",
+        ]
         if end is not None:
             cmd += ["-r", f"{start}-{end - 1}"]
         for k, v in headers.items():
@@ -182,12 +196,22 @@ class CurlTransport(Transport):
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
             env=_curl_env(), **silent_proc_kwargs(),
         )
+        err = ""
+        checked = False
         try:
             assert p.stdout is not None
             while True:
                 buf = p.stdout.read(65536)
                 if not buf:
                     break
+                if not checked:
+                    checked = True
+                    # curl follows a 200 even when we asked for a range; writing
+                    # that whole body at ``start`` would corrupt the file. This
+                    # mirrors NativeTransport's explicit guard.
+                    if end is not None and _dump_status(hdr_file.name) == 200:
+                        p.kill()
+                        raise ConnectionError("server ignored Range (200 instead of 206)")
                 yield buf
         finally:
             if p.poll() is None:
@@ -196,9 +220,33 @@ class CurlTransport(Transport):
                 p.wait(timeout=5)
             except Exception:
                 pass
+            try:
+                os.remove(hdr_file.name)
+            except OSError:
+                pass
             if p.returncode not in (0, None) and p.returncode != -9:
                 err = p.stderr.read().decode("utf-8", "replace")[:200] if p.stderr else ""
-                raise ConnectionError(f"curl failed ({p.returncode}): {err}")
+        if err:
+            raise ConnectionError(f"curl failed ({p.returncode}): {err}")
+
+
+def _dump_status(path: str) -> int:
+    """HTTP status from curl's ``-D`` dump (last response block)."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    for line in reversed(text.replace("\r", "").split("\n")):
+        if line.startswith("HTTP/"):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[1])
+                except ValueError:
+                    return 0
+            break
+    return 0
 
 
 def _parse_header_block(text: str) -> Dict[str, str]:

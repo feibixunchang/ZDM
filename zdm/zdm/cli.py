@@ -10,7 +10,7 @@ import sys
 import time
 from typing import Optional
 
-from . import desktop, runtime, server
+from . import apitoken, desktop, runtime, server
 from .manager import Manager, config_dir, load_config
 
 PID_FILE = os.path.join(config_dir(), "zdm.pid")
@@ -32,6 +32,7 @@ def _api(method: str, path: str, payload: Optional[dict] = None, port: int = 0) 
     data = json.dumps(payload or {}).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    req.add_header("X-ZDM-Token", apitoken.get_token())
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(req, timeout=10) as r:

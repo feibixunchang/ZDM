@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
 REPO = "feibixunchang/ZDM"
 PROJECT_URL = f"https://github.com/{REPO}"
@@ -389,6 +390,20 @@ def fastest_asset_url(url: str, proxy: str = "") -> str:
     return best_url
 
 
+def _official_host(url: str) -> bool:
+    """True for GitHub-owned download hosts (never a third-party mirror)."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in (
+        "github.com",
+        "objects.githubusercontent.com",
+        "github-releases.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    )
+
+
 def download(
     url: str,
     dest: str,
@@ -405,8 +420,17 @@ def download(
     was routinely 200-300 KB/s in mainland China: a 127 MB .deb took 8+
     minutes and looked like the updater had hung.
     """
-    order = [fastest_asset_url(url, proxy)]
+    # Mirrors are only a transport optimization: without a published sha256
+    # there is no way to tell a tampered package from the real one, so fall
+    # back to the official GitHub hosts (still HTTPS) and never route an
+    # unverifiable download through a third party.
+    if expected_sha256:
+        order = [fastest_asset_url(url, proxy)]
+    else:
+        order = [url] if _official_host(url) else []
     for cand in _asset_urls(url):
+        if not expected_sha256 and not _official_host(cand):
+            continue
         if cand not in order:
             order.append(cand)
 
