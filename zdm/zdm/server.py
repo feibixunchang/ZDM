@@ -564,6 +564,14 @@ class Handler(BaseHTTPRequestHandler):
             # list renders it as a video and not as an ordinary file.
             if (body.get("yt_page") or body.get("page_url")) and not body.get("kind"):
                 body["kind"] = "video"
+            # GUI/CLI 让 yt-dlp 自己挑画质时不会先解析标题；没有文件名时
+            # 下载结束只能叫「download」或 zdm-<任务id>。给一个按链接推导的
+            # 可读名字（音乐站是「歌手 - 曲名」，视频站是 Video-<id>）。
+            if (
+                (body.get("yt_page") or body.get("page_url"))
+                and not (body.get("filename") or body.get("name"))
+            ):
+                body["filename"] = video_page_filename(url)
             directory = body.get("dir") or body.get("directory")
             if directory is not None:
                 if not isinstance(directory, str):
@@ -585,6 +593,8 @@ class Handler(BaseHTTPRequestHandler):
                     source=body.get("source"),
                     kind=body.get("kind"),
                     audio_url=body.get("audio_url"),
+                    audio_only=str(body.get("audio_only") or "").lower()
+                    in ("1", "true", "yes", "on"),
                     # YouTube：给了页面地址就走 yt-dlp 下载通道
                     yt_page=body.get("yt_page") or body.get("page_url"),
                     yt_height=body.get("yt_height") or body.get("height"),

@@ -151,6 +151,7 @@ class Manager:
         source: Optional[str] = None,
         kind: Optional[str] = None,
         audio_url: Optional[str] = None,
+        audio_only: bool = False,
         yt_page: Optional[str] = None,
         yt_height: Optional[int] = None,
     ) -> Download:
@@ -175,6 +176,7 @@ class Manager:
             source=source or "manual",
             kind=kind or "",
             audio_url=audio_url or "",
+            audio_only=bool(audio_only),
             # 有页面地址就走 yt-dlp 通道（YouTube 直链不能分块下载）
             yt_page=(yt_page or "") if str(yt_page or "").startswith("http") else "",
             yt_height=int(yt_height or 0),
@@ -506,6 +508,7 @@ class Manager:
                 filename=t.get("filename"), connections=int(t.get("connections") or 1),
                 source=t.get("source") or "manual",
                 kind=t.get("kind") or "",
+                audio_only=bool(t.get("audio_only")),
             )
             d.size = int(t.get("size") or 0)
             d.status = "completed"
@@ -530,6 +533,7 @@ class Manager:
             source=t.get("source") or "manual",
             kind=t.get("kind") or "",
             audio_url=t.get("audio_url") or "",
+            audio_only=bool(t.get("audio_only")),
         )
         d.set_event_callback(self._on_task_event)
         d.global_limiter = self.global_limiter

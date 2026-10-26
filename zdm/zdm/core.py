@@ -29,6 +29,9 @@ def _no_window() -> dict:
 _RE_DURATION = _re.compile(r"Duration:\s*(\d+:\d+:\d+(?:\.\d+)?)")
 # 音轨本身也是条播放列表（X/Twitter 的音频轨是 /pl/mp4a/128000/xxx.m3u8）
 _PLAYLIST_URL_RE = _re.compile(r"\.(m3u8|mpd)(?:$|[?#])", _re.IGNORECASE)
+# 纯音频流允许的成品容器。m4a 最通用（AAC），mp3/ogg/opus/flac/wav 是
+# 电台类 HLS 的常见格式；webm 覆盖 Opus/Vorbis。
+_AUDIO_CONTAINER_EXTS = {".m4a", ".mp3", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".webm"}
 
 
 def _parse_hms(text: str) -> float:
@@ -633,6 +636,7 @@ class Download:
         source: str = "manual",
         kind: str = "",
         audio_url: str = "",
+        audio_only: bool = False,
         yt_page: str = "",
         yt_height: int = 0,
     ):
@@ -655,6 +659,9 @@ class Download:
         # download it too and mux the two with ffmpeg — otherwise the video
         # would be silent.
         self.audio_url = audio_url or ""
+        # HLS/DASH 本身就是一条**纯音频**播放列表（音乐站、播客、X 的音频轨）。
+        # 它仍然走 ffmpeg 拉流通道，但成品容器/文件名要是 m4a 而不是 mp4。
+        self.audio_only = bool(audio_only)
         # YouTube 专用通道：页面地址 + 目标高度。有值时整个任务交给 yt-dlp
         # 下载（原因见 _run_ytdlp）。普通下载这两个字段都是空。
         self.yt_page = yt_page or ""
@@ -779,6 +786,7 @@ class Download:
             "source": self.source,
             "kind": self.kind,
             "audio_url": self.audio_url,
+            "audio_only": self.audio_only,
             "yt_page": self.yt_page,
             "yt_height": self.yt_height,
             "chunks": seg,
@@ -799,6 +807,7 @@ class Download:
             "source": self.source,
             "kind": self.kind,
             "audio_url": self.audio_url,
+            "audio_only": self.audio_only,
             "yt_page": self.yt_page,
             "yt_height": self.yt_height,
             "chunks": self.segmenter.snapshot() if self.segmenter else [],
@@ -820,6 +829,7 @@ class Download:
         self.proxy = data.get("proxy")
         self.speed_limit = int(data.get("speed_limit", 0) or 0)
         self.audio_url = str(data.get("audio_url") or "")
+        self.audio_only = bool(data.get("audio_only") or self.audio_only)
         self.yt_page = str(data.get("yt_page") or self.yt_page or "")
         self.yt_height = int(data.get("yt_height") or self.yt_height or 0)
         self.limiter.set_rate(self.speed_limit)
@@ -1358,7 +1368,16 @@ class Download:
             return
 
         stem = "zdm-" + self.id
-        out = os.path.join(self.directory, stem + ".mp4")
+        out_ext = ".mp4"
+        if self.audio_only:
+            # 纯音频清单：扩展给的期望文件名决定容器（音乐站多为 m4a，
+            # HLS mp3 电台是 mp3）。猜错时 ffmpeg 会直接失败，所以只接受
+            # 明确安全的音频容器，其余一律回落到 m4a。
+            want_ext = os.path.splitext(str(self.filename or ""))[1].lower()
+            if want_ext == ".weba":
+                want_ext = ".webm"
+            out_ext = want_ext if want_ext in _AUDIO_CONTAINER_EXTS else ".m4a"
+        out = os.path.join(self.directory, stem + out_ext)
         # 自定义请求头：m3u8 所在的 CDN 经常要 Referer 才给 playlist，
         # 直播/会员流还要 Cookie。ffmpeg 的 hls demuxer 用 -headers 传。
         hdrs = self._http_headers()
@@ -1367,7 +1386,8 @@ class Download:
             hdr_blob = "".join("%s: %s\r\n" % (k, v) for k, v in hdrs.items())
 
         audio_url = (self.audio_url or "").strip()
-        audio_is_pl = bool(_PLAYLIST_URL_RE.search(audio_url))
+        # 纯音频清单没有第二条轨可配：把 audio_url 再拉一遍只会覆盖/重复。
+        audio_is_pl = bool(_PLAYLIST_URL_RE.search(audio_url)) and not self.audio_only
         tmpdir = ""
         v_tmp = a_tmp = ""
         if audio_is_pl:
@@ -1396,9 +1416,9 @@ class Download:
             if self.proxy:
                 cmd += ["-http_proxy", self.proxy]
             cmd += ["-i", url, "-c", "copy"]
-            # 直接产出 mp4 的那一路（单播放列表路径）保留 faststart；
+            # 直接产出 mp4/m4a 的那一路（单播放列表路径）保留 faststart；
             # 中间暂存是 mkv，不需要。
-            if dst.lower().endswith(".mp4"):
+            if dst.lower().endswith((".mp4", ".m4a")):
                 cmd += ["-movflags", "+faststart"]
             cmd += [dst]
 
@@ -1629,6 +1649,10 @@ class Download:
         want = str(self.filename or "").strip()
         if want.lower() in ("", "download"):
             want = os.path.basename(out)
+        # 实际容器可能和期望后缀不一致（纯音频 m3u8 被旧调用方标成 .mp4、
+        # 音乐站的 .mp3 实际是 m4a…）。改名时以 ffmpeg 真正产出的容器为准，
+        # 否则「能播的文件被改成打不开的后缀」。
+        want = _with_ext(want, out)
         final = _unique_name(self.directory, want)
         target = os.path.join(self.directory, final)
         try:
@@ -1845,6 +1869,10 @@ class Download:
             # renamed to a file literally called "download" (no .mp4), which
             # players cannot open by double-click.
             want = os.path.basename(path)
+        # yt-dlp 产出的后缀才是真的：音乐页面（SoundCloud/Bandcamp）下的是
+        # .m4a/.mp3，旧兜底名却是 .mp4；把 m4a 改名成 mp4 后部分播放器
+        # 打不开。以实际文件为准，保留标题。
+        want = _with_ext(want, path)
         final = _unique_name(self.directory, want)
         target = os.path.join(self.directory, final)
         moved = None
@@ -2505,6 +2533,23 @@ def _log_download_error(d) -> None:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 - 诊断日志失败不影响下载
         pass
+
+
+def _with_ext(filename: str, path_with_ext: str) -> str:
+    """把 ``filename`` 的后缀换成 ``path_with_ext`` 的真实后缀。
+
+    只换后缀、保留用户/扩展起的名字。没有后缀时补上；已经一致时原样返回。
+    没有真实后缀（临时文件异常）时也原样返回，不能凭空空造一个。
+    """
+    actual = os.path.splitext(path_with_ext or "")[1]
+    if not actual:
+        return filename
+    stem = os.path.splitext(filename)[0]
+    if not stem:
+        return "download" + actual
+    if os.path.splitext(filename)[1].lower() == actual.lower():
+        return filename
+    return stem + actual
 
 
 def _unique_name(directory: str, filename: str) -> str:

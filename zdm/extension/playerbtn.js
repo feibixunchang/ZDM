@@ -366,16 +366,23 @@
     return t || "video";
   }
 
-  /* 解析结果里没有 ext 字段，扩展名按 mime 推：
-     yt-dlp 的 audio/mp4 就是 m4a，audio/webm 存成 weba 播放器才认。 */
+  /* 解析结果里没有 ext 字段时按 mime 推；yt-dlp 结果现在带 ext，优先用它。
+     audio/mp4 就是 m4a，audio/webm 存成 weba 播放器才认。纯音频播放列表
+     （SoundCloud 等）以前没有 kind=audio，被当成视频存成 .mp4 —— 文件能
+     播但名字和图标全错，这里一并按 audio 标记处理。 */
   function extOf(f) {
     const mime = String((f && f.mime) || "").toLowerCase();
-    if (f && f.kind === "audio") {
-      if (mime.indexOf("webm") >= 0) return "weba";
-      if (mime.indexOf("mp4") >= 0) return "m4a";
-      return "mp3";
+    const ext = String((f && f.ext) || "").toLowerCase().replace(/^\./, "");
+    const isAudio = !!(f && (f.kind === "audio" || f.audio));
+    if (isAudio) {
+      if (ext === "webm" || mime.indexOf("webm") >= 0) return "weba";
+      if (/^(m4a|aac|mp3|flac|opus|ogg|wav)$/.test(ext)) return ext;
+      if (mime.indexOf("mpeg") >= 0 || mime.indexOf("mp3") >= 0) return "mp3";
+      if (mime.indexOf("ogg") >= 0) return "ogg";
+      if (ext === "ogg") return "ogg";
+      return "m4a";
     }
-    if (mime.indexOf("webm") >= 0) return "webm";
+    if (ext === "webm" || mime.indexOf("webm") >= 0) return "webm";
     return "mp4";
   }
 
@@ -462,9 +469,13 @@
       fmts.sort((a, b) => Number(b.height || 0) - Number(a.height || 0))[0];
     /* 音乐站点解析回来可能只有音频轨，kind 要照实写，否则后端会按视频
        去配音频、下出一个奇怪的容器。
-       HLS / DASH 播放列表同理：后端要按播放列表处理（ffmpeg 整条拉）。 */
+       HLS / DASH 播放列表同理：后端要按播放列表处理（ffmpeg 整条拉）。
+       纯音频播放列表保留 kind=hls/dash（后端据此走 ffmpeg），另带 audio
+       标记，让文件名/容器落到 .m4a。 */
     const isAudioPick = pick.kind === "audio";
     const isStreamPick = pick.kind === "hls" || pick.kind === "dash";
+    const audioOnly = isAudioPick || (isStreamPick && !!pick.audio);
+    const audioStream = isStreamPick && !!pick.audio;
     const res = await send({
       type: "sniffer-push",
       item: {
@@ -474,18 +485,25 @@
         cookie: document.cookie || undefined,
         source: "playerbtn",
         kind: isAudioPick ? "audio" : isStreamPick ? pick.kind : "video",
+        // 纯音频 HLS/DASH：后端据此用 m4a 收尾
+        audio: audioStream || undefined,
+        audio_only: audioStream || undefined,
         // DASH 站点：yt-dlp 已经把配套音轨配好了，不带就下成无声
         audio_url: isAudioPick ? undefined : pick.audio_url || undefined,
         // YouTube：带 page_url 让后端走 yt-dlp 通道（理由见 ytPageUrl）。
         // 非 YouTube 站点为 undefined，与以前行为一致。
         page_url: ytPageUrl(),
-        height: Number(pick.height) || height,
+        height: audioOnly ? 0 : Number(pick.height) || height,
       },
     });
     if (res && res.ok) {
       setTip(
         "已推送给 ZDM：" +
-          (isAudioPick ? "音频" : (pick.height || "?") + "P")
+          (audioOnly
+            ? audioStream
+              ? "音频流（HLS）"
+              : "音频"
+            : (pick.height || "?") + "P")
       );
       closePanel();
     } else {
@@ -585,6 +603,17 @@
     return "";
   }
 
+  /* 纯音频播放列表（X 的 /pl/mp4a/…、SoundCloud 的 ?mime=audio、播客的
+     /audio/xxx.m3u8）。和 sniffer.js 的 AUDIO_PLAYLIST_URL 保持一致。 */
+  function isAudioStreamUrl(url) {
+    return (
+      !!url &&
+      /\/(mp4a|aac|mp3|opus|ogg|flac)(?:\/|$)|\/audio(?:\/|[-_.])|mime=audio|audio[-_]?track/i.test(
+        url
+      )
+    );
+  }
+
   async function pushStream() {
     const s = await streamForCurrent();
     if (!s) {
@@ -597,28 +626,34 @@
       );
       return;
     }
+    const audioOnly = !!s.audio || isAudioStreamUrl(s.url);
     const res = await send({
       type: "sniffer-push",
       item: {
         url: s.url,
-        filename: pageTitle() + ".mp4",
+        filename: pageTitle() + (audioOnly ? ".m4a" : ".mp4"),
         referer: location.href,
         cookie: document.cookie || undefined,
         source: "playerbtn",
         kind: s.kind,
+        // 纯音频清单：后端用 m4a 收尾，而不是生成一个没有画面的 mp4
+        audio: audioOnly || undefined,
+        audio_only: audioOnly || undefined,
         // X（Twitter）的音频是另一份播放列表（/pl/mp4a/…），带上让
         // 后端两份各拉一遍再合流，不然「有画面没声音」。
-        audio_url: s.audioUrl || undefined,
+        audio_url: audioOnly ? undefined : s.audioUrl || undefined,
         // YouTube：带页面地址 + 嗅探到的高度，走后端 yt-dlp 通道。
         page_url: ytPageUrl(),
-        height: s.height || undefined,
+        height: audioOnly ? 0 : s.height || undefined,
       },
     });
     if (res && res.ok) {
       setTip(
-        s.audioUrl
-          ? "已推送给 ZDM：音视频两轨都会拉取并合并成 mp4"
-          : "已推送给 ZDM：后端会取分片并合并成 mp4"
+        audioOnly
+          ? "已推送给 ZDM：音频流，后端会取分片并封装为 m4a"
+          : s.audioUrl
+            ? "已推送给 ZDM：音视频两轨都会拉取并合并成 mp4"
+            : "已推送给 ZDM：后端会取分片并合并成 mp4"
       );
       closePanel();
     } else {
@@ -698,15 +733,18 @@
     // 兜底：万一分类没认出它是播放列表，按 URL 后缀再判一次，
     // 别把 m3u8 文本存成 mp4。
     const pk = playlistKind(it.url);
+    const audioOnly = !!pk && isAudioStreamUrl(it.url);
     const res = await send({
       type: "sniffer-push",
       item: {
         url: it.url,
-        filename: pageTitle() + ".mp4",
+        filename: pageTitle() + (audioOnly ? ".m4a" : ".mp4"),
         referer: location.href,
         cookie: document.cookie || undefined,
         source: "playerbtn",
         kind: pk || "video",
+        audio: audioOnly || undefined,
+        audio_only: audioOnly || undefined,
         // YouTube：带 page_url 走后端 yt-dlp 通道（理由见 ytPageUrl）。
         page_url: ytPageUrl(),
       },
@@ -740,16 +778,28 @@
         // 它没用 MSE 而是浏览器原生播 HLS。这种 URL 当普通 mp4 存
         // 下来就只是个播放列表文本 —— 按后缀识别，走 hls/dash 通道
         // 交给 ffmpeg 跟着分片拉、合并成真正的 mp4。
-        const pk = isAudio ? "" : playlistKind(url);
+        // <audio> 指向 m3u8 时同样要按流处理：以前 isAudio 把 pk 清空，
+        // 结果把播放列表文本当 mp3 存了下来。
+        const pk = playlistKind(url);
+        const audioStream = !!pk && isAudio;
         const res = await send({
           type: "sniffer-push",
           item: {
             url,
-            filename: pageTitle() + "." + (pk ? "mp4" : extOfUrl(url, isAudio)),
+            filename:
+              pageTitle() +
+              "." +
+              (pk
+                ? audioStream
+                  ? "m4a"
+                  : "mp4"
+                : extOfUrl(url, isAudio)),
             referer: location.href,
             cookie: document.cookie || undefined,
             source: "playerbtn",
-            kind: isAudio ? "audio" : pk || "video",
+            kind: pk || (isAudio ? "audio" : "video"),
+            audio: audioStream || undefined,
+            audio_only: audioStream || undefined,
             // YouTube：带 page_url 走后端 yt-dlp 通道（理由见 ytPageUrl）。
             page_url: ytPageUrl(),
           },
@@ -757,7 +807,9 @@
         setTip(
           res && res.ok
             ? pk
-              ? "已推送（HLS 流，ffmpeg 合并中）"
+              ? audioStream
+                ? "已推送（音频流，ffmpeg 合并中）"
+                : "已推送（HLS 流，ffmpeg 合并中）"
               : isAudio
                 ? "已推送"
                 : "已推送（若没声音，是站点把音画分开了）"

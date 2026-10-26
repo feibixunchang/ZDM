@@ -233,6 +233,8 @@ def main() -> int:
     # 否则服务没在跑、由原生消息拉起的那一次下载会缺 cookie / 缺音频轨。
     if msg.get("audio_url"):
         body["audio_url"] = msg["audio_url"]
+    if msg.get("audio_only"):
+        body["audio_only"] = True
     if msg.get("yt_page"):
         body["yt_page"] = msg["yt_page"]
     if msg.get("yt_height"):

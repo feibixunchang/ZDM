@@ -440,6 +440,7 @@ def _handle_protocol_url(target: str) -> int:
             "kind",
             "cookie",
             "audio_url",
+            "audio_only",
             # YouTube：页面地址 + 目标高度，后端据此走 yt-dlp 通道
             "yt_page",
             "yt_height",

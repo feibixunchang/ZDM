@@ -31,6 +31,25 @@ const WAKE_TIMEOUT_MS = 20000;
 const MEDIA_EXT =
   /\.(mp4|m4v|webm|mkv|mov|m4a|mp3|aac|flac|wav|ogg|oga|opus|wma|avi|wmv|flv|f4v|3gp|ts|m2ts|m4s)(?:$|[?#])/i;
 const MEDIA_AUDIO_EXT = /\.(mp3|m4a|aac|flac|wav|ogg|oga|opus|wma)(?:$|[?#])/i;
+/* Content-Type 不总是 video/、audio/ 开头。CMS、网盘和部分 CDN 会把
+   媒体报成 application/mp4、application/ogg 这类；只认前者会把整站漏掉。 */
+const MEDIA_AUDIO_MIME = new Set([
+  "application/ogg",
+  "application/x-ogg",
+  "application/x-m4a",
+  "application/x-mp3",
+  "application/x-flac",
+  "application/x-aac",
+  "audio/x-m4a",
+]);
+const MEDIA_VIDEO_MIME = new Set([
+  "application/mp4",
+  "application/x-matroska",
+  "application/x-mpeg",
+  "application/x-flv",
+  "application/x-shockwave-flash",
+  "application/vnd.rn-realmedia",
+]);
 /* B站 DASH 轨的 URL 编号规则（实测）：
      视频轨  ".../62131_da3-1-30032.m4s"   —— 30000 + 清晰度id（30006…30127）
      音频轨  ".../62131_da3-1-30216.m4s"   —— 302xx 系列（30216/30232/30250/30251/30257/30259/30280）
@@ -48,6 +67,14 @@ function isBiliAudioId(id) {
 const YT_AUDIO_ITAG = new Set([139, 140, 141, 249, 250, 251, 256, 258, 325, 328]);
 const BILI_MEDIA_HOST = /(^|\.)bilivideo\.(com|cn)$/;
 const YT_MEDIA_HOST = /(^|\.)googlevideo\.com$/;
+/* 纯音频播放列表的 URL 特征（与 sniffer.js 同一套判据）：
+   X 的 /pl/mp4a/128000/…、SoundCloud 的 /media/…/playlist.m3u8?mime=audio、
+   播客站的 /audio/xxx.m3u8。命中时成品应该是 .m4a，不是 .mp4。 */
+const AUDIO_PLAYLIST_URL =
+  /\/(mp4a|aac|mp3|opus|ogg|flac)(?:\/|$)|\/audio(?:\/|[-_.])|mime=audio|audio[-_]?track/i;
+function isAudioPlaylistUrl(url) {
+  return !!url && AUDIO_PLAYLIST_URL.test(url);
+}
 
 /** B站 DASH 直链里的 cid（/upgcxcode/99/91/137649199/xxx-1-30280.m4s）。 */
 function biliCidOf(url) {
@@ -379,11 +406,14 @@ function nameFromUrl(url, kind) {
   if (/\.m4s$/i.test(name)) {
     name = name.replace(/\.m4s$/i, kind === "audio" ? ".m4a" : ".mp4");
   }
-  /* 播放列表本身不是成品：后端用 ffmpeg 拉完会封装成 mp4，
-     文件名也该是 .mp4。 */
+  /* 播放列表本身不是成品：后端用 ffmpeg 拉完会封装成 mp4（纯音频是 m4a）。
+     URL 能看出是音频轨时直接给 m4a，否则下完会被后端按实际容器改名，
+     用户在列表里先看到一个正确的后缀。 */
   if (kind === "hls" || kind === "dash") {
     name = name.replace(/\.(m3u8|mpd)$/i, "") || "stream";
-    if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += ".mp4";
+    if (!/\.[a-z0-9]{2,5}$/i.test(name)) {
+      name += isAudioPlaylistUrl(url) ? ".m4a" : ".mp4";
+    }
   }
   return name;
 }
@@ -463,10 +493,22 @@ function classifyResponse(details) {
   } else if (ct.startsWith("audio/")) {
     kind = "audio";
   } else if (
-    (ct === "application/octet-stream" || ct === "binary/octet-stream" || ct === "") &&
-    MEDIA_EXT.test(url)
+    ct === "application/octet-stream" ||
+    ct === "binary/octet-stream" ||
+    ct === "application/force-download" ||
+    ct === "application/x-download" ||
+    ct === ""
   ) {
-    kind = MEDIA_AUDIO_EXT.test(url) ? "audio" : "video";
+    /* 下载型响应头（force-download / x-download）最常见于网盘和 CMS 的
+       媒体接口：Content-Type 被改成 application/xxx 才能触发保存。只按
+       扩展名认，避免把同一种响应头下的 .zip/.pdf 收进媒体列表。 */
+    if (MEDIA_EXT.test(url)) {
+      kind = MEDIA_AUDIO_EXT.test(url) ? "audio" : "video";
+    }
+  } else if (MEDIA_AUDIO_MIME.has(ct)) {
+    kind = "audio";
+  } else if (MEDIA_VIDEO_MIME.has(ct)) {
+    kind = "video";
   }
   if (!kind) return null;
   /* 播放列表天生就小（几 KB），不能拿媒体文件的门槛去卡它 */
@@ -486,7 +528,17 @@ function classifyResponse(details) {
   }
   if (size && size < MIN_MEDIA_BYTES && !isPlaylist) return null;
   const seg = isSegmentMedia(details.tabId, url, host);
-  return { url, kind, size, name: nameFromUrl(url, kind), from: "net", seg: seg || undefined };
+  const audioOnly =
+    (kind === "hls" || kind === "dash") && isAudioPlaylistUrl(url);
+  return {
+    url,
+    kind,
+    size,
+    name: nameFromUrl(url, kind),
+    from: "net",
+    seg: seg || undefined,
+    audio: audioOnly || undefined,
+  };
 }
 
 function rememberMedia(tabId, item) {
@@ -1303,6 +1355,7 @@ function launchViaNative(req) {
         source: req.source || undefined,
         kind: req.kind || undefined,
         audio_url: req.audio_url || undefined,
+        audio_only: req.audio_only || undefined,
         yt_page: req.yt_page || undefined,
         yt_height: req.yt_height || undefined,
       });
@@ -1330,6 +1383,7 @@ function buildProtocolUrl(req) {
   if (req.source) q.set("source", req.source);
   if (req.kind) q.set("kind", req.kind);
   if (req.audio_url) q.set("audio_url", req.audio_url);
+  if (req.audio_only) q.set("audio_only", "1");
   if (req.yt_page) q.set("yt_page", req.yt_page);
   if (req.yt_height) q.set("yt_height", String(req.yt_height));
   // Cookies must NOT travel through a zdm:// URL: the URL is visible to the
@@ -1425,6 +1479,8 @@ async function handOff(req) {
       kind: req.kind || undefined,
       // DASH 的视频轨需要配套音频，后端会合并
       audio_url: req.audio_url || undefined,
+      // 纯音频 HLS/DASH：成品存成 m4a 而不是 mp4
+      audio_only: req.audio_only || undefined,
       // YouTube：给了页面地址 + 高度就让后端用 yt-dlp 下（直链不能分块取）
       yt_page: req.yt_page || undefined,
       yt_height: req.yt_height || undefined,
@@ -1763,6 +1819,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         kind: item.kind || "video",
         // DASH 视频轨的配套音频轨，后端下载后用 ffmpeg 合并
         audio_url: audioUrl || undefined,
+        // 纯音频播放列表（音乐站/播客）：让后端用 m4a 收尾
+        audio_only: item.audio || undefined,
         // YouTube：页面地址 + 高度 → 后端走 yt-dlp 通道
         yt_page: item.page_url || undefined,
         yt_height: item.height || undefined,

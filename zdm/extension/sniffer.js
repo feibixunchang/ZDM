@@ -58,7 +58,7 @@
     });
 
   /* 从 URL 猜一个像样的文件名：取最后一段，去掉查询串，补常见扩展名。 */
-  function guessName(url, kind) {
+  function guessName(url, kind, audioOnly) {
     let name = "";
     try {
       const u = new URL(url);
@@ -68,7 +68,16 @@
     }
     name = name.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
     if (!name || !/\.[a-z0-9]{2,5}$/i.test(name)) {
-      const ext = kind === "audio" ? ".mp3" : kind === "image" ? ".jpg" : ".mp4";
+      const ext =
+        kind === "audio"
+          ? ".mp3"
+          : kind === "image"
+            ? ".jpg"
+            : kind === "hls" || kind === "dash"
+              ? audioOnly
+                ? ".m4a"
+                : ".mp4"
+              : ".mp4";
       name = (name || "media") + ext;
     }
     return name;
@@ -121,11 +130,21 @@
       if (!/^https?:/i.test(abs)) continue;
       const tag = el.tagName.toLowerCase();
       const type = (el.getAttribute("type") || "").toLowerCase();
+      const isAudio = tag === "audio" || type.startsWith("audio/");
+      /* <video>/<audio> 的 src 也可能直接指向 m3u8/mpd（Twitter、播客站）。
+         当普通文件下只会得到一个播放列表文本，必须按流交给 ffmpeg。 */
+      const streamKind = /\.m3u8(?:$|[?#])/i.test(abs)
+        ? "hls"
+        : /\.mpd(?:$|[?#])/i.test(abs)
+          ? "dash"
+          : "";
+      const audioOnly = !!streamKind && isAudio;
       out.push({
         url: abs,
-        kind: tag === "audio" || type.startsWith("audio/") ? "audio" : "video",
+        kind: streamKind || (isAudio ? "audio" : "video"),
+        audio: audioOnly || undefined,
         size: timingSize(abs),
-        name: guessName(abs, tag === "audio" ? "audio" : "video"),
+        name: guessName(abs, streamKind || (isAudio ? "audio" : "video"), audioOnly),
         from: "dom",
       });
     }
@@ -471,13 +490,15 @@
        · 分片推下去只有几秒钟（实测 Twitter 的 .m4s 159 KB）；
        · 音频播放列表（X 的 /pl/mp4a/…）推下去「只有声音」。
        都改挑「最新的视频轨播放列表 + 同源音频轨」一起推，后端拉完合流。
+       页面上只有音频播放列表（SoundCloud/播客）时，主轨就是它自己：
+       文件名和容器按音频处理，不能生成一个没有画面的 mp4。
        页面上没有播放列表时不推（宁可不响应，也别交出一堆碎片）。 */
     if (it.seg || (it.kind === "hls" && isAudioPlaylistUrl(it.url))) {
       const pair = pickStreamPair(items);
       if (!pair) return false;
-      target = { url: pair.url, kind: pair.kind };
+      target = { url: pair.url, kind: pair.kind, audio: pair.audio };
       audioUrl = pair.audioUrl;
-      filename = smartTitle() + ".mp4";
+      filename = smartTitle() + (pair.audio ? ".m4a" : ".mp4");
     } else if (it.kind === "hls" || it.kind === "dash") {
       // 视频播放列表：主轨就用点击的这条，另配同源音频轨一起合流
       target = it;
@@ -493,7 +514,10 @@
         }
       }
       if (best < 2) audioUrl = ""; // 公共前缀太浅＝大概率不是同一条视频
-      filename = smartTitle() + ".mp4";
+      // 点中的本身就是音频清单时，不配对、按音频收尾
+      const selfAudio = !!it.audio || isAudioPlaylistUrl(it.url);
+      if (selfAudio) audioUrl = "";
+      filename = smartTitle() + (selfAudio ? ".m4a" : ".mp4");
     } else if (
       (it.kind === "video" || it.kind === "audio") &&
       genericUrlName(filename)
@@ -504,6 +528,10 @@
       const ext = m ? m[1].toLowerCase() : it.kind === "audio" ? "m4a" : "mp4";
       filename = smartTitle() + "." + ext;
     }
+    const audioOnly =
+      target.kind === "hls" || target.kind === "dash"
+        ? !!target.audio || isAudioPlaylistUrl(target.url)
+        : false;
     const body = {
       url: target.url,
       filename,
@@ -512,6 +540,9 @@
       cookie: sameSite(it.url, page) ? document.cookie || undefined : undefined,
       source: "sniffer",
       kind: target.kind || it.kind || "video",
+      // 纯音频清单：后端按音频容器收尾
+      audio: audioOnly || undefined,
+      audio_only: audioOnly || undefined,
       // 音频播放列表配对（X 的音视频是两份 m3u8），后端拉完合流
       audio_url: audioUrl || undefined,
       // YouTube 阶梯行：真正的下载由后端按「页面地址 + 高度」走 yt-dlp，
@@ -539,7 +570,7 @@
   function imgExtOf(url) {
     let m = /\.(jpg|jpeg|png|webp|gif|avif|bmp)(?:$|[?#])/i.exec(url);
     if (m) return m[1].toLowerCase() === "jpeg" ? "jpg" : m[1].toLowerCase();
-    m = /format[=/,](?:image\/format[=/,])?(webp|png|jpe?g|gif|avif)/i.exec(url);
+    m = /(?:format|fm|type|output)[=/,](?:image\/format[=/,])?(webp|png|jpe?g|gif|avif)/i.exec(url);
     if (m) return m[1].toLowerCase().replace("jpeg", "jpg");
     return "jpg";
   }
@@ -569,6 +600,30 @@
      那种多半是原图，让用户自己判断。 */
   const IMG_NAME_SKIP =
     /(favicon|sprite|icon|logo|avatar|badge|emoji|loading|placeholder|spacer|pixel|beacon|qr|arrow|close|menu|search)/i;
+  const IMG_EXT = /\.(jpg|jpeg|png|webp|gif|avif|bmp)(?:$|[?#])/i;
+  /* 图床/CDN 常见「URL 没后缀，格式在查询参数里」：
+     ?x-oss-process=image/format,webp、?fm=webp、?type=image/png。 */
+  function looksImageUrl(u) {
+    if (!u) return false;
+    if (IMG_EXT.test(u)) return true;
+    return /[?&](?:format|fm|type|output)=[^&#]*?(?:webp|png|jpe?g|gif|avif)\b/i.test(u);
+  }
+  function bestFromSrcset(ss) {
+    if (!ss) return "";
+    let best = "";
+    let bestW = -1;
+    for (const part of ss.split(",")) {
+      const seg = part.trim().split(/\s+/);
+      if (!seg[0]) continue;
+      // 描述符可能是 480w 或 2x；都按「越大越清晰」比较
+      const w = seg[1] ? parseFloat(seg[1]) : 0;
+      if (w >= bestW) {
+        bestW = w;
+        best = seg[0];
+      }
+    }
+    return best;
+  }
   function scanImages() {
     const page = location.href;
     const out = [];
@@ -604,34 +659,80 @@
         from: "dom-img",
       });
     };
+    const addSrcset = (ss, el) => {
+      const best = bestFromSrcset(ss);
+      if (best) add(best, el);
+    };
+    /* 懒加载属性五花八门：不同的图库 CMS 各用各的，漏一个就少一批图。 */
+    const IMG_ATTRS = [
+      "src",
+      "data-src",
+      "data-original",
+      "data-original-src",
+      "data-lazy-src",
+      "data-lazysrc",
+      "data-actualsrc",
+      "data-echo",
+    ];
     document.querySelectorAll("img").forEach((el) => {
-      const src =
-        el.getAttribute("src") ||
-        el.getAttribute("data-src") ||
-        el.getAttribute("data-original") ||
-        "";
-      if (src && !/^(data|blob):/i.test(src)) add(src, el);
-      const ss = el.getAttribute("srcset") || "";
-      if (ss) {
-        // srcset 里挑描述宽度最大的那一张（通常是原图）
-        let best = "";
-        let bestW = -1;
-        for (const part of ss.split(",")) {
-          const seg = part.trim().split(/\s+/);
-          if (!seg[0]) continue;
-          const w = seg[1] ? parseFloat(seg[1]) : 0;
-          if (w >= bestW) {
-            bestW = w;
-            best = seg[0];
+      for (const a of IMG_ATTRS) {
+        const v = el.getAttribute(a);
+        if (v) add(v, el);
+      }
+      const dataUrl = el.getAttribute("data-url");
+      if (dataUrl && looksImageUrl(dataUrl)) add(dataUrl, el);
+      addSrcset(el.getAttribute("srcset"), el);
+      addSrcset(el.getAttribute("data-srcset"), el);
+    });
+    // <picture><source srcset>：响应式图库的原图常常只在这里
+    document.querySelectorAll("picture source").forEach((el) => {
+      addSrcset(el.getAttribute("srcset"), el);
+      addSrcset(el.getAttribute("data-srcset"), el);
+      const src = el.getAttribute("src") || el.getAttribute("data-src") || "";
+      if (src) add(src, el);
+    });
+    // 单图/分享页：页面只在 meta 里给出原图
+    document
+      .querySelectorAll(
+        'meta[property="og:image"],meta[name="twitter:image"],link[rel="image_src"]'
+      )
+      .forEach((el) => {
+        const v = el.getAttribute("content") || el.getAttribute("href") || "";
+        if (v) add(v, null);
+      });
+    // 直接链到原图的 <a href>：图库站的「查看原图」多是这种（含无后缀 CDN）
+    let anchors = 0;
+    document.querySelectorAll("a[href]").forEach((a) => {
+      if (++anchors > 4000) return;
+      const href = a.getAttribute("href") || "";
+      if (looksImageUrl(href)) add(href, null);
+    });
+    // 背景图：壁纸/作品集站把原图放在 inline style 或 data-bg 里
+    let bgs = 0;
+    document
+      .querySelectorAll(
+        '[data-bg],[data-background],[data-bg-src],[class*="bg"],[class*="background"],[class*="cover"],[class*="hero"],[style*="background"]'
+      )
+      .forEach((el) => {
+        if (++bgs > 500) return;
+        for (const a of ["data-bg", "data-background", "data-bg-src"]) {
+          const v = el.getAttribute(a);
+          if (v && looksImageUrl(v)) add(v, el);
+        }
+        let bg = el.getAttribute("style") || "";
+        if (!/background/i.test(bg)) {
+          try {
+            bg = getComputedStyle(el).backgroundImage || "";
+          } catch (_) {
+            bg = "";
           }
         }
-        if (best) add(best, el);
-      }
-    });
-    // 直接链到原图的 <a href="*.jpg">：图库站的「查看原图」多是这种
-    document
-      .querySelectorAll('a[href$=".jpg"],a[href$=".jpeg"],a[href$=".png"],a[href$=".webp"],a[href$=".gif"],a[href$=".avif"]')
-      .forEach((a) => add(a.getAttribute("href"), null));
+        const re = /url\(\s*(['"]?)(.*?)\1\s*\)/gi;
+        let m;
+        while ((m = re.exec(bg))) {
+          if (m[2] && !/^data:/i.test(m[2])) add(m[2], el);
+        }
+      });
     return out.slice(0, MAX_ROWS);
   }
 
@@ -820,7 +921,14 @@
       main = vids[0] || byNew[0]; // 全是音频轨时至少还能出声
       if (main && !isAudioPlaylistUrl(main.url)) audioUrl = deepestAudio(main.url);
     }
-    return { url: main.url, kind: main.kind, audioUrl };
+    const audioOnly = !!main.audio || isAudioPlaylistUrl(main.url);
+    if (audioOnly) audioUrl = "";
+    return {
+      url: main.url,
+      kind: main.kind,
+      audioUrl,
+      audio: audioOnly || undefined,
+    };
   }
 
   /* URL 末段当文件名是不是「没意义」的：抖音的 media-video-hvc1、

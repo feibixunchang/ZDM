@@ -186,6 +186,17 @@ def _canonical_page_url(url: str) -> str:
     return url
 
 
+def _is_youtube_url(url: str) -> bool:
+    host = _host_of(url or "")
+    return (
+        host == "youtu.be"
+        or host == "youtube.com"
+        or host.endswith(".youtube.com")
+        or host == "youtube-nocookie.com"
+        or host.endswith(".youtube-nocookie.com")
+    )
+
+
 def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None) -> Dict:
     """Resolve a YouTube watch/shorts URL into a ZDM-format list.
 
@@ -234,6 +245,9 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
         # 很大。所以解析和下载一样轮换：默认 → tv_embedded → 各再试一次
         # （隔 3 秒冷却）。android_vr 已经退化（只回 360p 且直链 403），
         # 不再参与重试。
+        #
+        # 非 YouTube 站点（SoundCloud/Bandcamp/抖音…）只有第一次是有效的：
+        # player_client 参数对它们没有意义，重试只会把同一句登录错误问四遍。
         last_bin_err = ""
         attempts = [
             (None, 0.0),
@@ -241,6 +255,8 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
             (None, 3.0),
             (["--extractor-args", "youtube:player_client=tv_embedded"], 3.0),
         ]
+        if not _is_youtube_url(url):
+            attempts = attempts[:1]
         login_blocked = 0
         for extra, delay in attempts:
             if delay:
@@ -282,7 +298,7 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
             if time.time() > deadline:
                 last_err = last_err or "解析超时"
                 break
-            opts = _base_opts(clients)
+            opts = _base_opts(clients, youtube_only=_is_youtube_url(url))
             if cookie_path:
                 opts["cookiefile"] = cookie_path
             elif cookie and "\t" not in cookie and "Netscape" not in cookie:
@@ -331,7 +347,7 @@ def resolve(url: str, cookie: Optional[str] = None, proxy: Optional[str] = None)
         "ok": False,
         "formats": [],
         "title": title,
-        "error": last_err + _missing_runtime_hint(),
+        "error": last_err + (_missing_runtime_hint() if _is_youtube_url(url) else ""),
     }
 
 
@@ -541,7 +557,9 @@ def _cleanup(path: Optional[str]) -> None:
         pass
 
 
-def _base_opts(clients: Optional[List[str]]) -> Dict:
+def _base_opts(
+    clients: Optional[List[str]], youtube_only: bool = True
+) -> Dict:
     opts: Dict = {
         "quiet": True,
         "no_warnings": True,
@@ -550,7 +568,6 @@ def _base_opts(clients: Optional[List[str]]) -> Dict:
         "simulate": True,
         "noplaylist": True,
         "extract_flat": False,
-        "allowed_extractors": ["youtube"],
         "nocheckcertificate": True,
         "ignoreerrors": False,
         "retries": 1,
@@ -566,6 +583,11 @@ def _base_opts(clients: Optional[List[str]]) -> Dict:
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
+    # YouTube-only 是历史默认；把它套在 SoundCloud/Bandcamp 上会让 Python
+    # 回退通道直接报 "Unsupported URL"（二进制通道不受影响，所以症状是
+    # 「有的机器能解析音乐站、有的机器不能」）。
+    if youtube_only:
+        opts["allowed_extractors"] = ["youtube"]
     if clients:
         opts["extractor_args"] = {"youtube": {"player_client": clients}}
     return opts
@@ -755,7 +777,19 @@ def _merge(pool: List[Dict], title: str) -> Dict:
     for e in streams:
         item = dict(e)
         item.pop("audio_url", None)
-        item["label"] = "HLS 直播流" if item.get("kind") == "hls" else "DASH 自适应流"
+        kind = item.get("kind")
+        if item.get("audio"):
+            # 纯音频清单没有「直播/自适应」的概念，按音频说明白并带上码率，
+            # 扩展据此选 .m4a、后端据此选音频容器。
+            abr = int(item.get("abr") or 0)
+            item["label"] = (
+                ("HLS 音频流" if kind == "hls" else "DASH 音频流")
+                + (f" · {abr} kbps" if abr else "")
+            )
+        else:
+            item["label"] = (
+                "HLS 自适应流" if kind == "hls" else "DASH 自适应流"
+            )
         out.append(item)
 
     return {
@@ -835,13 +869,22 @@ def _shape(info, client_name: str) -> Dict:
             "protocol": proto,
             "size": int(s.get("filesize") or s.get("filesize_approx") or 0),
             "mime": s.get("mime_type") or "",
+            "ext": s.get("ext") or "",
             "width": int(s.get("width") or 0),
             "height": int(s.get("height") or 0),
             "itag": _safe_itag(s.get("format_id")),
             "audioQuality": "",
             "bitrate": int((s.get("tbr") or 0) * 1000),
+            "abr": int(s.get("abr") or 0),
             # 合并阶段要靠它判断「同一高度该留哪条」：H.264 优先
             "codec": "" if vcodec in (None, "none") else str(vcodec),
+            # 纯音频播放列表（SoundCloud / 播客 / X 的音频轨）：没有视频轨。
+            # 不带这个标记，扩展会把音频流当视频推、存成 .mp4，面板里还显示
+            # 「?P」—— 用户拿到的文件其实能播，但很难理解自己下的是什么。
+            "audio": bool(
+                kind == "audio"
+                or (vcodec in (None, "none") and acodec not in (None, "none"))
+            ),
         }
         # DASH video track has no sound — pair it with the best audio stream so
         # the engine can mux them into one audible file.
