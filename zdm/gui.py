@@ -2491,7 +2491,7 @@ class MainWindow(QMainWindow):
 
     def _open_update_page(self):
         info = self._update_info or {}
-        self._open_url(info.get("url") or update.PROJECT_URL)
+        self._open_url(info.get("url") or update.RELEASES_URL)
 
     def _ignore_update(self):
         info = self._update_info or {}

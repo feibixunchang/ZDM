@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 REPO = "feibixunchang/ZDM"
 PROJECT_URL = f"https://github.com/{REPO}"
+RELEASES_URL = f"{PROJECT_URL}/releases"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 USER_AGENT = f"ZDM-Updater (+{PROJECT_URL})"
 
