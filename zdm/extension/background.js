@@ -1,5 +1,36 @@
 /* ZDM Connector - background service worker */
 
+/* 界面语言（ui18n.js）。这一页没有 DOM，DOM 层那套替换在这儿用不上，所以文案
+   在交给浏览器 API 之前先过一遍 T()。加载两条路都要：Chrome 的 MV3 只跑
+   service_worker 一个文件（靠 importScripts），Firefox 用清单里的
+   background.scripts 数组 —— 只写一条就是「Chrome 英文、Firefox 中文」。
+   self.ZDMUI 判一次防止 Firefox 里重复加载。 */
+try {
+  if (typeof importScripts === "function" && !self.ZDMUI) importScripts("ui18n.js");
+} catch (e) {
+  /* 载不进来就全部原样显示中文，不影响功能 */
+}
+const T = (s) => (typeof ZDMUI !== "undefined" ? ZDMUI.t(s) : s);
+
+/* 一份代码跑两种浏览器：Firefox 把「返回 Promise 的那套 API」挂在 browser.* 上，
+   chrome.* 那边只有回调（await chrome.tabs.get() 在 Firefox 拿到的是 undefined，
+   表现为一堆「读不到属性」的崩溃）；Chrome 反过来只有 chrome.*（148 起补了
+   browser.*，同样是 Promise）。所以下面凡是**按 Promise 用**的调用走 EXT_API，
+   事件注册（addListener）和回调式调用继续用 chrome.* —— 两边那一套都是通的。 */
+const EXT_API = (typeof browser !== "undefined" && browser) || chrome;
+
+/* 扩展自己的版本号，随每个请求上报给本机服务。桌面端状态栏要说「扩展是
+   几点几」，那只能是装进浏览器这一份的版本 —— 服务端磁盘上那份 manifest
+   只能说明安装包带了哪个版本。getManifest() 拿不到时回空串，界面就不显示
+   这个号，而不是显示一个猜出来的。 */
+const EXT_VERSION = (() => {
+  try {
+    return (chrome.runtime.getManifest() || {}).version || "";
+  } catch (_) {
+    return "";
+  }
+})();
+
 const DEFAULTS = {
   serverUrl: "http://127.0.0.1:9000",
   intercept: true,
@@ -308,7 +339,7 @@ let restored = null;
 
 function ensureRestored() {
   if (restored) return restored;
-  restored = chrome.storage.session
+  restored = EXT_API.storage.session
     .get([STORE_KEY, LENS_KEY, LADDER_KEY])
     .then((d) => {
       const m = d && d[STORE_KEY];
@@ -352,7 +383,7 @@ function persist() {
     obj[k] = v;
   }
   try {
-    chrome.storage.session.set({ [STORE_KEY]: obj }).catch(() => {});
+    EXT_API.storage.session.set({ [STORE_KEY]: obj }).catch(() => {});
   } catch (_) {
     /* 忽略 */
   }
@@ -366,7 +397,7 @@ function persistLens() {
     obj[k] = v;
   }
   try {
-    chrome.storage.session.set({ [LENS_KEY]: obj }).catch(() => {});
+    EXT_API.storage.session.set({ [LENS_KEY]: obj }).catch(() => {});
   } catch (_) {
     /* 忽略 */
   }
@@ -380,7 +411,7 @@ function persistLadder() {
     obj[k] = v;
   }
   try {
-    chrome.storage.session.set({ [LADDER_KEY]: obj }).catch(() => {});
+    EXT_API.storage.session.set({ [LADDER_KEY]: obj }).catch(() => {});
   } catch (_) {
     /* 忽略 */
   }
@@ -640,7 +671,7 @@ async function probeSizesViaBackend(tabId) {
   if (!todo.length) return 0;
   let referer = "";
   try {
-    const tab = await chrome.tabs.get(tabId);
+    const tab = await EXT_API.tabs.get(tabId);
     referer = (tab && tab.url) || "";
   } catch (_) {
     /* 标签页可能已经关了，没有 Referer 也能问 */
@@ -752,7 +783,7 @@ async function ensureLadderViaBackend(tabId, pageUrl) {
   // 期间用户可能已经切走：只写回到同一个视频的标签页
   let nowUrl = "";
   try {
-    const tab = await chrome.tabs.get(tabId);
+    const tab = await EXT_API.tabs.get(tabId);
     nowUrl = (tab && tab.url) || "";
   } catch (_) {
     nowUrl = "";
@@ -868,7 +899,7 @@ function viewItems(tabId, currentUrl) {
 async function notifyTab(tabId, reset) {
   let url = "";
   try {
-    const tab = await chrome.tabs.get(tabId);
+    const tab = await EXT_API.tabs.get(tabId);
     url = (tab && tab.url) || "";
   } catch (_) {
     /* 标签页可能已经关了 */
@@ -877,7 +908,7 @@ async function notifyTab(tabId, reset) {
   try {
     // reset=true 表示「换了页面，旧结果作废」，content script 收到后要
     // 清空而不是合并，否则新页面会继承上一个页面的媒体。
-    await chrome.tabs.sendMessage(tabId, { type: "sniffer-update", items, reset: !!reset });
+    await EXT_API.tabs.sendMessage(tabId, { type: "sniffer-update", items, reset: !!reset });
   } catch (_) {
     /* 页面没有注入 content script（chrome://、应用店、已关闭的标签） */
   }
@@ -921,7 +952,7 @@ const SITES_MATCHES = [
 function registerSitesScript() {
   if (!chrome.scripting || !chrome.scripting.registerContentScripts) return;
   try {
-    const p = chrome.scripting.registerContentScripts([
+    const p = EXT_API.scripting.registerContentScripts([
       {
         id: SITES_SCRIPT_ID,
         matches: SITES_MATCHES,
@@ -1165,7 +1196,7 @@ async function getApiToken(cfg, force = false) {
   const key = "zdmApiToken";
   if (!force) {
     try {
-      const got = await chrome.storage.local.get(key);
+      const got = await EXT_API.storage.local.get(key);
       if (got && got[key]) {
         apiTokenCache = got[key];
         return apiTokenCache;
@@ -1175,14 +1206,14 @@ async function getApiToken(cfg, force = false) {
   try {
     const r = await fetch(baseUrl(cfg) + "/api/extension/token", {
       cache: "no-store",
-      headers: { "X-ZDM-Extension": chrome.runtime.id },
+      headers: { "X-ZDM-Extension": chrome.runtime.id, "X-ZDM-Ext-Version": EXT_VERSION },
     });
     if (r.ok) {
       const j = await r.json();
       if (j && j.token) {
         apiTokenCache = j.token;
         try {
-          await chrome.storage.local.set({ [key]: j.token });
+          await EXT_API.storage.local.set({ [key]: j.token });
         } catch (_) {}
         return apiTokenCache;
       }
@@ -1202,6 +1233,7 @@ async function api(path, body, method = "POST") {
         // Lets the client whitelist this extension id for native messaging even
         // if it was reloaded under a different id.
         "X-ZDM-Extension": chrome.runtime.id,
+        "X-ZDM-Ext-Version": EXT_VERSION,
         ...(token ? { "X-ZDM-Token": token } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -1243,7 +1275,7 @@ async function pingPresence() {
     const cfg = await getCfg();
     const r = await fetch(baseUrl(cfg) + "/api/extension/ping", {
       method: "GET",
-      headers: { "X-ZDM-Extension": chrome.runtime.id },
+      headers: { "X-ZDM-Extension": chrome.runtime.id, "X-ZDM-Ext-Version": EXT_VERSION },
     });
     const j = await r.json().catch(() => null);
     if (j && j.ext_version) {
@@ -1253,13 +1285,13 @@ async function pingPresence() {
       // 只认 ext_version：老服务只报桌面端版本号（1.15.x 号段），拿它和
       // 1.5.x 比永远不等，会陷入每分钟一次的无限 reload。
       const key = "zdmExtVersion";
-      const prev = (await chrome.storage.local.get(key))[key] || "";
+      const prev = (await EXT_API.storage.local.get(key))[key] || "";
       if (prev && prev !== j.ext_version) {
-        await chrome.storage.local.set({ [key]: j.ext_version });
+        await EXT_API.storage.local.set({ [key]: j.ext_version });
         chrome.runtime.reload();
         return;
       }
-      if (!prev) await chrome.storage.local.set({ [key]: j.ext_version });
+      if (!prev) await EXT_API.storage.local.set({ [key]: j.ext_version });
     }
   } catch (_) {
     /* 服务没开：静默。桌面端自然显示「未检测到」。 */
@@ -1284,14 +1316,23 @@ try {
 pingPresence();
 
 function notify(title, message) {
+  // 文案在这里统一翻译：调用点有的传固定句子里带用户文件名（filename / url），
+  // 直接 t() 会二次判断「这句认不认识」——不认识的（路径、裸 URL）原样出去。
+  const t = T(title);
+  const m = T(message);
   getCfg().then((cfg) => {
     if (!cfg.notify) return;
-    chrome.notifications.create({
-      type: "basic",
-      iconUrl: "icons/icon48.png",
-      title,
-      message,
-    });
+    // 必须显式给 ID：Firefox 的 create() 只有 (notificationId, options) 这一种签名，
+    // 少给第一个参数会被当成「ID 是个对象」而直接报错。ID 用时间戳，Chrome 里
+    // 也顺带解决了「同 ID 会覆盖上一条通知」。
+    const opts = { type: "basic", iconUrl: "icons/icon48.png", title: t, message: m };
+    try {
+      chrome.notifications.create(String(Date.now()), opts);
+    } catch (_) {
+      try {
+        chrome.notifications.create(opts); // 老 Chrome 不认两参数写法时退回
+      } catch (__) {}
+    }
   });
 }
 
@@ -1402,10 +1443,10 @@ async function launchZdm(req) {
   const launcher =
     chrome.runtime.getURL("launch.html") + "?u=" + encodeURIComponent(target);
   try {
-    const tab = await chrome.tabs.create({ url: launcher, active: false });
+    const tab = await EXT_API.tabs.create({ url: launcher, active: false });
     if (tab && tab.id != null) {
       setTimeout(() => {
-        chrome.tabs.remove(tab.id).catch(() => {});
+        EXT_API.tabs.remove(tab.id).catch(() => {});
       }, 5000);
     }
     return true;
@@ -1425,7 +1466,7 @@ async function waitForServer(cfg, timeoutMs) {
       // /api/state now needs the token and would just return 401.
       const r = await fetch(base + "/api/extension/ping", {
         cache: "no-store",
-        headers: { "X-ZDM-Extension": chrome.runtime.id },
+        headers: { "X-ZDM-Extension": chrome.runtime.id, "X-ZDM-Ext-Version": EXT_VERSION },
       });
       if (r.ok) return true;
     } catch (_) {
@@ -1553,7 +1594,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
   // 能恢复，cancel 是不可逆的。
   let held = false;
   try {
-    await chrome.downloads.pause(item.id);
+    await EXT_API.downloads.pause(item.id);
     held = true;
   } catch (e) {
     /* 还没开始或已经结束，无需处理 */
@@ -1567,13 +1608,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
 
   if (!ok) {
-    if (held) await chrome.downloads.resume(item.id).catch(() => {});
+    if (held) await EXT_API.downloads.resume(item.id).catch(() => {});
     return; // 交给浏览器自己下，别把用户的东西弄丢
   }
 
   try {
-    await chrome.downloads.cancel(item.id);
-    await chrome.downloads.erase({ id: item.id });
+    await EXT_API.downloads.cancel(item.id);
+    await EXT_API.downloads.erase({ id: item.id });
   } catch (e) {
     /* 已经结束 */
   }
@@ -1581,20 +1622,31 @@ chrome.downloads.onCreated.addListener(async (item) => {
 });
 
 /* ---- context menus ---- */
-chrome.runtime.onInstalled.addListener(() => {
+
+// 右键菜单是「注册时就定死文字」的那类界面：DOM 层替换够不着它，只能注册前翻译。
+// 又因为语言存在 storage 里，改完语言不重装扩展，所以监听存储变化重注册一次
+// —— 否则用户切到 English 后要重启浏览器才看得到英文菜单。
+function rebuildMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "zdm-download",
-      title: "使用 ZDM 下载",
+      title: T("使用 ZDM 下载"),
       contexts: ["link", "video", "audio", "image"],
     });
     chrome.contextMenus.create({
       id: "zdm-page",
-      title: "使用 ZDM 下载本页资源",
+      title: T("使用 ZDM 下载本页资源"),
       contexts: ["page"],
     });
   });
-});
+}
+chrome.runtime.onInstalled.addListener(rebuildMenus);
+chrome.runtime.onStartup && chrome.runtime.onStartup.addListener(rebuildMenus);
+try {
+  chrome.storage.onChanged.addListener((ch, area) => {
+    if (area === "sync" && ch.ui_lang) rebuildMenus();
+  });
+} catch (_) {}
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const url = info.linkUrl || info.srcUrl || info.pageUrl;
@@ -1729,7 +1781,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       let referer = "";
       try {
-        const tab = await chrome.tabs.get(sender.tab && sender.tab.id);
+        const tab = await EXT_API.tabs.get(sender.tab && sender.tab.id);
         referer = (tab && tab.url) || "";
       } catch (_) {
         /* 标签页关了也没关系 */

@@ -2,9 +2,10 @@
 
 本地版的 [NeatDownloadManager](https://www.neatdownloadmanager.com/) 克隆：多线程分块下载、断点续传、暂停/继续、队列、限速，并自带浏览器扩展接管下载。
 
-支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
+支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
+`paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.17.3**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.0**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.17.3_amd64.deb` | `sudo apt install ./zdm_1.17.3_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.0_amd64.deb` | `sudo apt install ./zdm_1.18.0_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.17.3.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.0.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -42,6 +43,9 @@
 > `apt install` 一次再跑同样的自检。
 
 每个包内自带 `extension/` 浏览器扩展，装完在 `chrome://extensions` 加载即可接管下载。
+Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点「导出 Firefox 扩展」拿到 `.xpi`，
+再到 `about:debugging#/runtime/this-firefox` → 「加载临时附加组件…」选中它（详见
+`zdm/README.md` 的 Firefox 一节）。
 
 > macOS 用户注意：`~/Library` 默认隐藏，在「加载已解压的扩展程序」的选文件夹窗口里按
 > `Command + Shift + G`，粘贴 `~/Library/Application Support/ZDM/extension` 即可直接定位。
@@ -52,7 +56,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.17.3
+bash zdm/build_linux_app.sh ./linux-build 1.18.0
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -98,7 +102,8 @@ powershell -ExecutionPolicy Bypass -File zdm\build_windows_app.ps1 -OutDir dist
 **浏览器扩展怎么装？** 桌面端工具栏和托盘菜单都有「浏览器扩展」入口：它同时显示
 ①扩展是否已加载（由扩展发给本机服务的 `GET /api/extension/ping` 心跳回答，而非去猜
 注册表/浏览器配置）、②一键打开扩展目录、③三步加载说明（`chrome://extensions` →
-开发者模式 → 加载已解压的扩展程序 → 选扩展目录）。
+开发者模式 → 加载已解压的扩展程序 → 选扩展目录）、④**Firefox**：同一份源码现打成
+`.xpi` 的「导出 Firefox 扩展」按钮（Firefox 没有「加载已解压的扩展程序」，只能装包）。
 
 **Windows 安装后打不开，报「Failed to load Python DLL '_internal\python312.dll' —
 LoadLibrary: 内存资源不足」** —— 这**不是真的内存不足**（32G 也会报）。
@@ -327,6 +332,117 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 收起四个、五个，而第二行（筛选条）右侧一直空着四百多像素。现在把「清除已完成 / 打开目录 /
 设置」挪到筛选条右侧，按动作层级排：列表动作 → 队列动作 → 应用入口。挪完核对过两件事：
 任何合法宽度下都不再出现「>>」；第二行需求 888px 小于窗口最小宽度 912px，不会被截字。
+
+**AriaNg / Motrix 那一类 aria2 客户端管不了 ZDM** —— v1.18.0 起，本机服务在**同一个端口**上
+多认一条 `POST /jsonrpc`（别名 `/rpc`），说的是 aria2 的那套 JSON-RPC：填上地址 + RPC Secret
+就能添加 / 暂停 / 继续 / 删除 / 排队 / 改全局并发与限速。
+
+- 它只是一层翻译：任务进的还是同一个队列、同一条事件流。不会出现「RPC 加的任务界面里没有」
+  这种两套状态各活各的 —— 视频页面链接照样转 yt-dlp、站点 Cookie 照样兜底、重复下载照样拦。
+- 鉴权按 aria2 的约定：`params[0]` 允许是 `token:<口令>`；也照旧认 `X-ZDM-Token` 头、Cookie、
+  `?token=`。用的就是本机接口那同一枚令牌，不另发一套 credential。`aria2.checkToken` 在鉴权
+  之前处理（令牌错也不报错，只把收到的原样带回）—— 那是 aria2 特意留出来给客户端自查的口子。
+- **CORS 只对 `/jsonrpc` 放开「回显请求 Origin」**，其它路径一律不变。敢放的前提是三条同时成立：
+  服务只绑 127.0.0.1、每条调用都必须带令牌、`Host` 校验仍挡 DNS rebinding。AriaNg 通常跑在
+  另一个端口上，不放这一条就是「连得上、读不到响应」，比 401 更难查。
+- 口径照 aria2：长度 / 速度全部是**字符串**；`tellActive` 里含 paused 与 canceled
+  （`canceled → paused`）；`remove` 对正在下载的任务先报错、`forceRemove` 才放行；删除一律
+  **不碰磁盘文件** —— 兼容层不该替用户删掉已经下好的东西。
+- `system.multicall` 必须可用（AriaNg 每次刷新发的就是它），并禁止嵌套；`system.listMethods`
+  列出来的每个方法都真的可调。
+- 做不到就说做不到，不「假装成功」：BT / 磁力 / Metalink 直接拒；不认识的 aria2 选项
+  （`ftp-pasv`、`bt-max-peers`…）报错而不是收下再忽略；`changeOption` 只允许改连接数，改
+  `dir` / `out` 会被拒 —— 那两个动的是已经落盘的路径。
+- 队列位置：ZDM 的排队顺序由优先级决定（±99 共 199 档），`changePosition` 靠重发一整条优先级
+  梯子实现；排队任务多于 199 条时明确报「无法保证精确位置」，而不是给一个错的顺序。
+- 开关是设置里的「兼容 aria2 JSON-RPC」（`rpc_enabled`，默认开），三端都能看到并复制地址与
+  令牌（网页版走 `GET /api/token`，桌面端在设置对话框）。关掉只是不认这条路径，`/api/*` 照旧。
+  端口改了没重启时，网页版会点破「服务当前实际在听的端口」—— 复制一个连不上的地址，用户只会
+  怀疑令牌。
+- 一次真实的连带伤害：给 RPC 让路时把 `_api_post` 的尾巴挤成了死代码，于是
+  「点保存没反应」—— GET 全好、POST 一律没响应，肉眼最难归因。回归脚本里现在有一组
+  「每个 POST 端点都必须真返回点什么」的断言。
+
+**只有 http/https 下得了** —— v1.18.0 起 `ftp://`、`ftps://`、`sftp://` 进的是同一台引擎、
+同一个队列、同一套分块与断点续传，不是另开的第二条通路（桌面端、网页版、扩展、CLI、aria2 兼容层
+五处入口都认）：
+
+- FTP/FTPS 只用标准库（`ftplib` + `ssl`），装完即用，不额外带依赖。
+- 长度问 `SIZE`、续传用 `REST`。**REST 的回复必须自己看过**：ftplib 的 `ntransfercmd(rest=...)`
+  会把服务器对 REST 的答复丢掉，碰上「嘴上答应、实际从头发」的服务器，写出来的是一条长度刚好、
+  内容全错的文件 —— 这种损坏比报错难发现得多，所以这里只认 3xx 回复。
+- 服务器不配合就如实降级：不认 `SIZE` 显示「大小未知」，不认 `REST` 退回单流顺序下载，
+  绝不假装能续传。
+- `ftps://` 默认显式 `AUTH TLS`（21 端口，与 curl 一致），端口写成 990 才走隐式 TLS。
+  证书校验不打折：自签、链不完整一律连不上，不会「当成明文先把文件下完」。
+- SFTP 需要 `paramiko`（SSH 握手绕不开密码学实现，标准库没有）。三端安装包内置，源码安装由
+  `install.sh` 顺带装上；确实没有的机器在**添加链接那一步**就被拒绝，同时说清缺什么、怎么补，
+  而不是建一条永远下不完的任务。
+- 主机密钥按 TOFU：首次连接记进 ZDM 配置目录里的 `sftp-known_hosts`，**不碰用户的
+  `~/.ssh/known_hosts`**；之后同一主机密钥变了直接拒绝 —— 可能是中间人，也可能是服务器重装，
+  两种都不能「先下完再说」，回执里会写清怎么确认、删哪一行能解除。
+- 一条要说在前面的限制：**设置里的代理只对 http/https 生效**，ftp/ftps/sftp 走各自的协议通道。
+- 协议白名单只有一份（`zdm/zdm/transport.py` 的 `SUPPORTED_SCHEMES`），后端、桌面端、网页版
+  都读它 —— 免得某一层放行了 ftp、另一层还在报「只支持 http/https」。
+
+**状态栏右下角那个版本号不是扩展的版本** —— v1.18.0 起（扩展 1.5.43）：「● 扩展已连接」后面跟的是**扩展自己
+报的版本**（新增 `X-ZDM-Ext-Version` 请求头 → 服务端 presence → `/api/extension.ext_version`），
+桌面端的标签则写明 `ZDM v1.x.y`。扩展没报过版本（装的是旧扩展）时那一栏什么都不加，不编一个
+数字出来。
+
+**扩展只有 Chrome 能用** —— v1.18.0 起 Firefox 也认，而且**仍是同一份 `extension/` 源码**：
+`zdm/zdm/firefox_ext.py` 只翻译清单（去掉 Chrome 的 `key`/`minimum_chrome_version`/`downloads.open`，
+把 `background.service_worker` 换成 `background.scripts`，补上 `browser_specific_settings.gecko.id`），
+再在内存里打成 `.xpi`。不复制第二份 JS，就不会出现「Chrome 修了 bug、Firefox 还带着坏版本」：
+
+- 三个入口拿同一个包：桌面端「浏览器扩展 → 导出 Firefox 扩展」、网页版底部的
+  `GET /api/extension/firefox.xpi`（服务端现场打包）、`zdm firefox-ext --out x.xpi`。
+  **不在仓库里预存第二份**，磁盘上那份 `extension/` 永远是唯一真相。
+- 也没有第四个 Release 资产：包是按需生成的，每个 Release 仍然只有 4 个文件。
+- 真正的坑在 API 命名空间：Firefox 的 `chrome.*` **只有回调、不返回 Promise**（Promise 形式挂在
+  `browser.*`），`await chrome.tabs.get()` 在那边拿到的是 `undefined`，接着读 `.url` 就是一片
+  「读不到属性」的崩溃。所以扩展里凡是按 Promise 用的调用统一走 `EXT_API`（有 `browser` 就用它，
+  否则用 `chrome`），事件注册与回调式调用继续用 `chrome.*` —— 两边那一套都是通的。
+- 原生消息主机一份清单喂两家：`allowed_origins`（Chrome 系）与 `allowed_extensions`（Firefox）
+  写在同一个 `com.zdm.launcher.json` 里，各家忽略各家不认的那个；`.deb`、Windows 安装脚本和
+  `install.sh` 都会把 Firefox 那棵树/目录一并注册。Firefox 的扩展 ID 只在
+  `zdm/zdm/firefox_ext.py` 里定一次，构建脚本现读再写（`build_windows_app.ps1` 传给安装器，
+  `build_linux_app.sh` 还会比对，抄错就构建失败）—— 写错的表现是「Firefox 点了下载没反应，
+  Chrome 一切正常」，那是最难归因的一类 bug。
+- 顺手补掉一个旧缺口：`install.sh` 里注册原生消息主机的分支**只有 Linux 走过**，macOS 从头到尾
+  没调用过；而且循环里写死的是 `~/.config/google-chrome` 这套 Linux 路径，即便调用了在 macOS 上
+  每个 `[ -d ]` 也都不成立。现在按平台分目录（macOS 是
+  `~/Library/Application Support/<浏览器>/NativeMessagingHosts`，Firefox 是
+  `…/Mozilla/NativeMessagingHosts`），`install_mac()` 末尾补上调用，Chrome 在 macOS 上这才真的
+  能静默唤醒 ZDM。
+- 要说在前面的限制：未签名的 `.xpi` 在正式版 Firefox 只能**临时加载**，浏览器一重启就没了，
+  而且临时加载会分配一次性扩展 ID，原生消息那条自动唤醒对不上 —— 表现是「ZDM 没开着时扩展
+  唤醒不了它」。接管下载、嗅探、推送走 HTTP，与扩展 ID 无关，照常可用。要永久安装 + 自动唤醒，
+  走签名包或 Dev Edition / Nightly / ESR（`xpinstall.signatures.required=false`）。
+- 最低 Firefox 115。移植的正确性由一套双命名空间模拟器验证（同一份 `background.js` 分别在
+  「Firefox 语义」和「Chrome 语义」下跑：顶层不报错、事件注册齐全、`state` 请求有回包、
+  通知按 `create(id, options)` 两参签名调用），实机端到端仍以临时加载为准。
+
+**界面只有中文，非中文用户只能连猜** —— v1.18.0 起**网页版和浏览器扩展都是中英双语**：
+
+- 网页版：右上角「界面语言 / Language」下拉（自动 / 中文 / English），偏好存
+  `localStorage`；也可以用 `?lang=en` 直接开一个英文链接（截图、文档、给别人复现问题时有用）。
+- 扩展：设置页新增「界面语言」，存 `chrome.storage.sync`，所以换一台机器登录同一浏览器账号还是
+  英文。覆盖 popup、options、唤醒中间页、嗅探面板、播放器按钮、清晰度菜单，以及后台发出的
+  **系统通知和右键菜单**（这两处没有 DOM，是在交给浏览器 API 前翻的）。
+- 两边默认都跟随浏览器语言（`chrome.i18n.getUILanguage()`，取不到退回 `navigator.language`）。
+- 做法是 **DOM 这一层做替换**，不是把 130+ 处文案改成 `t('key')`：界面大量用 innerHTML 模板和
+  属性文案（`title`/`placeholder`），改成 key 化要动四个文件上百处渲染，漏一处就是半中半英；
+  一份文案表 + TreeWalker + MutationObserver 连动态刷新的部分一起覆盖。**查不到的词条原样保留
+  中文** —— 宁可看到中文，也不要看到编出来的错译。代价有两条，写在这儿免得下次踩：
+  ① 网页版和扩展各存一份表，互相加载不了（页面 CSP 不放行从 `chrome-extension:` 取脚本），
+  改文案两处都要过；② 切回中文是**逐字还原**（WeakMap 记着界面代码自己写进去的原文），
+  不是拿英文表反着翻一遍。
+- 边界要说清：后端消息里**认得出的**（参数校验、FTP/SFTP 报错、状态冲突、任务状态词）会跟着翻；
+  诊断日志、`download-errors.log` 和 **Qt 桌面端**在这一版仍是中文。
+- 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
+  165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
+  断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。

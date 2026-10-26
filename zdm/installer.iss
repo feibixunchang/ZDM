@@ -24,6 +24,12 @@
 #ifndef ExtId
   #define ExtId "mpodbnemeeghjpllgphpemhoogddfhjg"
 #endif
+; Firefox 的扩展 ID 不是由 key 推导的字符串，而是清单里 browser_specific_settings.gecko.id
+; 那一个，值固定在 zdm/zdm/firefox_ext.py 的 GECKO_ID（打 .xpi 用的就是它）。构建脚本会
+; 现读再传进来；写错的表现为「Firefox 里点下载没反应」，Chrome 那边却一切正常，最难归因。
+#ifndef GeckoId
+  #define GeckoId "zdm-connector@feibixunchang.github.io"
+#endif
 
 #define AppName "ZDM 下载管理器"
 #define AppExeName "ZDM.exe"
@@ -118,6 +124,10 @@ Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.zdm.launche
 Root: HKCU; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.zdm.launcher"; ValueType: string; ValueName: ""; ValueData: "{app}\com.zdm.launcher.json"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Chromium\NativeMessagingHosts\com.zdm.launcher"; ValueType: string; ValueName: ""; ValueData: "{app}\com.zdm.launcher.json"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.zdm.launcher"; ValueType: string; ValueName: ""; ValueData: "{app}\com.zdm.launcher.json"; Flags: uninsdeletekey
+; Firefox 认的是自己那棵树，清单文件却是同一份（Chrome 忽略 allowed_extensions，
+; Firefox 忽略 allowed_origins，所以一份 JSON 喂两边）。注册表里没写过的浏览器
+; 只是读不到这行，装没装 Firefox 都不影响安装。
+Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\com.zdm.launcher"; ValueType: string; ValueName: ""; ValueData: "{app}\com.zdm.launcher.json"; Flags: uninsdeletekey
 
 [Run]
 ; 交互安装（手动双击，或应用内更新拉起的可见向导）装完**立即**拉起界面，
@@ -268,7 +278,8 @@ begin
       '  "description": "ZDM download manager launcher",' + #13#10 +
       '  "path": "' + Line + '",' + #13#10 +
       '  "type": "stdio",' + #13#10 +
-      '  "allowed_origins": ["chrome-extension://' + '{#ExtId}' + '/"]' + #13#10 +
+      '  "allowed_origins": ["chrome-extension://' + '{#ExtId}' + '/"],' + #13#10 +
+      '  "allowed_extensions": ["' + '{#GeckoId}' + '"]' + #13#10 +
       '}' + #13#10,
       False);
 

@@ -4,6 +4,9 @@ const DEFAULTS = {
   connections: 8,
   directory: "",
   notify: true,
+  // 界面语言：auto = 跟随浏览器。存 sync，内容脚本起来时读同一个键，
+  // 不然「设置里选了 English，网页上的按钮还是中文」。
+  ui_lang: "auto",
 };
 const $ = (s) => document.querySelector(s);
 
@@ -13,7 +16,16 @@ chrome.storage.sync.get(DEFAULTS, (cfg) => {
   $("#connections").value = cfg.connections;
   $("#intercept").checked = cfg.intercept;
   $("#notify").checked = cfg.notify;
+  $("#uiLang").value = ["auto", "zh", "en"].includes(cfg.ui_lang) ? cfg.ui_lang : "auto";
 });
+
+// 换语言立刻重排本页（存盘仍由「保存」负责）：否则改完 English 得重开页面才看得到，
+// 而这一页正是用户用来设置语言的地方，最不能让它自己不变。
+$("#uiLang").onchange = () => {
+  try {
+    if (typeof ZDMUI !== "undefined") ZDMUI.setLang($("#uiLang").value);
+  } catch (_) {}
+};
 
 $("#save").onclick = () => {
   chrome.storage.sync.set({
@@ -22,6 +34,7 @@ $("#save").onclick = () => {
     connections: Number($("#connections").value) || 8,
     intercept: $("#intercept").checked,
     notify: $("#notify").checked,
+    ui_lang: $("#uiLang").value,
   }, () => { $("#msg").textContent = "已保存"; });
 };
 

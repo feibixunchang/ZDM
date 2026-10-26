@@ -211,6 +211,8 @@
     host.style.cssText =
       "all:initial;position:fixed;right:18px;bottom:18px;z-index:2147483647;";
     shadow = host.attachShadow({ mode: "open" });
+    // 界面语言（ui18n.js）：只观察自己这棵 shadow 树，不去遍历宿主页面的 DOM。
+    try { if (typeof ZDMUI !== "undefined") ZDMUI.watch(shadow); } catch (_) {}
     shadow.innerHTML = `
       <style>
         :host{all:initial}

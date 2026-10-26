@@ -259,6 +259,30 @@ launchctl kickstart -k "gui/$(id -u)/com.zdm.service"
 2. 「加载已解压的扩展程序」→ 选择 `~/Library/Application Support/ZDM/extension`
 3. 点扩展图标 → ⚙ → 「测试连接」→ 勾选「自动接管浏览器下载」
 
+## Firefox 扩展（v1.18.0 新增）
+
+Firefox 不认「加载已解压的扩展程序」，只吃打包好的 `.xpi`。**源码仍是上面那一份
+`extension/`**，只是清单按 Firefox 的写法翻译了一遍（去掉 Chrome 独有的 `key`、
+`minimum_chrome_version`、`downloads.open`，把 `background.service_worker` 换成
+`background.scripts`，补上固定的 gecko ID），所以两边的功能与 bug 修复是同步的。
+
+1. 拿包，任选一个入口：
+   - 桌面端：工具栏/托盘菜单的「浏览器扩展」→「导出 Firefox 扩展」，选个保存位置；
+   - 网页版：页面底部「下载 Firefox 版扩展（.xpi）」；
+   - 命令行：`zdm firefox-ext --out zdm-connector.xpi`。
+2. Firefox 地址栏打开 `about:debugging#/runtime/this-firefox` → 「加载临时附加组件…」→
+   选中那个 `.xpi`。
+3. 之后与 Chrome 一样：点扩展图标 → ⚙ → 「测试连接」→ 勾选「自动接管浏览器下载」。
+
+要先知道的边界（都是 Firefox 的规则）：
+
+| 事项 | 说明 |
+|---|---|
+| 临时加载会被清掉 | **浏览器重启后扩展自动移除**，每次开机要重新加载。要永久装得走官方签名，或用 Dev Edition / Nightly / ESR 并把 `xpinstall.signatures.required` 设为 `false` |
+| 自动唤醒 | 临时加载会分配一次性扩展 ID，与原生消息清单里那个固定 ID 对不上，所以「ZDM 没开时自动拉起」这一步在临时加载下不生效 —— 请先开着 ZDM。永久安装（签名包 / Dev Edition）不受影响：`install.sh`、`.deb`、Windows 安装包都会额外注册 Firefox 那棵原生消息目录 |
+| 其余功能 | 接管下载、网页视频/音频嗅探、播放器上的「下载此视频」、推送任务到本机服务都照常工作，它们走 HTTP，与扩展 ID 无关 |
+| 版本要求 | 最低 Firefox 115；`.xpi` 与 Chrome 扩展共用 `extension/manifest.json` 的版本号（当前 1.5.x），三处入口打出的是同一个版本 |
+
 ## 视频 / 音频嗅探（一键推送下载，v1.13.0 新增）
 
 装好上面那个扩展之后，**浏览器的每个网页右下角会出现一个 ZDM 圆形浮动按钮**。
@@ -318,6 +342,84 @@ launchctl kickstart -k "gui/$(id -u)/com.zdm.service"
   时任务会直接报错说明原因，而不是留下一个永远不结束的任务。
 - 正在录制时不能改上限（改了也不会对这一段生效）；要先「停止录制」，再重新下载。
 
+## 用 AriaNg / Motrix 这类 aria2 客户端接管（v1.18.0 新增）
+
+ZDM 本机服务在**同一个端口**上还认一套 aria2 的 JSON-RPC，路径 `POST /jsonrpc`（别名 `/rpc`）。
+默认就是开着的，不需要额外启动什么进程。
+
+1. 打开设置（桌面端「设置」→ 最下面「外部客户端接入（aria2 JSON-RPC）」；网页版齿轮 →
+   同一组字段），把 **RPC 地址** 和 **RPC 令牌** 复制出来。
+2. 在 AriaNg 的设置里填：RPC 路径 `http://127.0.0.1:9000/jsonrpc`，RPC Secret 填那枚令牌
+   （aria2 的写法 `token:<令牌>` 作为第一个参数也照样认）。
+3. 之后添加 / 暂停 / 继续 / 删除 / 排队 / 改并发与限速都能在外部客户端里做。任务进的还是
+   ZDM 的同一个队列，桌面端、网页版、扩展里看到的完全一样。
+
+支持的方法：`addUri`、`tellActive` / `tellWaiting` / `tellStopped` / `tellStatus`、
+`getDownloadResult`、`getTaskList`、
+`pause` / `unpause` / `pauseAll` / `unpauseAll`（含 `force*` 别名）、`remove` / `forceRemove`、
+`removeDownloadResult`、`changePosition`、`changeGlobalOption` / `changeOption`、`getGlobalStat`、
+`getVersion`、`newSessionId` / `getSessionId`、`checkToken`、`system.listMethods`、
+`system.multicall`。
+
+要提前知道的边界：
+
+- **BT / 磁力 / Metalink 不支持**（ZDM 只做单文件下载：http/https/ftp/ftps/sftp），这些方法会明确报错，不会「收下任务却什么都不下」。
+- 不认识的 aria2 选项（`ftp-pasv`、`bt-max-peers` 等）**直接报错**，而不是忽略掉继续下。
+- `changeOption` 只能改连接数；改 `dir` / `out` 会被拒，因为那动的是已经落盘的路径。
+- **删除不会碰磁盘**：`remove` / `forceRemove` 只清任务记录，已下好的文件留在原地（这是 aria2 的语义）。
+- 长度、速度这类字段一律是**字符串**（aria2 的口径）；`tellActive` 里也会包含已暂停的任务。
+- 排队任务超过约 199 条时，`changePosition` 会说明「无法保证精确位置」而不是给一个错的顺序。
+- 不想开这条通道就在设置里取消勾选（`rpc_enabled`），或 `zdm config rpc_enabled false`；
+  关掉只影响 `/jsonrpc`，ZDM 自己的界面与 `/api/*` 一切照旧。
+- 令牌等于「能操作这台机器上的 ZDM」，别贴到网上、别写进公开配置。服务只监听 127.0.0.1。
+
+## FTP / FTPS / SFTP 下载（v1.18.0 新增）
+
+链接直接粘进「新建下载」就行，也可以拖进桌面端窗口、从扩展推送或 `zdm add`。账号密码写在链接里：
+
+```
+ftp://user:pass@files.example.com/pub/big.iso
+ftps://user:pass@files.example.com/pub/big.iso      # 显式 AUTH TLS，默认 21 端口
+ftps://user:pass@files.example.com:990/pub/big.iso  # 隐式 TLS：只有端口写 990 时才走
+sftp://user:pass@backup.example.com/data/big.iso
+sftp://user@backup.example.com/data/big.iso         # 不写密码 = 用 SSH 的密钥 / agent
+```
+
+`ftp://` 匿名服务器不写账号即可（会按 `anonymous` 登录）。密码里有 `@` `:` `/` 这些字符时按
+URL 规则百分号编码，例如 `p%40ss`。
+
+下到的东西和 http 完全一个待遇：**同一套分块并发、同一套断点续传**（暂停、重启服务、崩溃后接着
+传），列表里的速度 / 剩余时间 / 失败原因也都是同一套，不存在「FTP 任务是另一条队列」这种事。
+
+| 事项 | 表现 |
+|---|---|
+| 依赖 | ftp / ftps 只用标准库，装完即可用；sftp 需要 `paramiko`，三端安装包已内置，源码安装由 `install.sh` 顺带装上 |
+| 服务器不给长度 | 列表显示「大小未知」，退回单连接顺序下载，不显示假百分比 |
+| 服务器不肯续传 | FTP 的 `REST` 没被答应（回复不是 3xx）时直接报错重试，绝不「从 0 收到的字节写到中间位置」 |
+| TLS | `ftps://` 校验证书链：自签、链不完整一律连不上，不会退化成明文继续下 |
+| 主机密钥 | SFTP 首次连接记进配置目录里的 `sftp-known_hosts`（**不会改你的 `~/.ssh/known_hosts`**）；之后再连同一主机，密钥对不上就拒绝，并说明怎么确认、删哪一行能解除 |
+| 指向目录 | 明确拒绝「这是个目录，不是文件」；ZDM 的下载任务对应单个文件 |
+| 代理 | 设置里的代理只对 http/https 生效，ftp/ftps/sftp 走各自的协议通道，不认那个字段 |
+| 没有 paramiko | 添加 `sftp://` 时当场拒绝并说明「这台机器缺 paramiko，怎么补」—— 不会先建一条永远下不完的任务 |
+
+## 英文界面（v1.18.0 新增）
+
+网页版和浏览器扩展都支持中英文，**默认跟随浏览器的界面语言**，也可以自己指定：
+
+- **网页版**（`http://127.0.0.1:9000/`）：右上角「界面语言 / Language」下拉，选一次就记住
+  （存在浏览器本地）。想直接给别人一个英文界面的链接，用 `http://127.0.0.1:9000/?lang=en`。
+- **扩展**：扩展图标 → ⚙ 设置 → 「界面语言」（自动 / 中文 / English）。这一项存在扩展的同步
+  存储里，换机器登录同一浏览器账号还是英文；改完立刻生效，网页上的嗅探面板、播放器按钮和
+  清晰度菜单跟着变，不用刷新页面。
+- **Firefox 与 Chrome 同一份语言文件**：导出的 `.xpi` 里带的就是同一套文案，不存在「Chrome 已经
+  英文、Firefox 还是中文」。
+
+覆盖范围：扩展的弹出面板、设置页、唤醒中间页、网页里的各类界面，以及系统通知和右键菜单。
+
+**暂时还是中文的部分**：桌面端程序窗口（Qt 那一套）和日志文件（`download-errors.log`、任务日志）。
+后端报错里认得出的那些（参数校验、FTP/SFTP、状态冲突）会跟着界面语言翻译，认不出的原样保留中文，
+不做「猜一个英文出来」的事。
+
 ## 常用命令
 
 ```bash
@@ -327,6 +429,7 @@ zdm add "URL" -c 16 -o ~/Downloads   # 添加下载，16 连接
 zdm add "https://…/live.m3u8" --live-limit 30:00   # 录 30 分钟直播后自动收工
 zdm list                    # 列出任务
 zdm config speed_limit 2097152        # 限速 2 MB/s
+zdm config rpc_enabled false          # 关掉 aria2 JSON-RPC 兼容层
 zdm stop                   # 停止服务
 ```
 

@@ -91,9 +91,11 @@ if (-not (Test-Path $VenvPy)) {
 
 Write-Step "installing PyQt5 + PyInstaller"
 & $VenvPy -m pip install --quiet --upgrade pip
-& $VenvPy -m pip install --quiet "PyQt5>=5.15,<5.16" "pyinstaller>=6.3"
+# paramiko 是 sftp:// 通道唯一的外部依赖（ftp/ftps 走标准库）。安装包里没 pip，
+# 少了它用户要到粘链接才看见「这台机器没有 SFTP 通道」，所以随包必带。
+& $VenvPy -m pip install --quiet "PyQt5>=5.15,<5.16" "pyinstaller>=6.3" "paramiko>=3.4"
 if ($LASTEXITCODE -ne 0) { Fail "pip install 失败" }
-& $VenvPy -c "import PyInstaller; from PyQt5.QtCore import QT_VERSION_STR, PYQT_VERSION_STR; print('    PyQt5 %s | Qt %s | PyInstaller %s' % (PYQT_VERSION_STR, QT_VERSION_STR, PyInstaller.__version__))"
+& $VenvPy -c "import PyInstaller, paramiko; from PyQt5.QtCore import QT_VERSION_STR, PYQT_VERSION_STR; print('    PyQt5 %s | Qt %s | PyInstaller %s | paramiko %s' % (PYQT_VERSION_STR, QT_VERSION_STR, PyInstaller.__version__, paramiko.__version__))"
 
 # --------------------------------------------------------------- bundled bins
 # Two binaries ride along, exactly like the Linux/macOS packages:
@@ -256,9 +258,25 @@ if ($SkipInstaller) {
         }
         if ($extId) { Write-Step "extension id: $extId" }
 
+        # Firefox 那个 ID 同理：它长在 zdm/zdm/firefox_ext.py 里（打 .xpi 用的就是
+        # 同一个常量）。用正则从源码里读，不在这里抄第二份 —— 两边不一致时
+        # 的现象是「Chrome 能唤醒、Firefox 点了没反应」，只能靠用户报障才发现。
+        $geckoId = ""
+        try {
+            $fe = Join-Path $Src "zdm\firefox_ext.py"
+            if (Test-Path $fe) {
+                $m = Select-String -Path $fe -Pattern '^GECKO_ID = "([^"]+)"' | Select-Object -First 1
+                if ($m) { $geckoId = $m.Matches[0].Groups[1].Value }
+            }
+        } catch {
+            Write-Host "WARNING: 读取 Firefox 扩展 ID 失败，installer.iss 用内置值" -ForegroundColor Yellow
+        }
+        if ($geckoId) { Write-Step "firefox id: $geckoId" }
+
         $iss = Join-Path $Src "installer.iss"
         $defs = @("/DAppVersion=$Version", "/DSourceDir=$AppDir", "/DOutDir=$OutDir")
         if ($extId) { $defs += "/DExtId=$extId" }
+        if ($geckoId) { $defs += "/DGeckoId=$geckoId" }
         & $iscc @defs $iss
         if ($LASTEXITCODE -ne 0) { Fail "Inno Setup 失败" }
         $setup = Join-Path $OutDir "ZDM-Setup-$Version.exe"

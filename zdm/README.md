@@ -1,18 +1,20 @@
 # ZDM — 本机多线程下载管理器
 
-零依赖（只用 Python 标准库），带本地 Web 管理界面 + Chrome/Edge 扩展，功能对标 Neat DownloadManager。
+零依赖（只用 Python 标准库；只有 `sftp://` 通道另需 `paramiko`，三端安装包已内置，从源码跑
+`install.sh` 会顺带装上），带本地 Web 管理界面 + Chrome/Edge 扩展，功能对标 Neat DownloadManager。
 
 ## 特性
 
 | 能力 | 说明 |
 |---|---|
 | 多连接分段下载 | HTTP Range 动态分段，最多 32 连接，连接空闲自动抢占剩余最大分片 |
+| 多协议 | 除 http/https，还下 `ftp://`、`ftps://`、`sftp://`：同一套分块与断点续传，不是另开的第二条通路 |
 | 断点续传 | `.part` + `.part.zdm` 元数据，暂停/重启服务/崩溃后都能续传 |
 | 队列调度 | 并发任务数可配，排队自动开始 |
 | 全局限速 | token bucket，KB/s 可调 |
 | 实时界面 | SSE 推送，进度/速度/剩余时间实时刷新 |
 | 桌面客户端 | 原生 Qt 窗口（PyQt5）：任务列表、托盘、拖放链接、右键菜单、设置 |
-| 浏览器接管 | Chrome/Edge 扩展：自动接管下载、右键「使用 ZDM 下载」 |
+| 浏览器接管 | Chrome/Edge/Firefox 扩展：自动接管下载、右键「使用 ZDM 下载」（Firefox 用同一份源码打 `.xpi`） |
 | CLI | `zdm add/list/pause/resume/cancel/restart/remove/config` |
 | 无 Range 服务器 | 自动降级单连接流式下载 |
 
@@ -111,6 +113,41 @@ ZDM 没开着时（扩展 **v1.2.1** 起）：
 
 两条路都失败时，扩展会把暂停的下载**恢复**，浏览器照常自己下载，不会丢文件。
 
+### Firefox（v1.18.0）
+
+Firefox 没有「加载已解压的扩展程序」，只认打包好的 `.xpi`。**源码仍是同一份
+`extension/`**，差别只在清单：`zdm/zdm/firefox_ext.py` 把 Chrome 特有的字段（`key`、
+`minimum_chrome_version`、`downloads.open` 权限、`background.service_worker`）换成
+Firefox 的写法，再打成 zip。不另存一份 JS，就不会出现「Chrome 修了 bug、Firefox 还带着
+坏版本」。
+
+拿 `.xpi` 有三个入口，任选一个：
+
+| 入口 | 操作 |
+|---|---|
+| 桌面端 | 「浏览器扩展」对话框 → 「导出 Firefox 扩展」→ 选保存位置 |
+| 网页版 | 页面底部「下载 Firefox 版扩展（.xpi）」（`GET /api/extension/firefox.xpi`，现场打包） |
+| 命令行 | `zdm firefox-ext --out zdm-connector.xpi` |
+
+装：Firefox 地址栏打开 `about:debugging#/runtime/this-firefox` → 「加载临时附加组件…」→
+选那个 `.xpi`。
+
+要知道的边界（都是 Firefox 侧的规则，不是 ZDM 的取舍）：
+
+- **临时加载的扩展浏览器重启后会被移除**，每次开机要重新加载一次。要永久安装，得走
+  Firefox 附加组件商店签名，或用 Dev Edition / Nightly / ESR 并把
+  `xpinstall.signatures.required` 设为 `false`。
+- 临时加载会分配一个**一次性的扩展 ID**，原生消息主机清单里那个固定 ID
+  （`zdm-connector@feibixunchang.github.io`）对不上，所以「自动唤醒 ZDM」在临时加载下
+  不生效：请先开着 ZDM，或用 `zdm://` 协议那条兜底路径。接管下载、网页视频嗅探、推送到
+  本机服务这些都不受影响（它们走 HTTP，与扩展 ID 无关）。
+- 永久安装（签名包 / Dev Edition）时，`install.sh`、`.deb`、Windows 安装包都已把
+  Firefox 那棵原生消息注册表/目录一并写好，唤醒能力和 Chrome 一样。
+- 最低 Firefox 115（`browser_specific_settings.gecko.strict_min_version`）。
+- Promise 形式的 API 在 Firefox 只挂在 `browser.*` 上（`chrome.*` 那边只有回调），
+  扩展里统一用一个 `EXT_API` 挑「返回 Promise 的那一套」；事件注册和回调式调用继续用
+  `chrome.*`，两边都成立。
+
 ## 平台差异与注意
 
 | 事项 | Linux | macOS | Windows |
@@ -130,6 +167,47 @@ ZDM 没开着时（扩展 **v1.2.1** 起）：
 - 也可在设置界面或 `zdm config proxy http://127.0.0.1:7890` 显式指定；留空 = 走环境变量。
 - 部分 CDN 只对 HTTP/2 客户端返回 200，纯标准库客户端会被 403；检测到这种情况会自动切换到
   系统 `curl` 作为传输后端（仍保持多线程分片），无需配置。
+- **代理设置只作用于 http/https**。`ftp://` / `ftps://` / `sftp://` 走各自的协议通道，
+  设置里那个代理字段对它们无效（不是「静默走直连当成功」——链接照下，只是别指望它翻代理）。
+
+## FTP / FTPS / SFTP（v1.18.0）
+
+链接直接粘进新建下载框即可，账号密码写在链接里：
+
+```
+ftp://user:pass@files.example.com/pub/big.iso
+ftps://user:pass@files.example.com/pub/big.iso     # 显式 AUTH TLS（21）
+ftps://user:pass@files.example.com:990/pub/big.iso # 隐式 TLS（要写端口）
+sftp://user:pass@backup.example.com/data/big.iso
+sftp://user@backup.example.com/data/big.iso        # 不写密码 = 交给 SSH 的密钥/agent
+```
+
+| 事项 | 说明 |
+|---|---|
+| 依赖 | ftp/ftps 只用标准库；sftp 需要 `paramiko`（缺了会在「添加」这一步就说清缺什么、怎么补） |
+| 分块与续传 | 长度问 FTP 的 `SIZE` / SFTP 的 `stat`；FTP 用 `REST` 定位，SFTP 用协议自带的 seek |
+| 服务器不配合 | 不认 `SIZE` 就显示「大小未知」，不认 `REST` 就退回单流顺序下载；绝不假装能续传 |
+| TLS 校验 | `ftps://` 校验证书链，自签/链不完整一律连不上，不会退化成明文接着下 |
+| 主机密钥 | SFTP 首次连接按 TOFU 记进配置目录里的 `sftp-known_hosts`（不动你的 `~/.ssh/known_hosts`）；之后密钥变了直接拒绝并说明怎么解除 |
+| 目录 | 指向目录而不是文件会被明确拒绝（协议支持列目录，ZDM 的下载任务对应单个文件） |
+| 密码含特殊字符 | 按 URL 规则百分号编码，例如密码里的 `@` 写成 `%40`、`/` 写成 `%2F` |
+
+## 英文界面（v1.18.0）
+
+网页版和浏览器扩展都是中英双语，默认跟随浏览器语言，也可以手动指定：
+
+| 位置 | 怎么切 | 存在哪 |
+|---|---|---|
+| 网页版（`http://127.0.0.1:9000/`） | 右上角「界面语言 / Language」 | `localStorage` 的 `zdm_ui_lang` |
+| 网页版链接 | 直接开 `/?lang=en`（或 `?lang=zh`） | 只影响这一次打开 |
+| 扩展 | 扩展设置页「界面语言」 | `chrome.storage.sync`（跟着浏览器账号同步） |
+
+扩展那一处覆盖 popup、设置页、唤醒中间页、网页里的嗅探面板 / 播放器按钮 / 清晰度菜单，以及
+系统通知和右键菜单；Firefox 与 Chrome 用的是同一份语言文件。
+
+没翻的部分要说明白：**Qt 桌面端**和诊断日志（`download-errors.log`、任务日志）在这一版仍是中文。
+后端返回的报错里，认得出的（参数校验、FTP/SFTP、状态冲突、状态词）会跟着翻，认不出的一律原样
+显示中文 —— 这套界面不做「猜不出就编一个英文」的事。
 
 ## CLI
 
@@ -137,6 +215,7 @@ ZDM 没开着时（扩展 **v1.2.1** 起）：
 zdm start --daemon                       # 后台启动
 zdm status                               # 服务与任务状态
 zdm add "https://example.com/a.iso" -c 16 -o ~/Downloads
+zdm add "ftp://user:pass@files.example.com/pub/big.iso"   # ftp/ftps/sftp 同样分块、同样续传
 zdm add URL -H "Referer: https://site/page" -H "Cookie: k=v"
 zdm add URL -p 10                     # 优先级：数字越大越先下载（±99 之外按边界夹取）
 zdm add URL -c 16                     # 连接数 1~32；越界会被夹到边界并在回执里写明
@@ -149,7 +228,7 @@ zdm pause <id> / zdm resume <id> / zdm restart <id> / zdm remove <id>
 zdm config connections 16               # 1~32
 zdm config speed_limit 2097152          # 2 MB/s，0 = 不限
 zdm config mirror_accel true            # GitHub / Hugging Face 镜像加速（默认关）
-zdm config clipboard_monitor true       # 复制 http(s) 链接后填入新建下载输入框
+zdm config clipboard_monitor true       # 复制下载链接（http/ftp/sftp）后填入新建下载输入框
 zdm config mirror_accel off             # 关；认 true/false/yes/no/on/off
 zdm config stream_engine re             # HLS/DASH 引擎：auto(默认) / re / ffmpeg
                                         # auto=优先 N_m3u8DL-RE，找不到或失败时退回 ffmpeg
@@ -173,6 +252,7 @@ zdm stop
 | DELETE | `/api/tasks/{id}?files=0` | 删除任务（`files=0` 保留文件） |
 | POST | `/api/config` | 修改配置 |
 | GET | `/api/events` | SSE 实时推送 |
+| GET | `/api/extension/firefox.xpi` | 把随包扩展现场打成 Firefox 的 `.xpi`（需令牌） |
 
 ## 默认配置
 

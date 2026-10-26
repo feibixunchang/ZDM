@@ -97,7 +97,9 @@ fi
 . "$VENV/bin/activate"
 python -m pip install --upgrade --quiet pip wheel
 echo "==> installing PyQt5 + PyInstaller"
-python -m pip install --quiet "PyQt5>=5.15,<5.16" "pyinstaller>=6.3"
+# paramiko 是 sftp:// 通道的唯一外部依赖（FTP/FTPS 用标准库）。发布包必须带：
+# 装好的 .deb 里没 pip，用户在下载页补不了 —— --selfcheck 会把这件事当硬条件。
+python -m pip install --quiet "PyQt5>=5.15,<5.16" "pyinstaller>=6.3" "paramiko>=3.4"
 python - <<'PYEOF'
 import PyInstaller
 from PyQt5.QtCore import PYQT_VERSION_STR, QT_VERSION_STR
@@ -147,6 +149,7 @@ if not r.get("frozen"): bad.append("not running frozen")
 if not r.get("web_index"): bad.append("web/index.html missing")
 if not r.get("extension_manifest"): bad.append("extension/manifest.json missing")
 if not r.get("extension_sniffer"): bad.append("extension/sniffer.js missing (media sniffer)")
+if not r.get("extension_ui18n"): bad.append("extension/ui18n.js missing (英文界面会整块失效)")
 if not r.get("theme_module"): bad.append("theme.py not importable")
 if not r.get("pyqt5"): bad.append("PyQt5 not importable")
 # 这两个是「装完在用户机器上才发现」的典型：YouTube 全靠随包 yt-dlp，
@@ -158,6 +161,11 @@ if not r.get("ffmpeg"): bad.append("bundled ffmpeg missing (DASH 音轨无法合
 if not r.get("deno"): bad.append("bundled deno/JS runtime missing (YouTube 解析会失败)")
 # 流媒体引擎没有也一样：包能启动，但 m3u8 全退化成 ffmpeg（无分片续传）。
 if not r.get("m3u8dl_re"): bad.append("bundled N_m3u8DL-RE missing (%s)" % r.get("m3u8dl_re_error"))
+# ftp:// 只用标准库，少了说明冻结时把 zdm/ftp.py 丢了；sftp:// 少 paramiko 的话，
+# 用户要到粘链接那一刻才知道这包不支持。
+if not r.get("ftp_channel"): bad.append("ftp channel not importable (%s)" % r.get("ftp_error"))
+if not r.get("sftp"): bad.append("paramiko not bundled (sftp:// unavailable)")
+if not r.get("firefox_ext"): bad.append("Firefox .xpi packaging broken (%s)" % r.get("firefox_ext_error"))
 if r.get("version") != want:
     bad.append(f"version mismatch: bundle {r.get('version')} != build {want}")
 if bad:
@@ -241,6 +249,24 @@ DESKTOP
 # The manifest path cannot carry arguments on Linux, so it points at a tiny
 # wrapper that adds "--native-host" - the bundled ZDM ELF speaks the protocol.
 EXT_ID="mpodbnemeeghjpllgphpemhoogddfhjg"   # id pinned by extension/manifest.json's key
+# Firefox 的扩展 ID 是清单里的字符串（browser_specific_settings.gecko.id），
+# 唯一真相在 zdm/zdm/firefox_ext.py 的 GECKO_ID。deb 里的清单是构建期写死的，
+# 所以这里当场比对一次：抄错了不会有任何报错，只会变成「Firefox 点下载没反应、
+# Chrome 一切正常」，那种 bug 只能等用户报障才发现。
+GECKO_ID="zdm-connector@feibixunchang.github.io"
+if [ -f "$SRC/zdm/firefox_ext.py" ] &&
+   ! grep -q "^GECKO_ID = \"$GECKO_ID\"" "$SRC/zdm/firefox_ext.py"; then
+    echo "ERROR: 本脚本里的 Firefox 扩展 ID 与 zdm/firefox_ext.py 的 GECKO_ID 不一致" >&2
+    exit 1
+fi
+# 本文件里写出的每一个 Firefox 扩展 ID 都要是上面这一个（含下面嵌进 portable
+# 包里的那份 install.sh —— 那段是引号 heredoc，构建期不展开，只能靠这里兜住）。
+# 匹配串由 GECKO_ID 拼出来，避免这条断言把自己也扫进去。
+BAD_GECKO="$(grep -o "${GECKO_ID%%@*}@[A-Za-z0-9._-]*" "$SRC/build_linux_app.sh" 2>/dev/null | grep -vx "$GECKO_ID" | sort -u)"
+if [ -n "$BAD_GECKO" ]; then
+    echo "ERROR: build_linux_app.sh 里有与 GECKO_ID 不一致的 Firefox 扩展 ID：$BAD_GECKO" >&2
+    exit 1
+fi
 cat >"$APPDIR/zdm-native-host" <<'WRAPPER'
 #!/bin/sh
 # Chrome/Chromium native-messaging host shim for the frozen bundle.
@@ -255,10 +281,23 @@ for hostdir in /etc/opt/chrome/native-messaging-hosts /etc/chromium/native-messa
   "description": "ZDM 下载管理器启动器",
   "path": "/opt/zdm/zdm-native-host",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://$EXT_ID/"]
+  "allowed_origins": ["chrome-extension://$EXT_ID/"],
+  "allowed_extensions": ["$GECKO_ID"]
 }
 MANIFEST
 done
+# Firefox 读的是自己的目录（system-wide 那个），清单同一份：Chrome 会忽略
+# allowed_extensions，Firefox 忽略 allowed_origins，两边各取所需。
+install -Dm644 /dev/null "$STAGE/usr/lib/mozilla/native-messaging-hosts/com.zdm.launcher.json"
+cat >"$STAGE/usr/lib/mozilla/native-messaging-hosts/com.zdm.launcher.json" <<MANIFEST
+{
+  "name": "com.zdm.launcher",
+  "description": "ZDM 下载管理器启动器",
+  "path": "/opt/zdm/zdm-native-host",
+  "type": "stdio",
+  "allowed_extensions": ["$GECKO_ID"]
+}
+MANIFEST
 
 # System-wide default handler for the zdm:// scheme (the extension's fallback
 # wake-up path) is registered by postinst *without* shipping
@@ -386,7 +425,8 @@ pkill -f '^/usr/bin/zdm( |$)' >/dev/null 2>&1 || true
 # Drop the browser integration we registered in postinst: a stale host
 # manifest makes Chrome launch a binary that no longer exists.
 rm -f /etc/opt/chrome/native-messaging-hosts/com.zdm.launcher.json \
-      /etc/chromium/native-messaging-hosts/com.zdm.launcher.json
+      /etc/chromium/native-messaging-hosts/com.zdm.launcher.json \
+      /usr/lib/mozilla/native-messaging-hosts/com.zdm.launcher.json
 exit 0
 PRERM
 chmod 0755 "$STAGE/DEBIAN/prerm"
@@ -469,10 +509,25 @@ for hostroot in "$CFG/google-chrome/NativeMessagingHosts" "$CFG/chromium/NativeM
   "description": "ZDM 下载管理器启动器",
   "path": "$DEST/zdm-native-host",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://mpodbnemeeghjpllgphpemhoogddfhjg/"]
+  "allowed_origins": ["chrome-extension://mpodbnemeeghjpllgphpemhoogddfhjg/"],
+  "allowed_extensions": ["zdm-connector@feibixunchang.github.io"]
 }
 MANIFEST
 done
+# Firefox：同一份清单，只是认 allowed_extensions、读自己的目录。父目录不存在
+# 就当没装 Firefox，不给干净机器造 ~/.mozilla。
+if [ -d "$HOME/.mozilla" ]; then
+    mkdir -p "$HOME/.mozilla/native-messaging-hosts"
+    cat >"$HOME/.mozilla/native-messaging-hosts/com.zdm.launcher.json" <<MANIFEST
+{
+  "name": "com.zdm.launcher",
+  "description": "ZDM 下载管理器启动器",
+  "path": "$DEST/zdm-native-host",
+  "type": "stdio",
+  "allowed_extensions": ["zdm-connector@feibixunchang.github.io"]
+}
+MANIFEST
+fi
 mkdir -p "$CFG"
 # Prefer xdg-mime (it writes a proper default); the manual merge below is the
 # fallback for systems without xdg-utils. Never append a second

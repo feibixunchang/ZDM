@@ -37,12 +37,20 @@
     <input type="checkbox" id="notify" style="width:auto">
     <label style="margin:0;color:#1f2937">显示通知</label>
   </div>
+  <label for="uiLang">界面语言</label>
+  <select id="uiLang" class="no-i18n" style="width:100%;padding:8px 10px;border:1px solid #e3e8ef;border-radius:8px;font:inherit;background:#fff">
+    <option value="auto">自动 Auto</option>
+    <option value="zh">中文</option>
+    <option value="en">English</option>
+  </select>
+  <div class="sub" id="uiLangNote" style="margin:6px 0 0">界面语言的默认值跟随浏览器；改这里只影响扩展的界面，不影响网页本身。</div>
   <div class="row">
     <button class="primary" id="save">保存</button>
     <button id="test">测试连接</button>
   </div>
   <div id="msg"></div>
 </div>
+<script src="ui18n.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

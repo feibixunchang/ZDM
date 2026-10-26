@@ -67,6 +67,17 @@ try:
 except Exception:
     pass
 
+# sftp:// 通道（zdm/sftp.py 里是延迟 import，Analysis 顺着字节码看不到它），
+# 所以显式点名。paramiko 背后的 nacl/bcrypt/cryptography 都带 C 扩展，交给
+# PyInstaller 自己的钩子收。没装 paramiko 的本地临时构建不因此失败 —— 发布
+# 构建脚本会检查 --selfcheck 里的 sftp 字段，缺了就挡住。
+try:
+    import paramiko  # noqa: F401
+
+    hiddenimports += collect_submodules("paramiko")
+except Exception as _e:  # pragma: no cover
+    print(f"WARNING: paramiko not available: {_e} - sftp:// will be refused at add-time")
+
 # 随包的 yt-dlp 二进制。**必须走 binaries 而不是 datas**：datas 有时会丢掉
 # 可执行位，装到用户机器上就变成「文件在、但执行不了」。落点在 _internal/bin/，
 # 正好被 ytdlp_bin.binary_path() 的 dirname(here)/bin 探到。

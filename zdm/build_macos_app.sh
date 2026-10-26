@@ -223,14 +223,18 @@ VENV="$RES/venv"
 # (-Werror on a default-initialised const simd type), which silently removed the
 # Dock-reopen hook from the DMG. 10.3.1 ships a universal2 wheel; fall back to
 # latest only if that wheel is unavailable for this interpreter.
-"$VENV/bin/python" -m pip install --quiet PyQt5 "pyobjc-framework-Cocoa==10.3.1" \
-    || "$VENV/bin/python" -m pip install --quiet PyQt5 pyobjc-framework-Cocoa
+"$VENV/bin/python" -m pip install --quiet PyQt5 "pyobjc-framework-Cocoa==10.3.1" paramiko \
+    || "$VENV/bin/python" -m pip install --quiet PyQt5 pyobjc-framework-Cocoa paramiko
 # pip can "succeed" while installing somewhere unexpected, and a venv without
 # PyQt5 only shows up much later as an app that refuses to start. Check now.
 "$VENV/bin/python" -c "import PyQt5, os; print('    PyQt5:', os.path.dirname(PyQt5.__file__))" \
     || { echo "ERROR: PyQt5 is not importable from the build venv"; exit 1; }
 "$VENV/bin/python" -c "import objc, AppKit; print('    PyObjC:', objc.__version__)" \
     || echo "WARNING: PyObjC missing - Dock-icon restore will fall back to polling"
+# sftp:// 通道只认 paramiko（ftp/ftps 用标准库）。DMG 里没有 pip，装完补不了，
+# 所以这一步缺了就是构建失败，而不是用户粘链接时才发现。
+"$VENV/bin/python" -c "import paramiko; print('    paramiko:', paramiko.__version__)" \
+    || { echo "ERROR: paramiko is not importable from the build venv (sftp:// unavailable)"; exit 1; }
 
 # Now that a Python exists, actually import every top-level module gui.py needs.
 # This is the check that catches a module being forgotten in the copy lists.

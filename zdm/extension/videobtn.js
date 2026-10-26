@@ -489,6 +489,9 @@
     const host = document.createElement("div");
     host.setAttribute(MARK, mark || "1");
     const root = host.attachShadow({ mode: "open" });
+    // 界面语言（ui18n.js）：按钮、清晰度菜单都挂在这棵 shadow 树里，
+    // 只观察它本身，不碰宿主页面的 DOM。
+    try { if (typeof ZDMUI !== "undefined") ZDMUI.watch(root); } catch (_) {}
     const style = document.createElement("style");
     style.textContent = CSS;
     root.appendChild(style);

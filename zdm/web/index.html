@@ -92,6 +92,7 @@
     padding:10px 16px;border-radius:8px;font-size:13px;opacity:0;transition:.2s;pointer-events:none;z-index:99}
   .toast.show{opacity:1}
   .hint{color:var(--muted);font-size:12px;padding:10px 14px;border-top:1px solid var(--border)}
+  .hint a{color:var(--accent)}
   code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:12px}
 </style>
 </head>
@@ -105,13 +106,18 @@
   </div>
   <span class="sub" id="svc" style="color:var(--muted);font-size:12px"></span>
   <div class="spacer"></div>
+  <select id="langSel" title="界面语言 / Interface language" style="width:auto;font-size:13px">
+    <option class="no-i18n" value="auto">自动 Auto</option>
+    <option class="no-i18n" value="zh">中文</option>
+    <option class="no-i18n" value="en">English</option>
+  </select>
   <button id="btnAdd">＋ 新建下载</button>
   <button id="btnSettings">⚙ 设置</button>
 </header>
 
 <main>
   <div class="card addbar">
-    <input class="url" id="url" placeholder="粘贴下载链接 http(s)://…  支持直接拖入链接">
+    <input class="url" id="url" placeholder="粘贴下载链接 http(s)/ftp(s)/sftp://…  支持直接拖入链接">
     <input id="fname" placeholder="文件名（可选）" style="width:150px">
     <input id="fconn" type="number" min="1" max="32" placeholder="连接数" style="width:80px" title="连接数，留空用默认">
     <input id="fprio" type="number" min="-99" max="99" placeholder="优先级" style="width:78px" title="数字越大越先下载，默认 0">
@@ -129,7 +135,7 @@
         <option value="VTT">字幕格式：VTT</option>
       </select>
       <input id="fliv" placeholder='直播录制上限 如 30:00' style="width:150px"
-        title='只对接到「还在播的」直播流（m3u8 里还没有 #EXT-X-ENDLIST）时生效：录到时长就收工，已录的部分封成成品。&#10;留空＝一直录到你点「停止录制」或直播自己结束。写 30:00 或 1:00:00 都行，上限 24 小时。&#10;很多直播站只保留最近几十秒分片，设得比站点窗口短并不会只下这么长；点播不受这项影响。'>
+        title='只对接到「还在播的」直播流（m3u8 里还没有 #EXT-X-ENDLIST）时生效：录到时长就收工，已录的部分封成成品。留空＝一直录到你点「停止录制」或直播自己结束。写 30:00 或 1:00:00 都行，上限 24 小时。很多直播站只保留最近几十秒分片，设得比站点窗口短并不会只下这么长；点播不受这项影响。'>
     </div>
   </div>
 
@@ -160,10 +166,7 @@
       </table>
       <div class="empty" id="empty" hidden>还没有下载任务 —— 粘贴链接到上方，或安装浏览器扩展一键接管下载</div>
     </div>
-    <div class="hint">
-      浏览器扩展：打开 <code>chrome://extensions</code> → 开发者模式 → 加载已解压的扩展 → 选择本项目 <code>extension/</code> 目录。
-      开启「接管浏览器下载」后，Chrome 的下载会自动交给 ZDM 多线程下载。
-    </div>
+    <div class="hint"><span>浏览器扩展（Chrome / Edge）：打开</span> <code>chrome://extensions</code> <span>→ 开发者模式 → 加载已解压的扩展 → 选择本项目</span> <code>extension/</code> <span>目录。开启「接管浏览器下载」后，Chrome 的下载会自动交给 ZDM 多线程下载。</span><br> <span>Firefox 没有「加载已解压的扩展」这一步，要装打包好的文件：</span> <a href="/api/extension/firefox.xpi" download>下载 Firefox 版扩展（.xpi）</a>，<span>然后在</span> <code>about:debugging#/runtime/this-firefox</code> <span>点「加载临时附加组件…」选它。</span></div>
   </div>
 </main>
 
@@ -185,6 +188,21 @@
         <option value="re">只用 N_m3u8DL-RE（找不到可执行文件就报错）</option>
         <option value="ffmpeg">只用 ffmpeg</option>
       </select>
+    </div>
+    <div class="field full"><label><input type="checkbox" id="cfgRpc"> 兼容 aria2 JSON-RPC（AriaNg 等客户端可直接驱动 ZDM）</label></div>
+    <div class="field full"><label>RPC 地址（aria2 客户端里填这个）</label>
+      <div style="display:flex;gap:6px">
+        <input id="cfgRpcAddr" readonly style="flex:1">
+        <button id="btnRpcCopyAddr" type="button">复制</button>
+      </div>
+      <small id="rpcAddrNote" style="color:#b45309;display:none"></small>
+    </div>
+    <div class="field full"><label>RPC 令牌（= 本机接口口令，别贴到网上）</label>
+      <div style="display:flex;gap:6px">
+        <input id="cfgRpcToken" type="password" readonly style="flex:1">
+        <button id="btnRpcShow" type="button">显示</button>
+        <button id="btnRpcCopy" type="button">复制</button>
+      </div>
     </div>
   </div>
   <div class="dlg-f">
@@ -248,6 +266,365 @@
 
 <script>
 const $ = s => document.querySelector(s);
+
+/* ---------------------------------------------------------------- 界面语言
+   为什么在 DOM 这一层翻译，而不是把每处文案换成 t('key')：这一页有 130 多条
+   文案散在 HTML 属性、模板字符串和服务端回的消息里，逐点改造只要漏一处就是
+   「半中半英」；而这些字符串最终都落在同一个地方 —— DOM。在这一层做一次替换，
+   动态列表、toast、确认框连服务端文案都能一起覆盖，页面逻辑一行没动。
+   查不到的词条原样保留中文：宁可看到中文，也不要看到一句编出来的错译。
+*/
+const LANG_PREF_KEY = 'zdm_ui_lang';
+let langPref = 'auto';
+try { langPref = localStorage.getItem(LANG_PREF_KEY) || 'auto'; } catch (_) {}
+const uiLang = () => langPref !== 'auto' ? langPref
+  : ((navigator.language || 'zh').toLowerCase().startsWith('zh') ? 'zh' : 'en');
+
+// 精确匹配：整段文本（去掉首尾空白）就是这一句
+const T_EXACT = {
+  'ZDM · 下载管理器': 'ZDM · Download Manager',
+  '＋ 新建下载': '+ New download',
+  '⚙ 设置': '⚙ Settings',
+  '界面语言 / Interface language': 'Interface language',
+  '粘贴下载链接 http(s)/ftp(s)/sftp://…  支持直接拖入链接': 'Paste a download link — http(s)/ftp(s)/sftp://… dragging one in works too',
+  '文件名（可选）': 'Filename (optional)',
+  '连接数': 'Connections',
+  '连接数，留空用默认': 'Connections per file; leave blank for the default',
+  '优先级': 'Priority',
+  '数字越大越先下载，默认 0': 'Higher numbers download first; default 0',
+  '定时开始，留空立即开始': 'Scheduled start; leave blank to begin now',
+  '下载': 'Download',
+  '批量…': 'Batch…',
+  '一次粘贴多行链接': 'Paste several links at once, one per line',
+  'HLS/DASH 轨道（留空＝自动挑最佳；只在内置流媒体引擎下生效）': 'HLS/DASH tracks (blank = pick the best automatically; built-in streaming engine only)',
+  '视频轨 如 res="1280"': 'Video track, e.g. res="1280"',
+  '引擎的轨道选择语法：子键=值，多个用冒号分隔。常用子键：id / lang / name / codecs / res / for；也可整体写 all / best / best2 / worst1。命中 0 条轨道时任务会失败。': 'Engine track-selector syntax: key=value, several entries separated by colons. Common keys: id / lang / name / codecs / res / for. You can also write all / best / best2 / worst1. The task fails when nothing matches.',
+  '音频轨 如 lang="spa"': 'Audio track, e.g. lang="spa"',
+  '同上，例：lang="eng" 或 best': 'Same syntax, e.g. lang="eng" or best',
+  '字幕轨 如 lang="eng"': 'Subtitle track, e.g. lang="eng"',
+  '同上，例：lang="eng" 或 all': 'Same syntax, e.g. lang="eng" or all',
+  '字幕格式：引擎默认': 'Subtitles: engine default',
+  '字幕格式：SRT': 'Subtitles: SRT',
+  '字幕格式：VTT': 'Subtitles: VTT',
+  '字幕落成的格式': 'Format the subtitles are written as',
+  '直播录制上限 如 30:00': 'Live recording cap, e.g. 30:00',
+  '只对接到「还在播的」直播流（m3u8 里还没有 #EXT-X-ENDLIST）时生效：录到时长就收工，已录的部分封成成品。留空＝一直录到你点「停止录制」或直播自己结束。写 30:00 或 1:00:00 都行，上限 24 小时。很多直播站只保留最近几十秒分片，设得比站点窗口短并不会只下这么长；点播不受这项影响。': 'Applies only to a stream that is still live (no #EXT-X-ENDLIST in the m3u8 yet): it records this much time and then seals what it has. Blank = keep recording until you press "Stop recording" or the stream ends. 30:00 and 1:00:00 both work, up to 24 hours. Most live sites only keep the last few segments, so a short value does not limit the download to that length; on-demand links ignore it.',
+  '全部': 'All', '进行中': 'Active', '已暂停': 'Paused', '已完成': 'Completed', '嗅探': 'Sniffer',
+  '全部暂停': 'Pause all', '全部继续': 'Resume all', '清除已完成': 'Clear finished',
+  '文件': 'File', '大小': 'Size', '进度': 'Progress', '速度': 'Speed', '操作': 'Actions',
+  '还没有下载任务 —— 粘贴链接到上方，或安装浏览器扩展一键接管下载': 'No downloads yet — paste a link above, or install the browser extension to hand downloads to ZDM',
+  '浏览器扩展（Chrome / Edge）：打开': 'Browser extension (Chrome / Edge): open',
+  '→ 开发者模式 → 加载已解压的扩展 → 选择本项目': '→ Developer mode → Load unpacked → choose this project’s',
+  '目录。开启「接管浏览器下载」后，Chrome 的下载会自动交给 ZDM 多线程下载。': 'folder. Once “Take over browser downloads” is on, Chrome’s downloads go to ZDM and download multi-threaded.',
+  'Firefox 没有「加载已解压的扩展」这一步，要装打包好的文件：': 'Firefox has no “Load unpacked” step — it installs a packaged file:',
+  '下载 Firefox 版扩展（.xpi）': 'Download the Firefox extension (.xpi)',
+  '，': ',',
+  '然后在': 'then, in',
+  '点「加载临时附加组件…」选它。': 'choose “Load Temporary Add-on…” and pick it.',
+  '设置': 'Settings',
+  '下载目录': 'Download folder',
+  '单任务连接数': 'Connections per task',
+  '同时下载任务数': 'Concurrent tasks',
+  '限速 (KB/s，0=不限)': 'Speed limit (KB/s, 0 = unlimited)',
+  '失败重试次数': 'Retries after failure',
+  '代理 (http://host:port)': 'Proxy (http://host:port)',
+  '留空则不使用代理': 'Leave blank to skip the proxy',
+  '服务端口': 'Service port',
+  '重启后自动继续未完成任务': 'Resume unfinished tasks automatically after a restart',
+  'GitHub / Hugging Face 链接走镜像加速（失败自动退回直连）': 'Speed up GitHub / Hugging Face links through mirrors (falls back to the direct link on failure)',
+  '流媒体（m3u8 / mpd）引擎': 'Streaming (m3u8 / mpd) engine',
+  '自动：优先 N_m3u8DL-RE，找不到时用 ffmpeg': 'Auto: prefer N_m3u8DL-RE, use ffmpeg when it is missing',
+  '只用 N_m3u8DL-RE（找不到可执行文件就报错）': 'N_m3u8DL-RE only (report an error if the executable is missing)',
+  '只用 ffmpeg': 'ffmpeg only',
+  '兼容 aria2 JSON-RPC（AriaNg 等客户端可直接驱动 ZDM）': 'aria2 JSON-RPC compatibility (clients such as AriaNg can drive ZDM directly)',
+  'RPC 地址（aria2 客户端里填这个）': 'RPC address (paste this into the aria2 client)',
+  '复制': 'Copy',
+  'RPC 令牌（= 本机接口口令，别贴到网上）': 'RPC token (= the local API password — do not publish it)',
+  '显示': 'Show', '隐藏': 'Hide',
+  '打开下载目录': 'Open download folder',
+  '保存': 'Save',
+  '批量导入': 'Batch import',
+  '每行一个链接（空行和 # 开头的注释会跳过）': 'One link per line (blank lines and # comments are skipped)',
+  '优先级（数字越大越先下载，留空按 0）': 'Priority (higher numbers download first; blank = 0)',
+  '定时开始（留空 = 立即开始，作用于本批全部链接）': 'Scheduled start (blank = start now; applies to every link in this batch)',
+  '取消': 'Cancel', '加入队列': 'Add to queue',
+  '修改任务': 'Edit task',
+  '下载地址': 'Download URL',
+  '留空则不发送': 'Leave blank to omit',
+  '默认': 'Default',
+  '代理': 'Proxy',
+  '留空则使用全局设置': 'Leave blank to use the global setting',
+  '定时开始': 'Scheduled start',
+  '选段（视频页任务，如 00:01:00-00:05:00；留空下整段）': 'Clip (for video-page tasks, e.g. 00:01:00-00:05:00; blank = the whole video)',
+  'HLS/DASH 轨道选择（留空＝自动挑最佳；只在内置流媒体引擎下生效）': 'HLS/DASH track selection (blank = pick the best automatically; built-in streaming engine only)',
+  '只对接到「还在播的」直播流时生效：录到时长就收工，已录的部分封成成品；留空＝录到手动停止。写 30:00 或 1:00:00 都行，上限 24 小时。正在录制中的项目改不了这条，要先停止录制。': 'Applies only to a stream that is still live: it records this much time and seals what it has; blank = record until you stop it. 30:00 and 1:00:00 both work, up to 24 hours. A recording that is already running cannot change this — stop the recording first.',
+  // 任务行
+  '未命名': 'Untitled', '未知': 'Unknown',
+  '排队中': 'Queued', '下载中': 'Downloading', '失败': 'Failed', '已取消': 'Canceled', '合并中': 'Merging',
+  '浏览器': 'Browser', '网页版': 'Web UI', '协议': 'From link',
+  '视频': 'Video', '音频': 'Audio',
+  '等直播开始…': 'Waiting for the stream…', '直播中': 'Recording live',
+  '停止录制（已录的部分会保存下来）': 'Stop recording (what is already recorded is kept)',
+  '暂停': 'Pause', '继续': 'Resume',
+  '修改链接/请求头/代理/定时': 'Edit URL / headers / proxy / schedule',
+  '重新下载': 'Download again', '打开文件': 'Open file', '在文件夹中显示': 'Show in folder',
+  '删除任务（保留文件）': 'Delete task (keep the files)',
+  '换引擎的理由': 'Why the engine was switched',
+  // 提示条
+  '下载地址不能为空': 'The download URL cannot be empty',
+  '已更新，已下载进度保留（开始时自动核对文件）': 'Updated — the downloaded progress is kept (the file is checked again when it starts)',
+  '已更新': 'Updated',
+  '请先填入链接': 'Type a link first',
+  '已加入队列，到点开始': 'Queued — it starts at the scheduled time',
+  '已加入队列': 'Added to the queue',
+  '添加失败': 'Could not add the task',
+  '没找到可下载的链接（http/https/ftp/ftps/sftp）': 'No downloadable links found (http/https/ftp/ftps/sftp)',
+  '未知错误': 'Unknown error',
+  '删除失败': 'Could not delete', '操作失败': 'Action failed', '保存失败': 'Could not save',
+  '没有正在下载的任务': 'Nothing was downloading',
+  '没有等待开始的任务': 'No task is waiting to start',
+  '没有已完成的任务': 'No completed tasks',
+  '下载目录不能为空': 'The download folder cannot be empty',
+  '已保存（端口需重启服务生效）': 'Saved (a port change needs the service to restart)',
+  '请先填写目录': 'Fill in a folder first',
+  '打开目录失败': 'Could not open the folder',
+  '没有可复制的内容': 'Nothing to copy',
+  'RPC 地址已复制': 'RPC address copied', 'RPC 令牌已复制': 'RPC token copied',
+  '服务未连接': 'Service not connected',
+  '连接中断，重试中…': 'Connection lost — retrying…',
+};
+
+// 模板/拼接出来的句子：先整段精确匹配，不中就按这些规则逐段替换。
+// 规则里带上「·」这类分隔符，拼出来的句子才不会缺标点。
+const T_RULES = [
+  [/· 共 (\d+) 项/g, '· $1 items in total'],
+  [/总速度/g, 'Total speed'],
+  [/本地服务已连接 · (\S+) · 端口 (\d+)/g, 'Local service connected · $1 · port $2'],
+  [/(· ?)剩余 /g, '$1left '],
+  [/(· ?)剩 /g, '$1left '],
+  [/· ?已录 /g, '· recorded '],
+  [/· 优先级 (-?\d+)/g, '· priority $1'],
+  [/(· ?)(\d{1,2}:\d{2}) 开始/g, '$1starts at $2'],
+  [/(· ?)([^·\s][^·]*?) 开始(?=\s*·|$)/g, '$1starts at $2'],
+  [/轨道 (?=视频=|音频=|字幕=)/g, 'Tracks '],
+  [/字幕格式=/g, 'subs='],
+  [/视频=/g, 'video='],
+  [/音频=/g, 'audio='],
+  [/字幕=/g, 'subs='],
+  [/连不上本地服务：/g, 'Cannot reach the local service: '],
+  [/服务返回 HTTP (\d+)，但响应不是 JSON/g, 'The service answered HTTP $1, but the body is not JSON'],
+  [/服务返回 HTTP (\d+)/g, 'The service answered HTTP $1'],
+  [/已暂停 (\d+) 个任务/g, 'Paused $1 task(s)'],
+  [/已开始 (\d+) 个任务/g, 'Started $1 task(s)'],
+  [/已清除 (\d+) 条记录/g, 'Cleared $1 record(s)'],
+  [/已加入 (\d+) 个任务/g, 'Added $1 task(s)'],
+  [/，(\d+) 个失败：/g, ', $1 failed: '],
+  [/删除([^\n]*?)？/g, 'Delete $1?'],
+  [/只删除任务记录，已下载的文件会保留。/g, 'Only the task record is deleted; files already downloaded stay on disk.'],
+  [/「/g, '“'], [/」/g, '”'],
+  [/这个任务/g, 'this task'],
+  [/取不到令牌：/g, 'Could not read the token: '],
+  [/未知原因/g, 'unknown reason'],
+  [/未知错误/g, 'unknown error'],
+  [/未知/g, 'Unknown'],
+  [/不支持字幕内封，改用 /g, ' cannot mux subtitles inline, switched to '],
+  [/不支持(.+?)，改用 /g, ' cannot $1, switched to '],
+  [/state\.json 里有一项设置超出范围，已按默认值运行/g, 'A setting in state.json was out of range, so the default is in use'],
+  [/设置没写进磁盘/g, 'the settings could not be written to disk'],
+  [/设置已生效，但没能写入磁盘：/g, 'The settings took effect, but could not be written to disk: '],
+  [/任务已开始，但记录没能写入磁盘：/g, 'The task started, but its record could not be written to disk: '],
+  [/；原件已备份到 /g, '; the original was backed up to '],
+  [/；备份失败，原件仍在原路径/g, '; the backup failed, the original is still in place'],
+  [/顶层不是对象/g, 'the top level is not an object'],
+  [/没能自动复制，已选中，请按复制快捷键/g, ' could not be copied automatically — it is selected, press the copy shortcut'],
+  [/已复制/g, ' copied'],
+  [/RPC 地址/g, 'RPC address'], [/RPC 令牌/g, 'RPC token'],
+  [/服务当前实际在 (\d+) 上，重启后才会用 (\d+)；现在要复制的是 /g, 'The service is still listening on $1; $2 takes effect after a restart. Copy this now: '],
+  [/ 要填数字/g, ' must be a number'],
+  [/单任务连接数/g, 'Connections per task'],
+  [/同时下载任务数/g, 'Concurrent tasks'],
+  [/失败重试次数/g, 'Retries after failure'],
+  [/服务端口/g, 'Service port'],
+  [/限速/g, 'Speed limit'],
+  // 下面这些是服务端回的消息：认得出的翻成英文，认不出的原样显示中文
+  [/任务不存在/g, 'Task not found'],
+  [/任务状态已变化，请稍后再试/g, 'The task changed underneath us — try again'],
+  [/当前状态/g, 'The current state'],
+  [/（(\S+?)）不能暂停/g, ' ($1) cannot be paused'],
+  [/（(\S+?)）不能继续下载/g, ' ($1) cannot be resumed'],
+  [/（收到 ([^（）]*?)）/g, ' (got $1)'],
+  [/需要整数/g, 'must be an integer'],
+  [/需要数字/g, 'must be a number'],
+  [/需要 true\/false/g, 'must be true/false'],
+  [/需要字节数或 10K\/1M 这样的大小/g, 'must be a byte count or a size such as 10K/1M'],
+  [/需要秒数或 HH:MM:SS/g, 'must be seconds or HH:MM:SS'],
+  [/不能是负数/g, 'cannot be negative'],
+  [/至少 1/g, 'must be at least 1'],
+  [/最长 24 小时/g, 'is capped at 24 hours'],
+  [/只能是/g, 'must be one of'],
+  [/下载目录无法创建：/g, 'The download folder could not be created: '],
+  [/只拿到流清单，没有可直接下载的直链（可能需要登录或该地区不可用）/g, 'Only the stream manifest was found, with no direct link to download (it may need a login, or it is unavailable in your region)'],
+  [/合流超时（600 秒）/g, 'Merging timed out (600 s)'],
+  [/不是 ftp\/ftps 链接/g, 'Not an ftp/ftps link'],
+  [/不是 sftp:\/\/ 链接/g, 'Not an sftp:// link'],
+  [/FTP 上取不到该文件：/g, 'FTP does not have that file: '],
+  [/FTP 传输提前结束，还差约 (\d+) 字节/g, 'The FTP transfer ended early, about $1 bytes short'],
+  [/FTP 链接无法解析：/g, 'Could not parse the FTP link: '],
+  [/FTP 断点请求失败：/g, 'The FTP resume request failed: '],
+  [/FTP 传输请求失败：/g, 'The FTP transfer request failed: '],
+  [/FTP 链接为空/g, 'The FTP link is empty'],
+  [/FTP 链接里缺少主机名/g, 'The FTP link has no hostname'],
+  [/FTP 服务器不肯从 (\d+) 字节开始（REST 回了 (\S+?)）/g, 'The FTP server refused to start at $1 bytes (REST answered $2)'],
+  [/SFTP 上这个地址是目录，不是文件/g, 'That SFTP address is a folder, not a file'],
+  [/SFTP 传输提前结束，还差约 (\d+) 字节/g, 'The SFTP transfer ended early, about $1 bytes short'],
+  [/SFTP 连接失败/g, 'SFTP connection failed'],
+  [/SFTP 通道打开失败：/g, 'Could not open the SFTP channel: '],
+  [/SFTP 链接无法解析：/g, 'Could not parse the SFTP link: '],
+  [/SFTP 链接里缺少主机名/g, 'The SFTP link has no hostname'],
+  [/SFTP 链接的路径里含非法控制字符/g, 'The SFTP path contains illegal control characters'],
+  [/SFTP 链接的.*?里含非法控制字符/g, 'The SFTP link contains illegal control characters'],
+  [/ZDM 不做(.+?)下载/g, 'ZDM does not download $1'],
+  [/种子/g, 'torrents'],
+  [/只支持 /g, 'only supports '],
+  [/需要在 (.+?) 之间/g, 'must stay within $1'],
+  [/，收到 /g, ', got '],
+  [/([\d.,]+) 秒/g, '$1 s'],
+  [/下载中/g, 'Downloading'], [/排队中/g, 'Queued'], [/合并中/g, 'Merging'],
+  [/已暂停/g, 'Paused'], [/已完成/g, 'Completed'], [/进行中/g, 'Active'],
+  [/优先级/g, 'Priority'],
+];
+
+// 只在「这句确实被翻动了」之后才做的一步：把残留的中文标点换成半角。
+// 完全没认出的整句中文不进入这里 —— 那种情况原样显示中文，比半中半英好读。
+const T_PUNCT = [
+  [/（([^（）]*)）/g, ' ($1)'],
+  [/：(?=[A-Za-z0-9/])/g, ': '],
+  [/。(?=\s|$)/g, '.'],
+  [/，/g, ', '],
+  [/；/g, '; '],
+  [/、/g, ', '],
+];
+
+function trStr(raw) {
+  const edge = /^(\s*)([\s\S]*?)(\s*)$/.exec(raw);
+  const core = edge[2];
+  if (!core) return raw;
+  if (Object.prototype.hasOwnProperty.call(T_EXACT, core)) return edge[1] + T_EXACT[core] + edge[3];
+  let out = core, hit = false;
+  for (const [re, to] of T_RULES) {
+    const next = out.replace(re, to);
+    if (next !== out) { out = next; hit = true; }
+  }
+  if (hit) for (const [re, to] of T_PUNCT) out = out.replace(re, to);
+  return out === core ? raw : edge[1] + out + edge[3];
+}
+// confirm()/alert() 是系统对话框，DOM 观察器看不到，只能在调用前替换。
+const trMsg = s => uiLang() === 'en' ? trStr(s) : s;
+
+const TXT_SRC = new WeakMap(), TXT_OUT = new WeakMap();
+const ATTR_SRC = new WeakMap();
+const I18N_ATTRS = ['placeholder', 'title', 'aria-label', 'alt'];
+
+function skip(el) {
+  for (let n = el; n; n = n.parentElement || (n.host ? n.host : null)) {
+    if (n.nodeType === 1) {
+      const tag = n.tagName;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return true;
+      if (n.classList && n.classList.contains('no-i18n')) return true;
+    }
+  }
+  return false;
+}
+
+function applyText(node, rescan) {
+  const cur = node.nodeValue;
+  // 记住「界面代码写进去的那份原文」：只有当前值等于我们上次写回的英文时，
+  // 才说明这次变化不是界面自己改的，可以直接拿原文重新算；否则说明页面刚刚
+  // 写入了新文案，得把它当成新的原文。
+  let src = (rescan ? TXT_SRC.has(node) : TXT_OUT.has(node) && cur === TXT_OUT.get(node))
+    ? TXT_SRC.get(node) : cur;
+  const out = uiLang() === 'en' ? trStr(src) : src;
+  TXT_SRC.set(node, src);
+  TXT_OUT.set(node, out);
+  if (cur !== out) node.nodeValue = out;
+}
+
+function applyAttr(el, name, rescan) {
+  const raw = el.getAttribute(name);
+  if (raw === null) return;
+  let map = ATTR_SRC.get(el);
+  if (!map) { map = {}; ATTR_SRC.set(el, map); }
+  const rec = map[name];
+  const src = (rescan ? rec && rec.src !== undefined : rec && raw === rec.shown) ? rec.src : raw;
+  const out = uiLang() === 'en' ? trStr(src) : src;
+  map[name] = { src, shown: out };
+  if (raw !== out) el.setAttribute(name, out);
+}
+
+function walk(root) {
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  const els = [];
+  let n = tw.currentNode;
+  while (n) {
+    if (n.nodeType === 3) { if (!skip(n.parentElement)) applyText(n, true); }
+    else if (n.nodeType === 1) { if (!skip(n)) els.push(n); }
+    n = tw.nextNode();
+  }
+  for (const el of els) {
+    if (el.classList && el.classList.contains('no-i18n')) continue;
+    for (const a of I18N_ATTRS) applyAttr(el, a, true);
+  }
+}
+
+const TITLE_ZH = 'ZDM · 下载管理器';
+function applyTitle() {
+  document.title = uiLang() === 'en' ? (T_EXACT[TITLE_ZH] || TITLE_ZH) : TITLE_ZH;
+}
+function setPref(v) {
+  langPref = v;
+  try { localStorage.setItem(LANG_PREF_KEY, v); } catch (_) {}
+  document.documentElement.lang = uiLang() === 'en' ? 'en' : 'zh-CN';
+  applyTitle();
+  walk(document.body);
+}
+
+// ?lang=en 让链接本身就能指定界面语言（截图、排障、给别人演示时用），
+// 不改 localStorage 里的偏好，下次打开还是用户自己选的。
+try {
+  const q = new URLSearchParams(location.search).get('lang');
+  if (q === 'auto' || q === 'zh' || q === 'en') langPref = q;
+} catch (_) {}
+
+walk(document.body);
+applyTitle();
+document.documentElement.lang = uiLang() === 'en' ? 'en' : 'zh-CN';
+const _confirm = window.confirm.bind(window);
+window.confirm = msg => _confirm(trMsg(String(msg)));
+const _alert = window.alert.bind(window);
+window.alert = msg => _alert(trMsg(String(msg)));
+
+new MutationObserver(records => {
+  for (const r of records) {
+    if (r.type === 'characterData') { if (!skip(r.target.parentElement)) applyText(r.target, false); }
+    else if (r.type === 'attributes') { if (r.target.nodeType === 1 && !skip(r.target)) applyAttr(r.target, r.attributeName, false); }
+    else for (const added of r.addedNodes) {
+      if (added.nodeType === 1) { if (!skip(added)) walk(added); }
+      else if (added.nodeType === 3) { if (!skip(added.parentElement)) applyText(added, false); }
+    }
+  }
+}).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true,
+  attributeFilter: I18N_ATTRS });
+
+(function initLangSel() {
+  const sel = $('#langSel');
+  if (!sel) return;
+  sel.value = ['auto', 'zh', 'en'].includes(langPref) ? langPref : 'auto';
+  sel.onchange = () => setPref(sel.value);
+})();
+
+// 能下的链接前缀要和后端 zdm.transport.SUPPORTED_SCHEMES 保持一致：这里认得少，
+// 用户粘 ftp 链接就会「没找到链接」；认得多则要到提交后才被拒。
+const URL_OK = /^(https?|ftps?|sftp):\/\//i;
 let tasks = [], config = {}, filter = 'all', SVC_VERSION = '';
 fetch('/api/').then(r => r.json()).then(d => { SVC_VERSION = d.version || ''; }).catch(() => {});
 
@@ -591,8 +968,8 @@ $('#btnBatchGo').onclick = async () => {
   const lines = $('#batchUrls').value.split(/\r?\n/)
     .map(x => x.trim())
     .filter(x => x && !x.startsWith('#'))
-    .filter(x => /^https?:\/\//i.test(x));
-  if (!lines.length) return toast('没有找到 http(s) 链接');
+    .filter(x => URL_OK.test(x));
+  if (!lines.length) return toast('没找到可下载的链接（http/https/ftp/ftps/sftp）');
   const prio = $('#batchPrio').value;
   const startAt = fromLocalInput($('#batchStart').value);
   let ok = 0, fail = 0, firstErr = '';
@@ -613,7 +990,7 @@ document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', e => {
   e.preventDefault();
   const t = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
-  if (t && /^https?:\/\//i.test(t.trim())){ $('#url').value = t.trim(); addDownload(); }
+  if (t && URL_OK.test(t.trim())){ $('#url').value = t.trim(); addDownload(); }
 });
 
 document.querySelectorAll('.tab').forEach(el => el.onclick = () => {
@@ -647,7 +1024,58 @@ $('#btnSettings').onclick = () => {
   // 服务端 heal_config 认不出的值会退回 auto，这里也用同一个集合，
   // 免得选择框停在 undefined 上、保存时把 undefined 发回去。
   $('#cfgStream').value = ['auto','re','ffmpeg'].includes(config.stream_engine) ? config.stream_engine : 'auto';
+  // 只有服务端明确说没开才显示成没开：config 里缺这个键（老 state.json）时
+  // 服务端按默认值「开」在跑，勾却空着，就是骗人。
+  $('#cfgRpc').checked = config.rpc_enabled !== false;
+  syncRpcAddr();
+  loadRpcToken();
   $('#dlgSettings').showModal();
+};
+function syncRpcAddr(){
+  // 端口框改了，地址要跟着变：留着 9000 复制过去，客户端连的是一个没开的端口。
+  const port = Number(($('#cfgPort').value || '').trim()) || config.port || 9000;
+  $('#cfgRpcAddr').value = `${location.protocol}//${location.hostname}:${port}/jsonrpc`;
+  // 但改完端口没重启前，服务其实还挂在旧端口上 —— 直接把新端口写进地址会骗人，
+  // 复制到 AriaNg 连不上只会怀疑令牌。这里点破当前真正在听的端口。
+  const live = Number(location.port) || (location.protocol === 'https:' ? 443 : 80);
+  const note = $('#rpcAddrNote');
+  if (port !== live){
+    note.textContent = `服务当前实际在 ${live} 上，重启后才会用 ${port}；现在要复制的是 ${location.protocol}//${location.hostname}:${live}/jsonrpc`;
+    note.style.display = '';
+  } else {
+    note.style.display = 'none';
+  }
+}
+$('#cfgPort').oninput = syncRpcAddr;
+async function loadRpcToken(){
+  const r = await api('GET','token');
+  if (r && r.ok){
+    $('#cfgRpcToken').value = r.token || '';
+    $('#cfgRpcToken').placeholder = '';
+  } else {
+    // 取不到令牌就留空并说明原因，不能拿一个空串假装「这枚令牌是空的」。
+    $('#cfgRpcToken').value = '';
+    $('#cfgRpcToken').placeholder = '取不到令牌：' + ((r && r.error) || '未知原因');
+  }
+}
+async function copyText(text, label){
+  if (!text) return toast('没有可复制的内容');
+  try { await navigator.clipboard.writeText(text); toast(label + '已复制'); return; } catch (e) {}
+  // 剪贴板 API 被拒（非安全上下文/没聚焦）时退回选中：手动 Cmd/Ctrl+C 仍然可用。
+  const tmp = document.createElement('input');
+  tmp.value = text; document.body.appendChild(tmp); tmp.select();
+  let done = false;
+  try { done = document.execCommand('copy'); } catch (e) {}
+  tmp.remove();
+  toast(done ? label + '已复制' : label + '没能自动复制，已选中，请按复制快捷键');
+}
+$('#btnRpcCopyAddr').onclick = () => copyText($('#cfgRpcAddr').value, 'RPC 地址');
+$('#btnRpcCopy').onclick = () => copyText($('#cfgRpcToken').value, 'RPC 令牌');
+$('#btnRpcShow').onclick = () => {
+  const el = $('#cfgRpcToken');
+  const masked = el.type === 'password';
+  el.type = masked ? 'text' : 'password';
+  $('#btnRpcShow').textContent = masked ? '隐藏' : '显示';
 };
 $('#btnSaveCfg').onclick = async () => {
   // 输入框留空时 Number('') === 0：连接数会变成 0（下载退化成单线程）、
@@ -675,6 +1103,7 @@ $('#btnSaveCfg').onclick = async () => {
     auto_resume: $('#cfgAuto').checked,
     mirror_accel: $('#cfgMirror').checked,
     stream_engine: $('#cfgStream').value,
+    rpc_enabled: $('#cfgRpc').checked,
   });
   if (r.ok){ toast(r.warning || '已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }
   else toast(r.error || '保存失败');

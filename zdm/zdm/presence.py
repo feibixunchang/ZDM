@@ -18,6 +18,10 @@ from typing import Optional
 
 _lock = threading.Lock()
 _last_seen = 0.0
+# 心跳里带过来的扩展版本号（chrome.runtime.getManifest().version）。
+# 桌面端状态栏要说「扩展是几点几」，那只能是扩展自己报的那个数 ——
+# 随包 manifest 的版本只说明磁盘上放着哪一份，装进浏览器的可能是旧的。
+_ext_version = ""
 
 # 多久之内算「刚活跃」。扩展的 service worker 空闲 30 秒就被回收，
 # 但 chrome.alarms 每 30 分钟会唤醒它一次补一拍心跳——所以只要浏览器
@@ -26,11 +30,24 @@ _last_seen = 0.0
 RECENT_WINDOW = 3600.0
 
 
-def note_seen(ts: Optional[float] = None) -> None:
-    """扩展打来一次电话。任意线程可调，开销约等于一次时间读取。"""
-    global _last_seen
+def note_seen(ts: Optional[float] = None, version: str = "") -> None:
+    """扩展打来一次电话。任意线程可调，开销约等于一次时间读取。
+
+    ``version`` 只在非空时覆盖：老版扩展不带版本号，不能因为它没带就把
+    上一次记下的真版本抹掉（那会让状态栏突然只显示桌面端版本）。
+    """
+    global _last_seen, _ext_version
     with _lock:
         _last_seen = time.time() if ts is None else ts
+        text = str(version or "").strip()
+        if text:
+            _ext_version = text
+
+
+def ext_version() -> str:
+    """最近一次心跳里扩展自报的版本号；没收到过就是空串。"""
+    with _lock:
+        return _ext_version
 
 
 def last_seen() -> float:
@@ -47,6 +64,7 @@ def recent(max_age: float = RECENT_WINDOW) -> bool:
 
 def reset() -> None:
     """仅测试用：清空记录。"""
-    global _last_seen
+    global _last_seen, _ext_version
     with _lock:
         _last_seen = 0.0
+        _ext_version = ""

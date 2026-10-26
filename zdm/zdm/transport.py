@@ -20,6 +20,25 @@ from .runtime import silent_proc_kwargs
 
 CURL = shutil.which("curl")
 
+# ZDM 认得的链接前缀。三端（桌面/网页/扩展）与 aria2 兼容层都以此为唯一口径，
+# 免得某一层放行了 ftp、另一层还在报「只支持 http/https」—— 用户看到的就是
+# 「粘贴进去说链接不对，但另一个入口却能下」。
+SUPPORTED_SCHEMES = ("http://", "https://", "ftp://", "ftps://", "sftp://")
+URL_SCHEME_HINT = "只支持 http(s)://、ftp(s)://、sftp:// 链接"
+
+
+def has_supported_scheme(url) -> bool:
+    u = str(url or "").strip().lower()
+    return u.startswith(SUPPORTED_SCHEMES)
+
+
+def scheme_of(url) -> str:
+    u = str(url or "").strip().lower()
+    for prefix in SUPPORTED_SCHEMES:
+        if u.startswith(prefix):
+            return prefix[: -len("://")]
+    return ""
+
 
 def _curl_env() -> dict:
     """Environment for the curl child, with the frozen bundle's libs removed.
@@ -271,6 +290,24 @@ def _parse_header_block(text: str) -> Dict[str, str]:
     return hdrs
 
 
+def transport_for_url(url: str) -> Optional["Transport"]:
+    """非 HTTP 协议在这里分流；返回 None 表示按 http/https 走。
+
+    延迟 import：ftp.py / sftp.py 反过来要继承本模块的 Transport，模块级互相
+    import 会形成循环。
+    """
+    u = str(url or "").lower()
+    if u.startswith(("ftp://", "ftps://")):
+        from .ftp import FtpTransport
+
+        return FtpTransport(tls=u.startswith("ftps://"))
+    if u.startswith("sftp://"):
+        from .sftp import SftpTransport
+
+        return SftpTransport()
+    return None
+
+
 def probe_with_fallback(
     url: str, headers: Dict[str, str], timeout: float, proxy: Optional[str]
 ) -> Tuple[Transport, dict]:
@@ -282,7 +319,14 @@ def probe_with_fallback(
     retrying them through curl used to hide the status behind a confusing
     "curl probe failed" message (and, in the frozen bundle, behind an OpenSSL
     loading error).
+
+    ftp/ftps/sftp 在进 HTTP 那套之前先分流：它们的「探测」是问服务器 SIZE/stat，
+    没有 HTTP 状态码，也不该被 403/406/429 的 curl 兜底逻辑一遍遍重放。
     """
+    t = transport_for_url(url)
+    if t is not None:
+        return t, t.probe(url, headers, timeout, proxy)
+
     native = NativeTransport()
     fallback_status = (403, 406, 429)
 
@@ -318,6 +362,19 @@ def probe_with_fallback(
 
 
 def make(name: str) -> Transport:
+    """按 .part 元数据里记下的通道名重建 Transport（续传时不会重新探测）。
+
+    分块名丢了就退回 NativeTransport 等于拿 HTTP 客户端去读 FTP 地址，
+    所以这里必须认得每一条通道。
+    """
     if name == "curl" and CURL:
         return CurlTransport()
+    if name in ("ftp", "ftps"):
+        from .ftp import FtpTransport
+
+        return FtpTransport(tls=name == "ftps")
+    if name == "sftp":
+        from .sftp import SftpTransport
+
+        return SftpTransport()
     return NativeTransport()

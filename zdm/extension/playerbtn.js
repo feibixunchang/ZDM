@@ -147,6 +147,8 @@
       "all:initial;position:fixed;left:0;top:0;z-index:2147483646;display:none;" +
       "pointer-events:none;";
     shadow = host.attachShadow({ mode: "open" });
+    // 界面语言（ui18n.js）：只观察自己这棵 shadow 树，不去遍历宿主页面的 DOM。
+    try { if (typeof ZDMUI !== "undefined") ZDMUI.watch(shadow); } catch (_) {}
     shadow.innerHTML = `
       <style>
         :host{all:initial;pointer-events:none}

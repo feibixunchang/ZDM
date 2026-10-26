@@ -354,6 +354,31 @@ def cmd_open(args) -> int:
     return 0
 
 
+def cmd_firefox_ext(args) -> int:
+    """把随包扩展打成 Firefox 的 .xpi。
+
+    同一份 extension/ 源码，只翻译清单（见 firefox_ext.py）——所以这个命令打的包
+    和「桌面端导出」「网页版下载」拿到的是同一个东西，不存在第二个版本。
+    """
+    from . import firefox_ext
+
+    src = runtime.extension_dir()
+    if not src or not os.path.isdir(src):
+        print("!! 找不到随包的扩展目录，打不了 Firefox 包", file=sys.stderr)
+        return 1
+    out = args.out or "zdm-connector-%s-firefox.xpi" % (
+        firefox_ext.read_manifest(src).get("version") or ""
+    )
+    try:
+        firefox_ext.build_file(src, out)
+    except OSError as e:
+        print(f"!! 写入 {out} 失败：{e}", file=sys.stderr)
+        return 1
+    print(f"==> {out}（{os.path.getsize(out) // 1024} KB）")
+    print("    在 Firefox 里 about:debugging#/runtime/this-firefox → 「加载临时附加组件…」")
+    return 0
+
+
 # ----------------------------------------------------------------- native host
 def _native_host_api(port: int, path: str, body=None, timeout: float = 5.0):
     import urllib.request
@@ -604,6 +629,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("open", help="open the web UI")
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_open)
+
+    s = sub.add_parser(
+        "firefox-ext",
+        help="package the bundled extension into a Firefox .xpi (same source as the Chrome one)",
+    )
+    s.add_argument("--out", default="", help="output file (default: zdm-connector-<version>-firefox.xpi)")
+    s.set_defaults(func=cmd_firefox_ext)
     return p
 
 

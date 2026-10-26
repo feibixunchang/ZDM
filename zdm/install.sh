@@ -77,6 +77,17 @@ install_pyqt() {
       fi
     fi
   fi
+  # sftp:// 通道需要 paramiko —— 这是它唯一的外部依赖（ftp:// 与 ftps:// 只用
+  # 标准库）。装不上就如实说一句：添加 sftp 链接时 ZDM 会当场拒绝并把原因再讲
+  # 一遍，而不是建一条永远下不完的假任务。
+  if "$py" -c "import paramiko" >/dev/null 2>&1; then
+    echo "==> paramiko 已就绪（sftp:// 通道可用）"
+  else
+    echo "==> 安装 paramiko（sftp:// 通道需要）"
+    "$py" -m pip install --user paramiko >/dev/null 2>&1 \
+      || "$py" -m pip install --user --break-system-packages paramiko >/dev/null 2>&1 \
+      || echo "==> paramiko 安装失败：ftp/ftps 不受影响，sftp:// 链接会被拒绝并说明原因"
+  fi
 }
 
 # ---------------------------------------------------------------- Linux
@@ -129,32 +140,82 @@ _ensure_pinned_bin() {
   fi
 }
 
+chrome_ext_id() {
+  # Chrome 用 manifest 里的 "key" 推出扩展 ID：sha256(key 的 DER) 前 32 个
+  # 十六进制位，每位映射到 a-p。这个值必须和 extension/background.js 里
+  # 发起 native messaging 时的那个 ID 一致，写错的表现是「Chrome 点了下载
+  # 没反应」，所以只从 manifest 现算，不在 shell 里抄死值。
+  "$PY" - "$ROOT/extension/manifest.json" <<'PYEOF'
+import base64, hashlib, json, sys
+m = json.load(open(sys.argv[1], encoding="utf-8"))
+h = hashlib.sha256(base64.b64decode(m["key"])).hexdigest()[:32]
+print("".join(chr(ord("a") + int(c, 16)) for c in h))
+PYEOF
+}
+
 install_native_host() {
-  # Chrome/Chromium native messaging lets the extension start ZDM without
-  # showing an "open zdm://" dialog. The host name and the extension id must
-  # match extension/background.js + the manifest "key".
+  # Chrome/Chromium 与 Firefox 都靠原生消息主机让扩展静默拉起 ZDM，省掉
+  # 「是否打开 zdm://」那个系统弹窗；主机名两边都是 com.zdm.launcher。
+  #
+  # 但 Firefox 认的是 allowed_extensions（扩展 ID 是字符串，不是
+  # chrome-extension:// 那个），并且读的是自己的目录。两种浏览器写的清单
+  # 里两个字段都留着：Chrome 忽略 allowed_extensions，Firefox 忽略
+  # allowed_origins，一份文件同时喂两边。
   local APP_DIR="$1" EXT_ID="$2"
   local HOST="$APP_DIR/zdm_native_host.py"
   chmod +x "$HOST" 2>/dev/null || true
-  local cfg
-  for cfg in \
-    "$HOME/.config/google-chrome" \
-    "$HOME/.config/chromium" \
-    "$HOME/.config/microsoft-edge" \
-    "$HOME/.config/BraveSoftware/Brave-Browser" \
-    "$HOME/.config/vivaldi"; do
-    [ -d "$cfg" ] || continue
-    mkdir -p "$cfg/NativeMessagingHosts"
-    cat > "$cfg/NativeMessagingHosts/com.zdm.launcher.json" <<EOF
+  # Firefox 那边那个 ID 固定在 zdm/firefox_ext.py 的 GECKO_ID 里（打 .xpi 时
+  # 就是它）。写错一个字符的表现是「扩展点了下载没反应」，最难归因，所以让
+  # 安装脚本从同一个地方读，不在 shell 里抄第二份。
+  local GECKO_ID
+  GECKO_ID="$("$PY" "$APP_DIR/zdm/firefox_ext.py" --gecko-id 2>/dev/null || true)"
+  [ -n "$GECKO_ID" ] || GECKO_ID="zdm-connector@feibixunchang.github.io"
+  local MANIFEST
+  MANIFEST="$(cat <<EOF
 {
   "name": "com.zdm.launcher",
   "description": "ZDM download manager launcher",
   "path": "$HOST",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://$EXT_ID/"]
+  "allowed_origins": ["chrome-extension://$EXT_ID/"],
+  "allowed_extensions": ["$GECKO_ID"]
 }
 EOF
-  done
+)"
+  # Chromium 系各家浏览器的配置根目录（macOS 与 Linux 的路径完全不同，之前
+  # 只写了 Linux 那份，macOS 上循环里每个 [ -d ] 都不成立 = Chrome 其实一个
+  # 清单都没注册，扩展只能退回 zdm:// 弹窗）。同样只在装过的浏览器里写。
+  local cfg dir
+  if [ "$(uname -s)" = "Darwin" ]; then
+    local AS="$HOME/Library/Application Support"
+    for cfg in "$AS/Google/Chrome" "$AS/Chromium" "$AS/Microsoft Edge" \
+               "$AS/BraveSoftware/Brave-Browser" "$AS/Vivaldi"; do
+      [ -d "$cfg" ] || continue
+      mkdir -p "$cfg/NativeMessagingHosts"
+      printf '%s\n' "$MANIFEST" > "$cfg/NativeMessagingHosts/com.zdm.launcher.json"
+    done
+    dir="$AS/Mozilla/NativeMessagingHosts"
+  else
+    for cfg in \
+      "$HOME/.config/google-chrome" \
+      "$HOME/.config/chromium" \
+      "$HOME/.config/microsoft-edge" \
+      "$HOME/.config/BraveSoftware/Brave-Browser" \
+      "$HOME/.config/vivaldi"; do
+      [ -d "$cfg" ] || continue
+      mkdir -p "$cfg/NativeMessagingHosts"
+      printf '%s\n' "$MANIFEST" > "$cfg/NativeMessagingHosts/com.zdm.launcher.json"
+    done
+    dir="$HOME/.mozilla/native-messaging-hosts"
+  fi
+  # Firefox：Linux 是 ~/.mozilla/native-messaging-hosts，macOS 是
+  # ~/Library/Application Support/Mozilla/NativeMessagingHosts（大小写不一样）。
+  # 只在其父目录已存在（= 装过 Firefox）时写，不给没装的用户造空目录。
+  if [ -d "$(dirname "$dir")" ]; then
+    mkdir -p "$dir"
+    printf '%s\n' "$MANIFEST" > "$dir/com.zdm.launcher.json"
+    echo "==> 已为 Firefox 注册原生消息主机（扩展 ID $GECKO_ID）"
+  fi
   echo "==> 已注册浏览器原生消息主机 com.zdm.launcher（扩展 ID $EXT_ID）"
 }
 
@@ -261,13 +322,7 @@ EOF
   gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
   install_pyqt "$PY"
   local EXT_ID
-  EXT_ID="$("$PY" - "$ROOT/extension/manifest.json" <<'PYEOF'
-import base64, hashlib, json, sys
-m = json.load(open(sys.argv[1], encoding="utf-8"))
-h = hashlib.sha256(base64.b64decode(m["key"])).hexdigest()[:32]
-print("".join(chr(ord("a") + int(c, 16)) for c in h))
-PYEOF
-)"
+  EXT_ID="$(chrome_ext_id)"
   install_native_host "$APP_DIR" "$EXT_ID"
   "$BIN_DIR/zdm" start --daemon >/dev/null 2>&1 || true
   EXT_DIR="$APP_DIR/extension"
@@ -535,6 +590,9 @@ EOF
   echo "==> 已注册 LaunchAgent（登录自启 + 崩溃重启）"
   echo "==> 已生成 $APP"
   install_pyqt "$PY"
+  # macOS 之前只装了扩展文件、没注册原生消息主机，结果 Chrome 只能走 zdm://
+  # 弹窗、Firefox 完全没反应；和 Linux 一样补齐（函数内部按 uname 选目录）。
+  install_native_host "$APP_DIR" "$(chrome_ext_id)"
   EXT_DIR="$APP_DIR/extension"
 }
 

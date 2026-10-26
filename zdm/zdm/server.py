@@ -19,11 +19,27 @@ from . import apitoken
 from . import desktop
 from . import presence
 from . import runtime
+from .aria2 import Aria2Rpc
 from .core import normalize_section
 from .manager import Manager
 from .videopage import video_page_filename, video_page_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
+
+# aria2 兼容层的挂载路径（POST）；aria2 自己默认叫 /jsonrpc，客户端一般能改。
+RPC_PATHS = ("jsonrpc", "rpc")
+# 一条 RPC 请求（含 system.multicall 批量）的上限：本地服务，没必要吃下无界请求体。
+RPC_MAX_BODY = 4 * 1024 * 1024
+# 被拒的请求体在多大范围内还值得「读干净再回错」：超过这个数就当作有人在乱来，
+# 直接断开，不给它慢慢灌。
+RPC_DRAIN_LIMIT = RPC_MAX_BODY * 4
+
+_RPC: Optional[Aria2Rpc] = None
+_RPC_LOCK = threading.Lock()
+
+
+def _is_rpc_path(parts) -> bool:
+    return bool(parts) and parts[0] in RPC_PATHS
 
 
 def _parse_start_at(value) -> float:
@@ -158,6 +174,29 @@ _PROBE_CACHE: dict = {}  # url -> (bytes, 时间戳)。直链会过期，缓存 
 _PROBE_TTL = 600.0
 
 
+def _probe_nonhttp_size(url: str, timeout: float) -> int:
+    """ftp/ftps/sftp 的大小预探：走下载引擎同一套通道，不用 urllib。
+
+    urllib 的 ftp 处理器不认 Range，硬套上面的逻辑会把整个文件当成「探一下」
+    读进来 —— 预探一个 4GB 的镜像包不该变成一次满速下载。
+    """
+    from .transport import has_supported_scheme, probe_with_fallback
+
+    if not has_supported_scheme(url):
+        return 0
+    hit = _PROBE_CACHE.get(url)
+    if hit and time.time() - hit[1] < _PROBE_TTL:
+        return hit[0]
+    try:
+        _transport, info = probe_with_fallback(url, {}, timeout, "")
+    except Exception:  # noqa: BLE001  预探失败只是「大小未知」，不是错误
+        return 0
+    total = int(info.get("size") or 0)
+    if total:
+        _PROBE_CACHE[url] = (total, time.time())
+    return total
+
+
 def probe_one_size(
     url: str,
     *,
@@ -167,8 +206,10 @@ def probe_one_size(
     timeout: float = 8.0,
 ) -> int:
     """问出「这个资源总共多大」，失败返回 0。绝不下载响应体。"""
-    if not url or not url.lower().startswith(("http://", "https://")):
+    if not url:
         return 0
+    if not url.lower().startswith(("http://", "https://")):
+        return _probe_nonhttp_size(url, timeout)
     hit = _PROBE_CACHE.get(url)
     if hit and time.time() - hit[1] < _PROBE_TTL:
         return hit[0]
@@ -306,7 +347,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         return origin if origin in allowed else ""
 
-    def _cors(self) -> None:
+    def _cors(self, any_origin: bool = False) -> None:
         # 本地 API 不需要 keep-alive：开着它，服务重启（升级后 postinst 会
         # 杀掉旧 serve）后浏览器连接池里全是死连接，扩展要重启浏览器才
         # 恢复（实测）。每响应一条就关，客户端下次新建连接，彻底规避。
@@ -314,9 +355,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         # Never answer ``*``: any web page the user visits could otherwise read
         # the response (site cookies, task headers) from 127.0.0.1.
-        origin = self._allowed_origin()
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
+        # aria2 兼容层是唯一例外（any_origin=True）：AriaNg 这类现成客户端多数
+        # 跑在别的端口或直接开本地文件，同源策略会让它连不上，而它连不上时用户
+        # 只看到一句「RPC 连接失败」，查不到是 ZDM 没回 CORS。放开的前提是这里
+        # 只放行 /jsonrpc 那条路，而且服务只绑 127.0.0.1、每条调用都要带令牌 ——
+        # 网页拿不到令牌就仍然只能读到一句错误说明。
+        origin = self.headers.get("Origin") or ""
+        allowed = origin if any_origin else self._allowed_origin()
+        if allowed:
+            self.send_header("Access-Control-Allow-Origin", allowed)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
         self.send_header(
@@ -327,10 +374,12 @@ class Handler(BaseHTTPRequestHandler):
         # 而扩展的每个请求要么带 X-ZDM-Extension、要么 Origin 是
         # chrome-extension://。GUI 的「浏览器扩展」对话框就靠这个回答
         # 「扩展装上了没有」——比读注册表/翻浏览器配置目录可靠得多。
+        # 版本号是扩展自己报的（X-ZDM-Ext-Version）：状态栏要说「扩展是几点几」，
+        # 随包 manifest 只能说明磁盘上放着哪一份，装进浏览器的可能还没换过来。
         if self.headers.get("X-ZDM-Extension") == EXTENSION_ID or (
             self.headers.get("Origin") or ""
         ) == f"chrome-extension://{EXTENSION_ID}":
-            presence.note_seen()
+            presence.note_seen(version=self.headers.get("X-ZDM-Ext-Version") or "")
 
     def _supplied_token(self) -> str:
         header = self.headers.get("X-ZDM-Token") or ""
@@ -382,12 +431,12 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return host in ("127.0.0.1", "localhost", "::1")
 
-    def _send(self, code: int, body: bytes, ctype: str, extra=None) -> None:
+    def _send(self, code: int, body: bytes, ctype: str, extra=None, any_origin: bool = False) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self._cors()
+        self._cors(any_origin)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -398,6 +447,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), MIME[".json"])
+
+    def _json_rpc(self, code: int, payload) -> None:
+        """aria2 兼容层的响应：跨域也放行（见 _cors 的 any_origin 说明）。"""
+        if payload is None:
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self._cors(any_origin=True)
+            self.end_headers()
+            return
+        self._send(
+            code,
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            MIME[".json"],
+            any_origin=True,
+        )
 
     def _error(self, code: int, msg: str) -> None:
         self._json({"ok": False, "error": msg}, code)
@@ -429,11 +493,24 @@ class Handler(BaseHTTPRequestHandler):
         return [p for p in path.split("/") if p]
 
     # ---------- routes ----------
+    def _rpc(self) -> Aria2Rpc:
+        """aria2 兼容层的常驻实例（会话 id 要稳定，客户端靠它判断服务重启动过没有）。"""
+        global _RPC
+        with _RPC_LOCK:
+            if _RPC is None or _RPC.manager is not self.manager or _RPC.token != self.token:
+                _RPC = Aria2Rpc(self.manager, self.token, self._create_task)
+            else:
+                # create_task 绑在本次连接的 Handler 上：每次换绑，不让常驻实例
+                # 一直抓住一个早已结束的旧连接对象。
+                _RPC.token = self.token
+                _RPC.create_task = self._create_task
+            return _RPC
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         if not self._host_ok():
             return self._error(403, "forbidden host")
         self.send_response(204)
-        self._cors()
+        self._cors(any_origin=_is_rpc_path(self._path_parts()))
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -452,7 +529,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 扩展心跳：故意不鉴权（它只记录「扩展来过」，不泄露任何
                 # 东西），否则 token 校验会把最需要这条信号的新装机用户挡在
                 # 门外。返回体里也不带任何路径信息。
-                presence.note_seen()
+                presence.note_seen(version=self.headers.get("X-ZDM-Ext-Version") or "")
                 # 扩展靠版本号判断磁盘上有没有更新的扩展文件：不一致就自动
                 # reload 自己（从磁盘加载新 extension/），不用用户重开浏览器。
                 # 这里报**随包扩展**的 manifest version（读不到才退回桌面端
@@ -495,11 +572,57 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._error(403, "forbidden host")
         parts = self._path_parts()
+        if _is_rpc_path(parts):
+            return self._rpc_post()
         if not parts or parts[0] != "api":
             return self._error(404, "not found")
         if not self._auth_ok():
             return self._error(401, "invalid token")
         return self._api_post(parts[1:])
+
+    def _rpc_post(self) -> None:
+        """aria2 兼容的 JSON-RPC 入口：令牌走 aria2 的 token: 约定（也可用平时的
+        X-ZDM-Token 头 / ?token=）。关掉开关时明确回一句「未启用」，而不是让客户端
+        对着一个 404 猜是哪一步错了。"""
+        if not self.manager.config.get("rpc_enabled", True):
+            return self._json_rpc(
+                404,
+                Aria2Rpc.err(None, "aria2 JSON-RPC 未启用：在设置里打开「兼容 aria2 JSON-RPC」", -1),
+            )
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0:
+            return self._json_rpc(400, Aria2Rpc.err(None, "Content-Length 无效", -32600))
+        if length > RPC_MAX_BODY:
+            # 先把体读干净再回 413。不读就写响应，对端会在还剩几 MB 没发完时
+            # 被 RST，浏览器/curl 只报「连接被重置」，用户看不出真正原因是太大。
+            self._drain_body(length)
+            return self._json_rpc(413, Aria2Rpc.err(None, f"请求体过大（上限 {RPC_MAX_BODY} 字节）", -32600))
+        raw = self.rfile.read(length) if length else b""
+        if not raw:
+            return self._json_rpc(
+                200,
+                Aria2Rpc.err(None, "需要 JSON-RPC 请求体", -32600),
+            )
+        code, payload = self._rpc().handle(raw, self._supplied_token())
+        self._json_rpc(code, payload)
+
+    def _drain_body(self, length: int) -> None:
+        if length > RPC_DRAIN_LIMIT:
+            # 声明得离谱的请求不陪它耗时间，让连接直接结束。
+            self.close_connection = True
+            return
+        remaining = length
+        while remaining > 0:
+            try:
+                chunk = self.rfile.read(min(64 * 1024, remaining))
+            except OSError:
+                break
+            if not chunk:
+                break
+            remaining -= len(chunk)
 
     def do_DELETE(self) -> None:  # noqa: N802
         if not self._host_ok():
@@ -516,6 +639,18 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get(self, parts):
         if not parts:
             return self._json({"ok": True, "version": VERSION})
+        if parts == ["token"]:
+            # 设置界面要显示这枚令牌（AriaNg 一类客户端得填它）。到这里为止请求
+            # 已经过了 _auth_ok —— 拿不到令牌的人问不到令牌，网页版靠的就是
+            # 服务端发的 Cookie，所以它自己已经带着。
+            return self._json(
+                {
+                    "ok": True,
+                    "token": self.token,
+                    "rpc_enabled": bool(self.manager.config.get("rpc_enabled", True)),
+                    "rpc_paths": ["/" + p for p in RPC_PATHS],
+                }
+            )
         if parts == ["tasks"]:
             return self._json({"ok": True, "tasks": self.manager.list()})
         if parts == ["state"]:
@@ -535,13 +670,46 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "version": VERSION,
+                    # 装进浏览器的那一份扩展自己报的版本号。老扩展不报，退回
+                    # 随包 manifest 的版本 —— 那至少说明磁盘上是哪一份，界面
+                    # 不会显示成一个凭空的数。
+                    "ext_version": presence.ext_version()
+                    or runtime.bundled_extension_version()
+                    or "",
                     "last_seen": presence.last_seen(),
                     "seen_recently": presence.recent(),
                 }
             )
+        if parts == ["extension", "firefox.xpi"]:
+            return self._firefox_xpi()
         if parts == ["events"]:
             return self._sse()
         return self._error(404, "not found")
+
+    def _firefox_xpi(self) -> None:
+        """把磁盘上那份扩展现场打成 Firefox 的 .xpi。
+
+        不预先存第二个文件：装到用户机器上的 extension/ 才是唯一真相，仓库里再造
+        一份迟早和它对不上（改 JS 的人不会记得同步打一遍）。Firefox 只认 .xpi，
+        没有 Chrome 那句「加载已解压的扩展程序」，所以这一步得让用户点一下就有。
+        """
+        from . import firefox_ext
+
+        ext_dir = runtime.extension_dir()
+        if not ext_dir or not os.path.isdir(ext_dir):
+            return self._error(404, "找不到随包的扩展目录，打不了 Firefox 包")
+        try:
+            manifest = firefox_ext.gecko_manifest(ext_dir)
+            data = firefox_ext.build_zip(ext_dir)
+        except Exception as e:  # noqa: BLE001
+            return self._error(500, f"打 Firefox 包失败：{type(e).__name__}: {e}")
+        name = "zdm-connector-%s-firefox.xpi" % (manifest.get("version") or VERSION)
+        self._send(
+            200,
+            data,
+            "application/x-xpinstall",
+            {"Content-Disposition": 'attachment; filename="%s"' % name},
+        )
 
     def _site_cookie_for(self, url: str) -> str:
         """Look up a configured site cookie for this URL's host.
@@ -613,122 +781,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, str(e))
 
         if parts == ["tasks"]:
-            url = (body.get("url") or "").strip()
-            if not url:
-                return self._error(400, "缺少下载链接")
-            headers = self._normalize_headers(body, url)
-            # 视频**页面**链接（YouTube/B站…）不能当普通文件下：那样存下来的
-            # 是一个叫 watch 的 HTML。桌面端、网页版、CLI 都在这里汇合，所以
-            # 在服务端统一转成页面任务交给 yt-dlp；扩展推的媒体直链不会命中。
-            if (
-                not body.get("yt_page")
-                and not body.get("page_url")
-                and not body.get("kind")
-            ):
-                page = video_page_url(url)
-                if page:
-                    body["yt_page"] = page
-                    # These tasks now go through yt-dlp. Mark them as video
-                    # (the list shows the right kind/icon) and give them a
-                    # fallback filename: the GUI sends the resolved title, but
-                    # the web UI and `zdm add` do not, and the Download default
-                    # "download" would leave an extension-less file.
-                    body["kind"] = "video"
-                    if not (body.get("filename") or body.get("name")):
-                        body["filename"] = video_page_filename(url)
-            # 扩展推的是**媒体直链**（googlevideo…）且带 kind，上面的页面
-            # 链接推导（要求 not kind）不会命中 —— 但 Referer 里就有
-            # YouTube 页面地址。直链只能顺序读，部分网络（TUN/Fake-IP）下
-            # mid-file Range 被 302 打断，吞吐只有几 KB/s；带上页面地址让
-            # 任务走 yt-dlp 通道（自己解挑战、按段重取、下完合流），被拦时
-            # 还会自动退回这条直链。这是入口侧兜底：不管扩展新旧、标签页
-            # 是否重载过，推送都能走对通道。
-            if (
-                not body.get("yt_page")
-                and not body.get("page_url")
-                and "googlevideo.com/" in (url or "")
-            ):
-                from .core import yt_page_from_headers
-
-                page = yt_page_from_headers(headers)
-                if page:
-                    body["yt_page"] = page
-            # A caller that resolved the page itself (desktop GUI, browser
-            # extension) sends yt_page but often no kind; mark it here so the
-            # list renders it as a video and not as an ordinary file.
-            if (body.get("yt_page") or body.get("page_url")) and not body.get("kind"):
-                body["kind"] = "video"
-            # GUI/CLI 让 yt-dlp 自己挑画质时不会先解析标题；没有文件名时
-            # 下载结束只能叫「download」或 zdm-<任务id>。给一个按链接推导的
-            # 可读名字（音乐站是「歌手 - 曲名」，视频站是 Video-<id>）。
-            if (
-                (body.get("yt_page") or body.get("page_url"))
-                and not (body.get("filename") or body.get("name"))
-            ):
-                body["filename"] = video_page_filename(url)
             try:
-                section = _parse_section(body.get("section"))
+                return self._json(self._create_task(body))
             except ValueError as e:
                 return self._error(400, str(e))
-            if section and not (body.get("yt_page") or body.get("page_url")):
-                # 普通文件任务没有 yt-dlp 通道，选段只会下整包。静默忽略
-                # 比报错更伤人：用户以为限制生效，结果拉了个全片。
-                return self._error(400, "选段只适用于视频页面链接（YouTube/B站等）")
-            directory = body.get("dir") or body.get("directory")
-            if directory is not None:
-                if not isinstance(directory, str):
-                    return self._error(400, "directory must be a string")
-                if "\x00" in directory:
-                    return self._error(400, "invalid directory")
-                directory = os.path.abspath(os.path.expanduser(directory.strip()))
-                body["dir"] = directory
-            try:
-                d = self.manager.add(
-                    url=url,
-                    directory=directory,
-                    filename=body.get("filename") or body.get("name"),
-                    connections=body.get("connections"),
-                    headers=headers,
-                    proxy=body.get("proxy"),
-                    speed_limit=body.get("speed_limit"),
-                    start_now=body.get("paused") is not True,
-                    source=body.get("source"),
-                    kind=body.get("kind"),
-                    audio_url=body.get("audio_url"),
-                    audio_only=str(body.get("audio_only") or "").lower()
-                    in ("1", "true", "yes", "on"),
-                    # YouTube：给了页面地址就走 yt-dlp 下载通道
-                    yt_page=body.get("yt_page") or body.get("page_url"),
-                    yt_height=body.get("yt_height") or body.get("height"),
-                    section=section,
-                    stream_video=_track_value(body, "stream_video"),
-                    stream_audio=_track_value(body, "stream_audio"),
-                    stream_subtitle=_track_value(body, "stream_subtitle"),
-                    stream_sub_format=_track_value(body, "stream_sub_format"),
-                    stream_live_limit=_live_limit_value(body),
-                    priority=body.get("priority"),
-                    start_at=_parse_start_at(body.get("start_at")),
-                )
-            except (ValueError, TypeError) as e:
-                # TypeError as well as ValueError: the body is untrusted JSON,
-                # and int() on a list/dict raises TypeError, which used to
-                # escape this handler and drop the connection without a reply.
-                return self._error(400, str(e))
-            # If the desktop client is not open (typical when the download comes
-            # from the browser extension), bring it up so the user sees the task.
-            # Pass NO urls: the task is already queued above, and handing the
-            # url to the GUI makes it add a second copy.
-            if self.manager.config.get("auto_show_gui", True):
-                threading.Thread(
-                    target=desktop.ensure_desktop,
-                    args=([], int(self.manager.config.get("port") or 9000)),
-                    daemon=True,
-                ).start()
-            reply = {"ok": True, "id": d.id, "task": d.to_dict()}
-            if self.manager.state_error:
-                # 任务已经在跑，但这条记录没能写进 state.json：重启后它会消失。
-                reply["warning"] = "任务已开始，但记录没能写入磁盘：" + self.manager.state_error
-            return self._json(reply)
 
         if len(parts) == 3 and parts[0] == "tasks":
             tid, action = parts[1], parts[2]
@@ -920,6 +976,128 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(result)
 
         return self._error(404, "not found")
+
+    def _create_task(self, body: dict) -> dict:
+        """建一条任务：POST /api/tasks 与 aria2 兼容层的 addUri 共用这一段。
+
+        这样 RPC 建出来的任务和桌面端 / 网页版 / 扩展建的完全同路 —— 视频页面
+        链接一样会转成 yt-dlp 任务，站点 Cookie 一样兜底，一样受重复下载约束。
+        失败一律抛 ValueError（REST 侧回 400，RPC 侧回 JSON-RPC 错误），
+        成功返回响应体。
+        """
+        url = (body.get("url") or "").strip()
+        if not url:
+            raise ValueError("缺少下载链接")
+        headers = self._normalize_headers(body, url)
+        # 视频**页面**链接（YouTube/B站…）不能当普通文件下：那样存下来的
+        # 是一个叫 watch 的 HTML。桌面端、网页版、CLI 都在这里汇合，所以
+        # 在服务端统一转成页面任务交给 yt-dlp；扩展推的媒体直链不会命中。
+        if (
+            not body.get("yt_page")
+            and not body.get("page_url")
+            and not body.get("kind")
+        ):
+            page = video_page_url(url)
+            if page:
+                body["yt_page"] = page
+                # These tasks now go through yt-dlp. Mark them as video
+                # (the list shows the right kind/icon) and give them a
+                # fallback filename: the GUI sends the resolved title, but
+                # the web UI and `zdm add` do not, and the Download default
+                # "download" would leave an extension-less file.
+                body["kind"] = "video"
+                if not (body.get("filename") or body.get("name")):
+                    body["filename"] = video_page_filename(url)
+        # 扩展推的是**媒体直链**（googlevideo…）且带 kind，上面的页面
+        # 链接推导（要求 not kind）不会命中 —— 但 Referer 里就有
+        # YouTube 页面地址。直链只能顺序读，部分网络（TUN/Fake-IP）下
+        # mid-file Range 被 302 打断，吞吐只有几 KB/s；带上页面地址让
+        # 任务走 yt-dlp 通道（自己解挑战、按段重取、下完合流），被拦时
+        # 还会自动退回这条直链。这是入口侧兜底：不管扩展新旧、标签页
+        # 是否重载过，推送都能走对通道。
+        if (
+            not body.get("yt_page")
+            and not body.get("page_url")
+            and "googlevideo.com/" in (url or "")
+        ):
+            from .core import yt_page_from_headers
+
+            page = yt_page_from_headers(headers)
+            if page:
+                body["yt_page"] = page
+        # A caller that resolved the page itself (desktop GUI, browser
+        # extension) sends yt_page but often no kind; mark it here so the
+        # list renders it as a video and not as an ordinary file.
+        if (body.get("yt_page") or body.get("page_url")) and not body.get("kind"):
+            body["kind"] = "video"
+        # GUI/CLI 让 yt-dlp 自己挑画质时不会先解析标题；没有文件名时
+        # 下载结束只能叫「download」或 zdm-<任务id>。给一个按链接推导的
+        # 可读名字（音乐站是「歌手 - 曲名」，视频站是 Video-<id>）。
+        if (
+            (body.get("yt_page") or body.get("page_url"))
+            and not (body.get("filename") or body.get("name"))
+        ):
+            body["filename"] = video_page_filename(url)
+        section = _parse_section(body.get("section"))
+        if section and not (body.get("yt_page") or body.get("page_url")):
+            # 普通文件任务没有 yt-dlp 通道，选段只会下整包。静默忽略
+            # 比报错更伤人：用户以为限制生效，结果拉了个全片。
+            raise ValueError("选段只适用于视频页面链接（YouTube/B站等）")
+        directory = body.get("dir") or body.get("directory")
+        if directory is not None:
+            if not isinstance(directory, str):
+                raise ValueError("directory must be a string")
+            if "\x00" in directory:
+                raise ValueError("invalid directory")
+            directory = os.path.abspath(os.path.expanduser(directory.strip()))
+            body["dir"] = directory
+        try:
+            d = self.manager.add(
+                url=url,
+                directory=directory,
+                filename=body.get("filename") or body.get("name"),
+                connections=body.get("connections"),
+                headers=headers,
+                proxy=body.get("proxy"),
+                speed_limit=body.get("speed_limit"),
+                start_now=body.get("paused") is not True,
+                source=body.get("source"),
+                kind=body.get("kind"),
+                audio_url=body.get("audio_url"),
+                audio_only=str(body.get("audio_only") or "").lower()
+                in ("1", "true", "yes", "on"),
+                # YouTube：给了页面地址就走 yt-dlp 下载通道
+                yt_page=body.get("yt_page") or body.get("page_url"),
+                yt_height=body.get("yt_height") or body.get("height"),
+                section=section,
+                stream_video=_track_value(body, "stream_video"),
+                stream_audio=_track_value(body, "stream_audio"),
+                stream_subtitle=_track_value(body, "stream_subtitle"),
+                stream_sub_format=_track_value(body, "stream_sub_format"),
+                stream_live_limit=_live_limit_value(body),
+                priority=body.get("priority"),
+                start_at=_parse_start_at(body.get("start_at")),
+            )
+        except (ValueError, TypeError) as e:
+            # TypeError as well as ValueError: the body is untrusted JSON,
+            # and int() on a list/dict raises TypeError, which used to
+            # escape this handler and drop the connection without a reply.
+            raise ValueError(str(e)) from e
+        # If the desktop client is not open (typical when the download comes
+        # from the browser extension), bring it up so the user sees the task.
+        # Pass NO urls: the task is already queued above, and handing the
+        # url to the GUI makes it add a second copy.
+        if self.manager.config.get("auto_show_gui", True):
+            threading.Thread(
+                target=desktop.ensure_desktop,
+                args=([], int(self.manager.config.get("port") or 9000)),
+                daemon=True,
+            ).start()
+        reply = {"ok": True, "id": d.id, "task": d.to_dict()}
+        if self.manager.state_error:
+            # 任务已经在跑，但这条记录没能写进 state.json：重启后它会消失。
+            reply["warning"] = "任务已开始，但记录没能写入磁盘：" + self.manager.state_error
+        return reply
 
     # ---------- static ----------
     def _serve_static(self, rel: str) -> None:

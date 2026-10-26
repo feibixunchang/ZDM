@@ -23,10 +23,28 @@ from .core import (
     record_float,
     record_int,
 )
+from .transport import URL_SCHEME_HINT, has_supported_scheme
 from .videopage import is_video_page
 
 APP_NAME = "zdm"
 DEFAULT_PORT = 9000
+
+
+def check_url_scheme(url) -> str:
+    """三端共用的链接闸门：认得出协议，并且本机真的有这条通道。
+
+    sftp 单列一档，是因为它依赖可选的 paramiko。装不上不该让用户把链接粘进去
+    等一个永远下不完的任务 —— 当场说清楚缺什么、怎么补才是有用的报错。
+    """
+    u = str(url or "").strip()
+    if not has_supported_scheme(u):
+        raise ValueError(URL_SCHEME_HINT)
+    if u.lower().startswith("sftp://"):
+        from . import sftp as sftp_mod
+
+        if not sftp_mod.available():
+            raise ValueError(sftp_mod.missing_hint())
+    return u
 
 # 命令行/JSON 里写下来的「假」：`zdm config mirror_accel off` 必须是关掉。
 # 直接用 bool() 会把 "off"/"no" 这类非空字符串当成 True，等于反着来。
@@ -214,6 +232,10 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "max_retries": 5,
     "timeout": 30,
     "port": DEFAULT_PORT,
+    # 兼容 aria2 的 JSON-RPC（同一个服务上的 POST /jsonrpc）。AriaNg 一类现成
+    # 客户端靠它就能直接驱动 ZDM。默认开：服务只绑 127.0.0.1，每条调用都要带
+    # 本地接口那枚同一令牌，关掉并不会更安全，开着才让「换个客户端用」这条路走得通。
+    "rpc_enabled": True,
     "auto_resume": True,
     "intercept_browser": False,
     "history_limit": 200,
@@ -249,6 +271,7 @@ CONFIG_BOOL_KEYS = (
     "intercept_browser",
     "auto_show_gui",
     "check_updates",
+    "rpc_enabled",
 )
 CONFIG_INT_KEYS = (
     "connections", "max_active", "max_retries", "speed_limit", "port",
@@ -430,8 +453,7 @@ class Manager:
         stream_sub_format: Optional[str] = None,
         stream_live_limit: Optional[int] = None,
     ) -> Download:
-        if not url or not str(url).startswith(("http://", "https://")):
-            raise ValueError("只支持 http/https 链接")
+        url = check_url_scheme(url)
         cfg = self.config
         tracks = normalize_tracks(
             cfg,
@@ -542,6 +564,20 @@ class Manager:
         self._emit("resumed", d)
         return True
 
+    def set_priority(self, task_id: str, priority: int) -> bool:
+        """只改排队档位，不动任务本身。
+
+        编辑通路（``edit``）要先把任务暂停再打回队列，用来自作主张改一下顺序
+        太亏；aria2 兼容层的 changePosition 需要的正是「只挪顺序、不下断」。
+        """
+        d = self.get(task_id)
+        if not d:
+            return False
+        d.priority = to_priority(priority)
+        self._emit("edited", d)
+        self.save_state()
+        return True
+
     def edit(
         self,
         task_id: str,
@@ -578,8 +614,8 @@ class Manager:
             raise ValueError("正在录制的项目不能修改，请先「停止录制」再重新下载")
         if url is not None:
             url = str(url).strip()
-            if url and not url.startswith(("http://", "https://")):
-                raise ValueError("只支持 http/https 链接")
+            if url:
+                url = check_url_scheme(url)
         # None 表示「这次没改选段」，不能顺手清空；给了值才校验并归一成
         # yt-dlp 认的 *HH:MM:SS-HH:MM:SS，让文件名标签和实际下的区间一致。
         if section is not None:

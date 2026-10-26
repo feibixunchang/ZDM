@@ -21,9 +21,20 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from zdm import __version__ as VERSION  # noqa: E402
-from zdm import apitoken, autostart, desktop, runtime, update  # noqa: E402
+from zdm import apitoken, autostart, desktop, firefox_ext, runtime, update  # noqa: E402
 from zdm.videopage import is_video_page, is_youtube  # noqa: E402
 from zdm.manager import clamp_config_number  # noqa: E402
+from zdm.transport import URL_SCHEME_HINT, has_supported_scheme  # noqa: E402
+
+
+def is_downloadable_url(text) -> bool:
+    """桌面端所有「这是不是一条能下的链接」的判断都走这里。
+
+    以前每个入口各自写一遍 startswith(("http://", "https://"))，于是加了
+    ftp 支持时要改九处；漏一处就是「粘贴板里看到了、拖进来却没反应」。
+    """
+    return has_supported_scheme(text)
+
 import theme as _theme  # noqa: E402
 
 # ---- 自动检查更新的节奏 -----------------------------------------------------
@@ -989,7 +1000,7 @@ class ExtensionDialog(QDialog):
         v.addWidget(self.status)
 
         tips = QLabel(
-            "尚未安装？按下面三步加载（Chrome / Edge 通用）：\n"
+            "尚未安装？Chrome / Edge 按下面三步加载：\n"
             "  1. 浏览器地址栏打开 chrome://extensions，右上角开启「开发者模式」\n"
             "  2. 点「加载已解压的扩展程序」，选择下面的扩展目录\n"
             "  3. 弹出「未列在 Chrome 网上应用商店」时点「继续」\n"
@@ -997,6 +1008,23 @@ class ExtensionDialog(QDialog):
         )
         tips.setWordWrap(True)
         v.addWidget(tips)
+
+        # Firefox 走的是另一条路：它没有「加载已解压的扩展程序」，只认打包好的
+        # .xpi。源码仍是同一份 extension/（差别只在清单，见 zdm/firefox_ext.py），
+        # 所以这里现打现给，不提前存第二份副本 —— 存了迟早和磁盘上的对不上。
+        ff_row = QWidget()
+        fh = QHBoxLayout(ff_row)
+        fh.setContentsMargins(0, 0, 0, 0)
+        ff_label = QLabel(
+            "Firefox：没有「加载已解压的扩展程序」，需要先导出 .xpi，再到地址栏打开\n"
+            "about:debugging#/runtime/this-firefox，点「加载临时附加组件…」选那个文件。"
+        )
+        ff_label.setWordWrap(True)
+        fh.addWidget(ff_label, 1)
+        btn_xpi = QPushButton("导出 Firefox 扩展")
+        btn_xpi.clicked.connect(self._export_xpi)
+        fh.addWidget(btn_xpi)
+        v.addWidget(ff_row)
 
         ext_dir = runtime.extension_dir()
         dir_title = QLabel("扩展目录：")
@@ -1103,6 +1131,39 @@ class ExtensionDialog(QDialog):
             QMessageBox.warning(
                 self, "无法打开目录", f"{d}\n\n{err or '系统没有可用的打开方式。'}"
             )
+
+    def _export_xpi(self):
+        """把磁盘上的扩展打成 Firefox 认的 .xpi，交给用户选的位置。
+
+        Firefox 只装打包文件，而签名过的正式安装要求走 addons.mozilla.org（本
+        地服务这种扩展审核基本不会过），所以这里给的是「加载临时附加组件」用的
+        未签名包：每次开浏览器要重新加载一次。Dev Edition / Nightly / ESR 关掉
+        xpinstall.signatures.required 后可以永久装。
+        """
+        ext_dir = runtime.extension_dir()
+        if not ext_dir or not os.path.isdir(ext_dir):
+            QMessageBox.information(
+                self, "扩展目录不存在",
+                f"目录不存在：\n{ext_dir}\n\nZDM 安装可能不完整，请重新安装。",
+            )
+            return
+        try:
+            ver = firefox_ext.read_manifest(ext_dir).get("version") or VERSION
+            default = os.path.join(os.path.expanduser("~"), f"zdm-connector-{ver}-firefox.xpi")
+            path, _ = QFileDialog.getSaveFileName(
+                self, "导出 Firefox 扩展", default, "Firefox 扩展 (*.xpi)"
+            )
+            if not path:
+                return
+            firefox_ext.build_file(ext_dir, path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "导出失败", f"{type(e).__name__}: {e}")
+            return
+        self.status.setText(
+            f"已导出：{path}\n"
+            "Firefox 地址栏打开 about:debugging#/runtime/this-firefox → "
+            "「加载临时附加组件…」选这个文件。（临时加载的扩展在浏览器重启后会被移除）"
+        )
 
     def _copy_path(self):
         d = runtime.extension_dir()
@@ -1663,7 +1724,7 @@ class MainWindow(QMainWindow):
         self._ext_timer.start()
         QTimer.singleShot(2000, self._refresh_ext_status)
 
-        self.version_label = QLabel(f"v{VERSION}")
+        self.version_label = QLabel(f"ZDM v{VERSION}")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setToolTip(f"ZDM 桌面端 当前版本 v{VERSION}（点击检查更新）")
         self.version_label.setCursor(Qt.PointingHandCursor)
@@ -1910,7 +1971,7 @@ class MainWindow(QMainWindow):
         self._status_hold_until = time.time() + hold
 
     def _check_clipboard(self):
-        """Fill the add bar when the clipboard holds a new http(s) link.
+        """Fill the add bar when the clipboard holds a new downloadable link.
 
         Opt-in (Settings → 剪贴板监听). It never downloads on its own: the link
         lands in the input box and the user still presses Enter. That keeps a
@@ -1927,7 +1988,7 @@ class MainWindow(QMainWindow):
             return
         if not text or len(text) > 2048:
             return
-        if not text.lower().startswith(("http://", "https://")):
+        if not is_downloadable_url(text):
             return
         if text == self._clip_seen:
             return
@@ -2857,7 +2918,7 @@ class MainWindow(QMainWindow):
         url = self.url_edit.text().strip()
         if not url:
             clip = QApplication.clipboard().text().strip()
-            if clip.lower().startswith(("http://", "https://")):
+            if is_downloadable_url(clip):
                 url = clip
                 self.url_edit.setText(url)
         if url:
@@ -2869,8 +2930,8 @@ class MainWindow(QMainWindow):
         url = self.url_edit.text().strip()
         if not url:
             return
-        if not url.lower().startswith(("http://", "https://")):
-            self._status("只支持 http/https 链接，例如 https://example.com/file.zip")
+        if not is_downloadable_url(url):
+            self._status(f"{URL_SCHEME_HINT}，例如 https://example.com/file.zip")
             self.url_edit.selectAll()
             return
         self.url_edit.clear()
@@ -2889,8 +2950,8 @@ class MainWindow(QMainWindow):
         extra = dict(extra or {})
         if not url:
             return
-        if not url.lower().startswith(("http://", "https://")):
-            self._status("只支持 http/https 链接，例如 https://example.com/file.zip")
+        if not is_downloadable_url(url):
+            self._status(f"{URL_SCHEME_HINT}，例如 https://example.com/file.zip")
             return
         if is_youtube(url):
             self._add_youtube(url, extra)
@@ -2982,7 +3043,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("批量导入")
         form = QFormLayout(dlg)
         text = QPlainTextEdit()
-        text.setPlaceholderText("每行一个 http(s) 链接；空行和 # 开头的行会跳过")
+        text.setPlaceholderText("每行一个下载链接（http/https/ftp/ftps/sftp）；空行和 # 开头的行会跳过")
         text.setMinimumSize(620, 280)
         _zh_standard_menu(text)
         prio = QSpinBox()
@@ -3011,10 +3072,10 @@ class MainWindow(QMainWindow):
             line.strip()
             for line in text.toPlainText().splitlines()
             if line.strip() and not line.strip().startswith("#")
-            and line.strip().lower().startswith(("http://", "https://"))
+            and is_downloadable_url(line.strip())
         ]
         if not urls:
-            self._status("没有找到 http(s) 链接", hold=5)
+            self._status("没找到可下载的链接（http/https/ftp/sftp）", hold=5)
             return
         extra = {"priority": prio.value()}
         if start_cb.isChecked():
@@ -3267,7 +3328,7 @@ class MainWindow(QMainWindow):
             "会自动解析清晰度并交给 yt-dlp 下载真正的视频（而不是网页）。"
         )
         clip = QApplication.clipboard().text()
-        if clip and clip.lower().startswith(("http://", "https://")):
+        if clip and is_downloadable_url(clip):
             url.setText(clip.strip())
         name = QLineEdit()
         name.setPlaceholderText("留空自动识别")
@@ -3448,7 +3509,7 @@ class MainWindow(QMainWindow):
         close_tray_cb.setChecked(bool(_gui_cfg("close_to_tray", False)))
         clip_cb = QCheckBox("监听剪贴板，自动把链接填进输入框（不会自动下载）")
         clip_cb.setToolTip(
-            "开启后，复制到剪贴板的 http(s) 链接会出现在顶部输入框，回车才开始下载。\n"
+            "开启后，复制到剪贴板的下载链接（http/https/ftp/ftps/sftp）会出现在顶部输入框，回车才开始下载。\n"
             "默认关闭：读取剪贴板涉及其它应用的内容，应该由用户主动选择。"
         )
         clip_cb.setChecked(bool(cfg.get("clipboard_monitor", False)))
@@ -3458,6 +3519,69 @@ class MainWindow(QMainWindow):
             "huggingface.co 的模型文件走 hf-mirror。镜像站不可用时会自动换回原地址。"
         )
         mirror_cb.setChecked(bool(cfg.get("mirror_accel", False)))
+        # ---- aria2 兼容 JSON-RPC ----
+        rpc_cb = QCheckBox("兼容 aria2 JSON-RPC（AriaNg 等客户端可直接驱动 ZDM）")
+        rpc_cb.setChecked(bool(cfg.get("rpc_enabled", True)))
+        rpc_cb.setToolTip(
+            "开启后，本机服务在同一个端口上多认一条 POST /jsonrpc 路径，说的是\n"
+            "aria2 的那套 JSON-RPC：AriaNg、Motrix 一类现成客户端填上地址和令牌\n"
+            "就能管理 ZDM 的任务（添加/暂停/继续/删除/排队/全局速率上限）。\n"
+            "任务仍然进同一个队列，桌面端和网页版看到的完全一样。\n"
+            "服务只监听 127.0.0.1，每条调用都必须带下面那枚令牌；关掉它不影响\n"
+            "ZDM 自己的任何功能。"
+        )
+        rpc_addr = QLineEdit(f"http://127.0.0.1:{port.value()}/jsonrpc")
+        rpc_addr.setReadOnly(True)
+        rpc_addr.selectAll()
+
+        def _sync_rpc_addr(value):
+            # 端口改了，界面上一串地址要跟着变：留着 9000 让人复制过去连不上。
+            rpc_addr.setText(f"http://127.0.0.1:{int(value or 9000)}/jsonrpc")
+
+        port.valueChanged.connect(_sync_rpc_addr)
+        rpc_copy = QPushButton("复制地址")
+        rpc_copy.clicked.connect(lambda: QApplication.clipboard().setText(rpc_addr.text()))
+        rpc_row = QWidget()
+        rrl = QHBoxLayout(rpc_row)
+        rrl.setContentsMargins(0, 0, 0, 0)
+        rrl.addWidget(rpc_addr, 1)
+        rrl.addWidget(rpc_copy)
+        rpc_token = QLineEdit(str(apitoken.get_token() or ""))
+        rpc_token.setReadOnly(True)
+        rpc_token.setEchoMode(QLineEdit.Password)
+        rpc_token.setToolTip(
+            "这枚令牌就是 ZDM 本地接口的口令，aria2 客户端里填在 RPC Secret 一栏。\n"
+            "拿到它的人等于能操作这台机器上的 ZDM，别贴到网上。"
+        )
+        rpc_show = QPushButton("显示")
+
+        def _toggle_rpc_token():
+            masked = rpc_token.echoMode() == QLineEdit.Password
+            rpc_token.setEchoMode(QLineEdit.Normal if masked else QLineEdit.Password)
+            rpc_show.setText("隐藏" if masked else "显示")
+
+        rpc_show.clicked.connect(_toggle_rpc_token)
+        rpc_tcopy = QPushButton("复制令牌")
+        rpc_tcopy.clicked.connect(
+            lambda: QApplication.clipboard().setText(str(apitoken.get_token() or ""))
+        )
+        rpc_trow = QWidget()
+        rtl = QHBoxLayout(rpc_trow)
+        rtl.setContentsMargins(0, 0, 0, 0)
+        rtl.addWidget(rpc_token, 1)
+        rtl.addWidget(rpc_show)
+        rtl.addWidget(rpc_tcopy)
+        rpc_box = QGroupBox("外部客户端接入（aria2 JSON-RPC）")
+        rf = QFormLayout(rpc_box)
+        rf.addRow("", rpc_cb)
+        rf.addRow("RPC 地址", rpc_row)
+        rf.addRow("RPC 令牌", rpc_trow)
+        rf.addRow(
+            QLabel(
+                "aria2 的令牌写法是 <code>token:令牌</code> 作为第一个参数；"
+                "AriaNg 里直接填 RPC Secret 即可。"
+            )
+        )
         # ---- HLS / DASH 引擎 ----
         stream_cb = QComboBox()
         for key, label in (
@@ -3507,6 +3631,7 @@ class MainWindow(QMainWindow):
         form.addRow("", clip_cb)
         form.addRow("", mirror_cb)
         form.addRow("流媒体（m3u8/mpd）引擎", stream_cb)
+        form.addRow(rpc_box)
         # ---- site cookies (YouTube / Bilibili need a logged-in session) ----
         cookies_box = QGroupBox("站点 Cookie（用于需要登录的视频站）")
         cookies_box.setToolTip(
@@ -3596,6 +3721,7 @@ class MainWindow(QMainWindow):
             "clipboard_monitor": clip_cb.isChecked(),
             "mirror_accel": mirror_cb.isChecked(),
             "stream_engine": stream_cb.currentData() or "auto",
+            "rpc_enabled": rpc_cb.isChecked(),
             "site_cookies": {
                 "youtube": yt_cookie.toPlainText().strip(),
                 "bilibili": bili_cookie.toPlainText().strip(),
@@ -3659,16 +3785,24 @@ class MainWindow(QMainWindow):
 
     def _on_ext_status_main(self, tag: str, payload):
         r = payload if (tag == "ok" and isinstance(payload, dict)) else {}
+
+        def _tail(info) -> str:
+            # 状态栏最右边的 v1.x.y 一直是桌面端版本，紧挨着「扩展已连接」就被
+            # 读成了扩展的版本。扩展这一侧把扩展自己报的版本跟在状态后面，谁
+            # 的版本一眼分得清；扩展没报过版本（老扩展）就什么都不加，不编。
+            ver = str(info.get("ext_version") or "").strip()
+            return f" v{ver}" if ver else ""
+
         if not r.get("ok"):
             self.ext_label.setText("扩展状态未知")
             self.ext_label.setStyleSheet("color: #9ca3af;")
             return
         if r.get("seen_recently"):
-            self.ext_label.setText("● 扩展已连接")
+            self.ext_label.setText("● 扩展已连接" + _tail(r))
             self.ext_label.setStyleSheet("color: #22c55e; font-weight: 600;")
             self.ext_label.setToolTip("浏览器扩展工作正常；点击查看详情")
         elif r.get("last_seen"):
-            self.ext_label.setText("● 扩展已休眠")
+            self.ext_label.setText("● 扩展已休眠" + _tail(r))
             self.ext_label.setStyleSheet("color: #f59e0b;")
             self.ext_label.setToolTip(
                 "扩展最近活跃过，但当前没有心跳（浏览器关闭后会休眠）。点击查看详情"
@@ -3726,7 +3860,7 @@ class MainWindow(QMainWindow):
         """Raise the existing window (used when a second instance starts)."""
         self._show_front()
         for token in (payload or "").split():
-            if token.lower().startswith(("http://", "https://")):
+            if is_downloadable_url(token):
                 self._add_url(token)
 
     def _show_front(self):
@@ -3772,7 +3906,7 @@ class MainWindow(QMainWindow):
         elif e.mimeData().hasText():
             urls = [e.mimeData().text()]
         for u in urls:
-            if u.lower().startswith(("http://", "https://")):
+            if is_downloadable_url(u):
                 self._add_url(u.strip())
 
     def closeEvent(self, e):
@@ -4082,7 +4216,7 @@ def main(argv=None) -> int:
     app.set_main_window(win)
     guard.on_message(lambda payload: win.wake(payload))
     for token in rest:
-        if token.lower().startswith(("http://", "https://")):
+        if is_downloadable_url(token):
             win._add_url(token)
     win.show()
     if smoke:
