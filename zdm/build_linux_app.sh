@@ -262,7 +262,11 @@ fi
 # 本文件里写出的每一个 Firefox 扩展 ID 都要是上面这一个（含下面嵌进 portable
 # 包里的那份 install.sh —— 那段是引号 heredoc，构建期不展开，只能靠这里兜住）。
 # 匹配串由 GECKO_ID 拼出来，避免这条断言把自己也扫进去。
-BAD_GECKO="$(grep -o "${GECKO_ID%%@*}@[A-Za-z0-9._-]*" "$SRC/build_linux_app.sh" 2>/dev/null | grep -vx "$GECKO_ID" | sort -u)"
+# `|| true` 是必需的，不是装饰：脚本开头是 set -euo pipefail，而「一处都没抄错」时
+# grep -vx 没有任何输出、返回 1，pipefail 把这个非零状态带出命令替换，赋值语句本身
+# 就成了失败命令 —— 于是断言在一切正常的那条路上把整场构建静默杀掉（CI 上就是
+# 「==> staging the .deb」之后什么也没有、exit 1）。
+BAD_GECKO="$(grep -o "${GECKO_ID%%@*}@[A-Za-z0-9._-]*" "$SRC/build_linux_app.sh" 2>/dev/null | grep -vx "$GECKO_ID" | sort -u || true)"
 if [ -n "$BAD_GECKO" ]; then
     echo "ERROR: build_linux_app.sh 里有与 GECKO_ID 不一致的 Firefox 扩展 ID：$BAD_GECKO" >&2
     exit 1
