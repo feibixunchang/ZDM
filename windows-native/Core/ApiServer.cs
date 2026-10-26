@@ -363,7 +363,16 @@ public sealed class ApiServer : IDisposable
             var body = await ReadJsonAsync(ctx);
             if (body is null)
                 return Fail(400, "no config supplied");
-            var cfg = manager.SetConfig(body);
+            AppConfig cfg;
+            try
+            {
+                cfg = manager.SetConfig(body);
+            }
+            catch (FormatException e)
+            {
+                // 端口/连接数写了字母、开关写了 "maybe"：说清楚比默默什么都不改好。
+                return Fail(400, $"配置项无效：{e.Message}");
+            }
             return Results.Json(new JsonObject
             {
                 ["ok"] = true,

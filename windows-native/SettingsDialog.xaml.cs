@@ -249,7 +249,17 @@ public partial class SettingsDialog : Window
         if (dir is not null)
             patch["download_dir"] = dir;
 
-        _manager.SetConfig(patch);
+        try
+        {
+            _manager.SetConfig(patch);
+        }
+        catch (FormatException e)
+        {
+            // 范围不合法（连接数 999 之类）要说出来，而不是让「保存」按钮炸掉。
+            MessageBox.Show(this, e.Message, "设置未保存",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         DialogResult = true;
         Close();
     }

@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.16.3**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.16.4**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.16.3_amd64.deb` | `sudo apt install ./zdm_1.16.3_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.16.4_amd64.deb` | `sudo apt install ./zdm_1.16.4_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.16.3.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.16.4.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.16.3
+bash zdm/build_linux_app.sh ./linux-build 1.16.4
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -160,6 +160,20 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 - 工具栏「＋下载」在有链接时直接进清晰度选择，只弹一次窗。
 - Linux「打开 / 目录」改用 GUI 会话唤起，修复后台服务没有 DISPLAY 导致
   按钮点了没反应；Windows 正文字体统一雅黑 10pt + 整数缩放，减少发虚。
+
+**改了设置却没生效** —— v1.16.4 起配置先整批校验、再一次性落盘：
+
+- 布尔开关认 `true/false/yes/no/on/off`。`zdm config mirror_accel off` 现在是真
+  关掉；以前 `bool("off")` 等于 True，开关会被写成反的。
+- 数字项认 `"16"` 这类字符串写法，并加了区间：连接数 1~32、同时任务数 1~32、
+  端口 1~65535、限速 ≥0、超时 1~3600。网页版把输入框**清空**时 `Number('')`
+  是 0，以前会照样存进去（下载退化成单线程、队列直接卡死），现在保存前就按
+  字段名提示「单任务连接数 要填数字」。
+- 下载目录不许留空；目录建不出来（没权限）当场报错，不会留下半新半旧的配置。
+- 写坏一项（`speed_limit fast`）服务端回 400 并指名是哪一项，CLI 退出码 1，
+  桌面端状态栏和网页版给中文提示，同一批里其它项也不会被偷偷改掉。
+
+端口改动仍需重启服务才生效。
 
 **每次失败的具体原因会写到** `download-errors.log`（Windows：`%APPDATA%\ZDM\`，
 Linux：`~/.config/zdm/`，macOS：`~/Library/Application Support/ZDM/`）。

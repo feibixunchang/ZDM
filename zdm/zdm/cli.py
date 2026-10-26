@@ -244,8 +244,9 @@ def cmd_config(args) -> int:
     port = _resolve_port(args)
     if args.key and args.value is not None:
         raw = args.value
-        if raw.lower() in ("true", "false"):
-            val = raw.lower() == "true"
+        text = raw.strip().lower()
+        if text in ("true", "false", "yes", "no", "on", "off"):
+            val = text in ("true", "yes", "on")
         else:
             try:
                 val = int(raw)
@@ -255,6 +256,11 @@ def cmd_config(args) -> int:
                 except ValueError:
                     val = raw
         r = _api("POST", "config", {args.key: val}, port=port)
+        if not r.get("ok"):
+            # 写错一个字母却打印出一份原样配置，看上去像「改了没生效」，
+            # 其实是请求被拒了。把服务端的理由直说。
+            print(f"error: {r.get('error')}")
+            return 1
         print(json.dumps(r.get("config", {}), ensure_ascii=False, indent=2))
         return 0
     print(json.dumps(load_config(), ensure_ascii=False, indent=2))

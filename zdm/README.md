@@ -144,8 +144,13 @@ zdm add "https://www.bilibili.com/video/BV..." --section 00:01:00-00:05:00
                                        # --section 只适用于视频页面链接，普通文件会被拒绝
 zdm list --json
 zdm pause <id> / zdm resume <id> / zdm restart <id> / zdm remove <id>
-zdm config connections 16
-zdm config speed_limit 2097152          # 2 MB/s
+zdm config connections 16               # 1~32
+zdm config speed_limit 2097152          # 2 MB/s，0 = 不限
+zdm config mirror_accel true            # GitHub / Hugging Face 镜像加速（默认关）
+zdm config clipboard_monitor true       # 复制 http(s) 链接后填入新建下载输入框
+zdm config mirror_accel off             # 关；认 true/false/yes/no/on/off
+                                        # 写坏一项（zdm config port abc）会退出码 1 并指名是哪一项，
+                                        # 且这一批配置整体不生效，不会改一半留一半
 zdm stop
 ```
 

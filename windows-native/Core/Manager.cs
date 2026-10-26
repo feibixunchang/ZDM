@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Zdm.App.Core;
@@ -423,40 +424,119 @@ public sealed class Manager
         return cfg;
     }
 
-    private static void ApplyTo(AppConfig cfg, JsonElement c)
+    private static void ApplyTo(AppConfig cfg, JsonElement c) => ApplyTo(cfg, c, false);
+
+    /// <summary>
+    /// strict=false（读 state.json）：一处写坏的值留着其它项继续生效；
+    /// strict=true（POST /api/config）：换算失败要报给用户，而不是回一份
+    /// 原样配置让人以为「改了没生效」。
+    /// </summary>
+    private static void ApplyTo(AppConfig cfg, JsonElement c, bool strict)
     {
         foreach (var p in c.EnumerateObject())
         {
-            switch (p.Name)
+            // 和 Python 端一致：null 表示「这一项没给」，直接跳过而不是报错。
+            if (p.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) continue;
+            try
             {
-                case "download_dir" when p.Value.ValueKind == JsonValueKind.String:
-                    cfg.DownloadDir = p.Value.GetString() ?? cfg.DownloadDir; break;
-                case "connections" when p.Value.ValueKind == JsonValueKind.Number:
-                    cfg.Connections = p.Value.GetInt32(); break;
-                case "max_active" when p.Value.ValueKind == JsonValueKind.Number:
-                    cfg.MaxActive = p.Value.GetInt32(); break;
-                case "speed_limit" when p.Value.ValueKind == JsonValueKind.Number:
-                    cfg.SpeedLimit = p.Value.GetInt64(); break;
-                case "proxy" when p.Value.ValueKind == JsonValueKind.String:
-                    cfg.Proxy = p.Value.GetString() ?? ""; break;
-                case "max_retries" when p.Value.ValueKind == JsonValueKind.Number:
-                    cfg.MaxRetries = p.Value.GetInt32(); break;
-                case "timeout" when p.Value.ValueKind == JsonValueKind.Number:
-                    cfg.Timeout = p.Value.GetDouble(); break;
-                case "port" when p.Value.ValueKind == JsonValueKind.Number:
-                    cfg.Port = p.Value.GetInt32(); break;
-                case "auto_resume" when p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False:
-                    cfg.AutoResume = p.Value.GetBoolean(); break;
-                case "intercept_browser" when p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False:
-                    cfg.InterceptBrowser = p.Value.GetBoolean(); break;
-                case "auto_show_gui" when p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False:
-                    cfg.AutoShowGui = p.Value.GetBoolean(); break;
-                case "check_updates" when p.Value.ValueKind is JsonValueKind.True or JsonValueKind.False:
-                    cfg.CheckUpdates = p.Value.GetBoolean(); break;
-                case "history_limit" when p.Value.ValueKind == JsonValueKind.Number:
-                    cfg.HistoryLimit = p.Value.GetInt32(); break;
+                Assign(cfg, p.Name, p.Value);
+            }
+            catch (FormatException) when (!strict)
+            {
+                // 旧版本或手工改过的 state 文件：忽略这一项，其余照常恢复。
             }
         }
+    }
+
+    // 数值项的合法区间，和 Python 端 zdm/manager.py 的 CONFIG_RANGES 保持一致。
+    private static readonly Dictionary<string, (double Lo, double Hi)> ConfigRanges = new()
+    {
+        ["connections"] = (1, 32),
+        ["max_active"] = (1, 32),
+        ["max_retries"] = (0, 50),
+        ["speed_limit"] = (0, double.PositiveInfinity),
+        ["port"] = (1, 65535),
+        ["history_limit"] = (1, 100000),
+        ["timeout"] = (1, 3600),
+    };
+
+    private static void Assign(AppConfig cfg, string name, JsonElement v)
+    {
+        switch (name)
+        {
+            case "download_dir": cfg.DownloadDir = Dir(v, name); break;
+            case "proxy": cfg.Proxy = Text(v, name); break;
+            case "connections": cfg.Connections = Int(v, name); break;
+            case "max_active": cfg.MaxActive = Int(v, name); break;
+            case "max_retries": cfg.MaxRetries = Int(v, name); break;
+            case "port": cfg.Port = Int(v, name); break;
+            case "history_limit": cfg.HistoryLimit = Int(v, name); break;
+            case "speed_limit": cfg.SpeedLimit = Long(v, name); break;
+            case "timeout": cfg.Timeout = Num(v, name); break;
+            case "auto_resume": cfg.AutoResume = Flag(v, name); break;
+            case "intercept_browser": cfg.InterceptBrowser = Flag(v, name); break;
+            case "auto_show_gui": cfg.AutoShowGui = Flag(v, name); break;
+            case "check_updates": cfg.CheckUpdates = Flag(v, name); break;
+        }
+    }
+
+    private static string Text(JsonElement v, string name) =>
+        v.ValueKind == JsonValueKind.String
+            ? v.GetString() ?? ""
+            : throw new FormatException($"{name} 需要字符串（收到 {Raw(v)}）");
+
+    private static string Dir(JsonElement v, string name)
+    {
+        // 存一个空目录进去，后面每个任务的路径都是 ""/<file>，界面只会显示
+        // 「保存失败」，看不出是自己把目录框删空了。
+        var text = Text(v, name).Trim();
+        if (text.Length == 0)
+            throw new FormatException("下载目录不能为空");
+        return text;
+    }
+
+    private static double Num(JsonElement v, string name)
+    {
+        // "16" 也算：curl / Python CLI 把数字写成字符串是常见用法，
+        // 之前这类值被静默丢掉，接口却照样回 ok。
+        double value;
+        if (v.ValueKind == JsonValueKind.Number) value = v.GetDouble();
+        else if (v.ValueKind == JsonValueKind.String &&
+                 double.TryParse(v.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var text))
+            value = text;
+        else throw new FormatException($"{name} 需要数字（收到 {Raw(v)}）");
+        if (ConfigRanges.TryGetValue(name, out var range) && (value < range.Lo || value > range.Hi))
+            throw new FormatException($"{name} 需要在 {RangeText(range)} 之间（收到 {Raw(v)}）");
+        return value;
+    }
+
+    private static string RangeText((double Lo, double Hi) range) =>
+        double.IsPositiveInfinity(range.Hi) ? $">= {range.Lo}" : $"{range.Lo}~{range.Hi}";
+
+    private static int Int(JsonElement v, string name) => (int)Math.Round(Num(v, name));
+
+    private static long Long(JsonElement v, string name) => (long)Math.Round(Num(v, name));
+
+    private static bool Flag(JsonElement v, string name)
+    {
+        if (v.ValueKind == JsonValueKind.True) return true;
+        if (v.ValueKind == JsonValueKind.False) return false;
+        if (v.ValueKind == JsonValueKind.Number) return v.GetDouble() != 0;
+        var text = (v.ValueKind == JsonValueKind.String ? v.GetString() : Raw(v))?
+            .Trim().ToLowerInvariant();
+        return text switch
+        {
+            // bool("off") == true 是最坏的读法：开关被写成反的。
+            "0" or "false" or "no" or "off" or "" => false,
+            "1" or "true" or "yes" or "on" => true,
+            _ => throw new FormatException($"{name} 需要 true/false（收到 {Raw(v)}）"),
+        };
+    }
+
+    private static string Raw(JsonElement v)
+    {
+        var text = v.GetRawText();
+        return text.Length > 40 ? text[..40] + "…" : text;
     }
 
     public AppConfig SetConfig(JsonNode patch)
@@ -465,10 +545,22 @@ public sealed class Manager
         {
             var scratch = Config.Clone();
             using var doc = JsonDocument.Parse(patch.ToJsonString());
-            ApplyTo(scratch, doc.RootElement);
+            // 换算失败会在 Config = scratch 之前抛出：不会出现前几项已生效、
+            // 后一项报错的半套配置。目录也先建好，写一个没权限的路径不该让
+            // 配置停在半新半旧。
+            ApplyTo(scratch, doc.RootElement, true);
+            if (!string.IsNullOrWhiteSpace(scratch.DownloadDir))
+            {
+                try
+                {
+                    System.IO.Directory.CreateDirectory(scratch.DownloadDir);
+                }
+                catch (Exception e)
+                {
+                    throw new FormatException($"下载目录无法创建：{scratch.DownloadDir}（{e.Message}）");
+                }
+            }
             Config = scratch;
-            if (!string.IsNullOrWhiteSpace(Config.DownloadDir))
-                System.IO.Directory.CreateDirectory(Config.DownloadDir);
         }
         GlobalLimiter.Rate = Config.SpeedLimit;
         Emit("config", null);

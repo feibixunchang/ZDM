@@ -752,7 +752,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
 
         if parts == ["config"]:
-            self.manager.set_config(body)
+            try:
+                self.manager.set_config(body)
+            except (ValueError, TypeError) as e:
+                # 端口/连接数写了字母、开关写了 "maybe"：说清楚比默默什么都不改好。
+                return self._error(400, f"配置项无效：{e}")
             return self._json({"ok": True, "config": self.manager.config})
 
         if parts == ["open"]:

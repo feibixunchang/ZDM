@@ -295,14 +295,28 @@ $('#btnSettings').onclick = () => {
   $('#dlgSettings').showModal();
 };
 $('#btnSaveCfg').onclick = async () => {
+  // 输入框留空时 Number('') === 0：连接数会变成 0（下载退化成单线程）、
+  // 任务数 0 直接卡死队列。先按字段名问清楚，比让服务端回「收到 0」好读。
+  const num = (sel, label) => {
+    const raw = $(sel).value.trim();
+    if (raw === '' || !isFinite(Number(raw))) { toast(`${label} 要填数字`); return null; }
+    return Number(raw);
+  };
+  const conn = num('#cfgConn', '单任务连接数'); if (conn === null) return;
+  const active = num('#cfgActive', '同时下载任务数'); if (active === null) return;
+  const speed = num('#cfgSpeed', '限速'); if (speed === null) return;
+  const retry = num('#cfgRetry', '失败重试次数'); if (retry === null) return;
+  const port = num('#cfgPort', '服务端口'); if (port === null) return;
+  const dir = $('#cfgDir').value.trim();
+  if (!dir) { toast('下载目录不能为空'); return; }
   const r = await api('POST','config',{
-    download_dir: $('#cfgDir').value.trim(),
-    connections: Number($('#cfgConn').value),
-    max_active: Number($('#cfgActive').value),
-    speed_limit: Number($('#cfgSpeed').value) * 1024,
-    max_retries: Number($('#cfgRetry').value),
+    download_dir: dir,
+    connections: conn,
+    max_active: active,
+    speed_limit: speed * 1024,
+    max_retries: retry,
     proxy: $('#cfgProxy').value.trim(),
-    port: Number($('#cfgPort').value),
+    port: port,
     auto_resume: $('#cfgAuto').checked,
   });
   if (r.ok){ toast('已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }

@@ -18,6 +18,22 @@ from .videopage import is_video_page
 APP_NAME = "zdm"
 DEFAULT_PORT = 9000
 
+# 命令行/JSON 里写下来的「假」：`zdm config mirror_accel off` 必须是关掉。
+# 直接用 bool() 会把 "off"/"no" 这类非空字符串当成 True，等于反着来。
+FALSY_TEXT = {"0", "false", "no", "off", ""}
+TRUTHY_TEXT = {"1", "true", "yes", "on"}
+
+
+def to_bool(value, name: str = "配置项") -> bool:
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in FALSY_TEXT:
+            return False
+        if text in TRUTHY_TEXT:
+            return True
+        raise ValueError(f"{name} 需要 true/false（收到 {value!r}）")
+    return bool(value)
+
 
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -524,26 +540,82 @@ class Manager:
             self._workers.pop(d.id, None)
 
     # ---------------- config / state ----------------
+    BOOL_KEYS = (
+        "auto_resume",
+        "clipboard_monitor",
+        "mirror_accel",
+        "intercept_browser",
+        "auto_show_gui",
+        "check_updates",
+    )
+    INT_KEYS = (
+        "connections", "max_active", "max_retries", "speed_limit", "port",
+        "history_limit",
+    )
+    # 数值项的合法区间（None = 不设上限）。网页版的输入框留空时
+    # Number('') === 0，以前会连着存进去：连接数 0 让下载悄悄退化成单线程，
+    # max_active 0 会把队列卡死，端口 0 则服务根本起不来。
+    CONFIG_RANGES = {
+        "connections": (1, 32),
+        "max_active": (1, 32),
+        "max_retries": (0, 50),
+        "speed_limit": (0, None),
+        "port": (1, 65535),
+        "history_limit": (1, 100000),
+        "timeout": (1, 3600),
+    }
+
+    def _coerce_config(self, k: str, v):
+        """Convert one config value; raise instead of half-applying the batch."""
+        if k in self.INT_KEYS:
+            try:
+                num = int(v)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"{k} 需要整数（收到 {v!r}）") from e
+        elif k == "timeout":
+            try:
+                num = float(v)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"timeout 需要数字（收到 {v!r}）") from e
+        elif k in self.BOOL_KEYS:
+            return to_bool(v, k)
+        elif k == "download_dir":
+            # 清空目录框存进去的是 ""：os.makedirs("") 当场抛错，界面只会显示
+            # 「保存失败」，看不出是自己把目录删空了。
+            text = str(v).strip()
+            if not text:
+                raise ValueError("下载目录不能为空")
+            return text
+        else:
+            return v
+        rng = self.CONFIG_RANGES.get(k)
+        if rng is not None:
+            low, high = rng
+            if num < low or (high is not None and num > high):
+                limit = f"{low}~{high}" if high is not None else f">= {low}"
+                raise ValueError(f"{k} 需要在 {limit} 之间（收到 {v!r}）")
+        return num
+
     def set_config(self, patch: Dict[str, object]) -> Dict[str, object]:
+        # 先全部换算再落盘：一处写错（speed_limit 填了「快点」）不能让前面
+        # 几项已经生效、客户端却只看到一句失败。
+        resolved = [
+            (k, self._coerce_config(k, v))
+            for k, v in patch.items()
+            if k in DEFAULT_CONFIG and v is not None
+        ]
+        # 目录要在改配置之前建：写一个没权限的路径以前会先把其它项改掉、
+        # 再在 makedirs 里抛错，配置变成半新半旧。
+        for k, v in resolved:
+            if k == "download_dir":
+                try:
+                    os.makedirs(str(v), exist_ok=True)
+                except OSError as e:
+                    reason = getattr(e, "strerror", None) or e
+                    raise ValueError(f"下载目录无法创建：{v}（{reason}）") from e
         with self._lock:
-            for k, v in patch.items():
-                if k in DEFAULT_CONFIG and v is not None:
-                    if k in ("connections", "max_active", "max_retries", "speed_limit", "port", "history_limit"):
-                        v = int(v)  # type: ignore[arg-type]
-                    elif k == "timeout":
-                        v = float(v)  # type: ignore[arg-type]
-                    elif k in (
-                        "auto_resume",
-                        "clipboard_monitor",
-                        "mirror_accel",
-                        "intercept_browser",
-                        "auto_show_gui",
-                        "check_updates",
-                    ):
-                        v = bool(v)
-                    self.config[k] = v
-            if "download_dir" in patch:
-                os.makedirs(str(self.config["download_dir"]), exist_ok=True)
+            for k, v in resolved:
+                self.config[k] = v
         self.global_limiter.set_rate(int(self.config.get("speed_limit") or 0))
         self._emit("config")
         self.save_state()
