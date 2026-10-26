@@ -45,6 +45,12 @@ def _parse_hms(text: str) -> float:
         return 0.0
 
 
+def _secs_hms(seconds: float) -> str:
+    """秒 → 'H:MM:SS'（直播「已录多久」的文案）。"""
+    n = max(0, int(seconds or 0))
+    return "%d:%02d:%02d" % (n // 3600, n % 3600 // 60, n % 60)
+
+
 def _yt_should_swap_client(err: str) -> bool:
     """下载失败的报错是否值得换 player_client 再试一次。
 
@@ -716,6 +722,7 @@ class Download:
         stream_audio: str = "",
         stream_subtitle: str = "",
         stream_sub_format: str = "",
+        stream_live_limit: int = 0,
     ):
         self.id = id
         self.url = url
@@ -788,6 +795,21 @@ class Download:
         self.stream_subtitle = str(stream_subtitle or "")
         # 字幕落成的格式（SRT / VTT），空 = 引擎默认（SRT）。
         self.stream_sub_format = str(stream_sub_format or "")
+        # 直播录制的时长上限（秒，0 = 一直录到用户手动停止或直播结束）。
+        # 「这是不是直播」不由用户填：播放列表里没有 #EXT-X-ENDLIST 就是还在播，
+        # 拼命令之前会去读一次清单自己判（见 _start_stream 里的探查）。
+        self.stream_live_limit = max(0, int(stream_live_limit or 0))
+        # 本轮**确实**在按直播录制跑（探查结果 + 引擎确认），以及已录内容时长（秒）。
+        # 直播没有「总大小 / 百分比」可言，界面上要显示的是这个数。
+        self.live = False
+        self._live_secs = 0.0
+        # 引擎直播帧里的状态：Recording = 正在录，Waiting = 还没追上直播边缘
+        # （直播没开始或分片还没生成）。不区分的话用户看到的是一个不动的百分比，
+        # 分不清「在等开播」和「卡住了」。
+        self._live_state = ""
+        # 实时合并出来的那份不断变长的 .ts；直播的「已下多少字节」只能靠量它
+        # （引擎的直播进度帧里不带字节数）。
+        self._live_ts = ""
         # 本轮**实际**走了哪条通道，以及换通道的理由。失败了不能说悄悄换个引擎
         # 跑完就当没事发生：界面上要能看出「这次不是用你选的那个下下来的」。
         self.stream_engine_used = ""
@@ -897,6 +919,13 @@ class Download:
             "stream_audio": self.stream_audio,
             "stream_subtitle": self.stream_subtitle,
             "stream_sub_format": self.stream_sub_format,
+            # 直播录制：这一轮是不是在录、已录多久、时长上限（0 = 录到手动停止）
+            "live": bool(self.live),
+            # 已录多久（秒）+ 引擎那一侧的状态（Recording/Waiting），三端显示
+            # 「直播中 · 已录 0:12:34」/「等待开播」要靠这两个值。
+            "live_recorded": int(self._live_secs),
+            "live_state": str(self._live_state or "") if self.live else "",
+            "stream_live_limit": self.stream_live_limit,
             "audio_url": self.audio_url,
             "audio_only": self.audio_only,
             "yt_page": self.yt_page,
@@ -931,6 +960,7 @@ class Download:
             "stream_audio": self.stream_audio,
             "stream_subtitle": self.stream_subtitle,
             "stream_sub_format": self.stream_sub_format,
+            "stream_live_limit": self.stream_live_limit,
             "priority": self.priority,
             "start_at": self.start_at,
             "original_url": self.original_url,
@@ -968,6 +998,12 @@ class Download:
             # 默认值，键在（哪怕是空串）就照键走，否则用户清空的选择会被复活。
             if data.get("stream_" + _k) is not None:
                 setattr(self, "stream_" + _k, str(data["stream_" + _k]))
+        from . import re_bin as _rb
+
+        # 录播上限同样按「坏值不当坏记录」处理：读不出数字就当不限时长。
+        self.stream_live_limit = max(
+            0, min(record_int(data.get("stream_live_limit"), 0), _rb.LIVE_LIMIT_MAX)
+        )
         self.priority = clamp_priority(data.get("priority") or self.priority)
         self.start_at = max(0.0, record_float(data.get("start_at"), self.start_at or 0))
         self.original_url = str(data.get("original_url") or self.original_url or "")
@@ -1029,6 +1065,18 @@ class Download:
             if not self.size:
                 return 0.0
             return min(99.5, round(self.downloaded / self.size * 100, 2))
+        if self.live and self._live_state:
+            # 直播没有「总量」可言：分片窗口一直在滑，什么时候结束谁也不知道。
+            # 所以百分比只能拿用户设的时长上限当分母；没设上限就报 0，
+            # 界面这时该显示的是「已录多久」。
+            # 认 _live_state 而不只认 live：引擎中途才认出直播时（见 _re_message）
+            # 命令是按点播发的，进度帧还是分片百分比那一套，这时该照旧报百分比，
+            # 不该因为它「是直播」就把进度抹成 0。
+            if self.status == "completed":
+                return 100.0
+            if self.stream_live_limit > 0:
+                return min(99.5, round(self._live_secs / self.stream_live_limit * 100, 2))
+            return 0.0
         # 流媒体：总大小事先不知道，用「已播时长 / 总时长」算百分比。
         # 多阶段拉流（视频轨+音频轨）时 _stream_progress 已经是映射好的
         # 整体百分比（视频 0-85%、音频 85-95%、合流 95-100），优先用它。
@@ -1051,6 +1099,13 @@ class Download:
 
     @property
     def eta(self) -> Optional[int]:
+        if self.live and self._live_state:
+            # 直播的「还剩多久」只有设了录播上限才有意义。引擎直播帧里那两个
+            # 时长是「已录 / 当前窗口」，不是剩余，拿它当 ETA 会显示「还剩 8 秒」
+            # 然后一直录下去。
+            if self.stream_live_limit and self.status in ("downloading", "merging"):
+                return max(0, int(self.stream_live_limit - self._live_secs))
+            return None
         # N_m3u8DL-RE 直接报墙钟剩余秒，比「媒体时长 ÷ 倍速」准，优先用它。
         if self._stream_eta is not None and self.status in ("downloading", "merging"):
             return self._stream_eta
@@ -1629,6 +1684,15 @@ class Download:
         self._emit("started")
         from . import re_bin
 
+        # 先问一句「还在播吗」，再决定给引擎发哪套参数：直播不能发 -M（发了之后
+        # 中途停止就颗粒无收，见 re_bin.LIVE_ARGS 那段），点播不发 -M 又会产出
+        # 没声的散件。等引擎自己打印 "Live stream found" 已经来不及 —— 命令那时
+        # 早发出去了。问不出来（网络挂了 / 403）就当点播，那是一直升级前的行为。
+        self.live = (
+            re_bin.probe_live(self.url, self._http_headers(), self.proxy or "") is True
+        )
+        self._live_secs = 0.0
+        self._live_state = ""
         want = str(self.stream_engine or "auto").strip().lower()
         if want in ("auto", "re"):
             binp = re_bin.binary_path()
@@ -1660,6 +1724,20 @@ class Download:
                 (self.stream_note + "；" if self.stream_note else "")
                 + "本次走的 ffmpeg 通道不支持轨道选择，已按默认轨道下载"
             )
+        if self.live:
+            # 直播录制是 N_m3u8DL-RE 那条通道的能力，走到这里说明用的是 ffmpeg：
+            # 它只会「跟着清单一直拉」，而直播清单永远不写完，任务就挂在那里不
+            # 结束；等用户手动停时 mp4 的索引（moov）也还没写，多半放不出来。
+            # 明确要他换引擎，比假装在录诚实。
+            self.live = False
+            self.status = "error"
+            self.error = (
+                "这是直播流（播放列表还在增长），直播录制要用 N_m3u8DL-RE 引擎，"
+                "而当前走的是 ffmpeg 通道。请在设置里把流媒体引擎改成「自动」或 "
+                "N_m3u8DL-RE；若提示找不到可执行文件，请重装 ZDM。"
+            )
+            self._emit("error")
+            return
         self._run_stream()
 
     def stream_tracks(self) -> Dict[str, str]:
@@ -1686,6 +1764,13 @@ class Download:
         try:
             os.makedirs(tmp_dir, exist_ok=True)
         except OSError as e:
+            if self.live:
+                # 直播不能退回 ffmpeg（理由见 _start_stream 里那段），
+                # 目录都建不起来时更没有意义，直接报错。
+                self.status = "error"
+                self.error = "直播录制失败：流媒体引擎的临时目录建不起来（%s）" % e
+                self._emit("error")
+                return
             self.stream_engine_used = "ffmpeg"
             self.stream_note = "流媒体引擎的临时目录建不起来（%s），改用 ffmpeg" % e
             self._run_stream()
@@ -1698,6 +1783,8 @@ class Download:
                 os.remove(stale)
             except OSError:
                 pass
+        # 直播时引擎把分片实时追加到这个文件上，它的大小就是「已录多少字节」。
+        self._live_ts = os.path.join(self.directory, stem + ".ts")
 
         limit = int(self.speed_limit or 0)
         if not limit and self.global_limiter is not None:
@@ -1717,6 +1804,8 @@ class Download:
             rate_limit=limit,
             ffmpeg=_find_ffmpeg() or "",
             tracks=self.stream_tracks(),
+            live=self.live,
+            live_limit=self.stream_live_limit,
         )
         rc, err_text = re_bin.download(
             cmd,
@@ -1727,6 +1816,11 @@ class Download:
         )
 
         if self._stop.is_set():
+            if self.live:
+                # 「停止录制」不是暂停：直播的边缘已经过去，续传无从谈起，能保住
+                # 的只有已经落到 .ts 里的那一段。收尾统一交给 _finish_live。
+                self._finish_live(stem, rc=rc, err_text=err_text)
+                return
             for half in self._re_outputs(stem):
                 try:
                     os.remove(half)
@@ -1740,6 +1834,12 @@ class Download:
             else:
                 self.status = "paused"
             self._emit(self.status)
+            return
+
+        if self.live:
+            # 引擎自己收工（录到时长上限 / 直播清单写完 ENDLIST）也走同一个收尾：
+            # 成品还是那份 .ts，和用户手动停止没有区别。
+            self._finish_live(stem, rc=rc, err_text=err_text)
             return
 
         produced, biggest = "", -1
@@ -1777,6 +1877,147 @@ class Download:
         # 这种看不懂的名字，删掉又是把已经下到的轨道丢了。
         extras = [p for p in self._re_outputs(stem) if p != produced]
         self._finish_stream(produced, extras)
+
+    def _finish_live(self, stem: str, rc: int = 0, err_text: str = "") -> None:
+        """直播收工：把已经录下的 .ts 转封装成成品。
+
+        三种收工在这里没有区别 —— 用户点「停止录制」、录到时长上限、直播自己
+        写完 ENDLIST —— 因为 --live-real-time-merge 让引擎把分片一段段追加进
+        同一个 .ts，谁喊停都能拿到到目前为止的全部内容（实测 SIGTERM、SIGKILL
+        之后 .ts 依然完整可播）。
+        """
+        from . import re_bin
+
+        ts = self._live_ts or os.path.join(self.directory, stem + ".ts")
+        if self._cancel_requested or self.status == "canceled":
+            # 取消 = 丢弃：录到一半的 .ts 和被杀在合流中途的 mp4 都不留。
+            for half in self._re_outputs(stem):
+                try:
+                    os.remove(half)
+                except OSError:
+                    pass
+            re_bin.drop_work_dir(self.id)
+            self.status = "canceled"
+            self._emit("canceled")
+            return
+        try:
+            recorded_bytes = os.path.getsize(ts)
+        except OSError:
+            recorded_bytes = 0
+        if not recorded_bytes:
+            # 引擎中途才认出这是直播（ZDM 探清单时没认出来，见 _re_message）时，
+            # 命令里带的是点播那套 -M，成品是直接合好的 mp4，压根没有 .ts。
+            # 这条路径也得接住：成品摆在旁边却报「什么都没录到」是说不过去的。
+            produced, biggest = "", 0
+            for cand in self._re_outputs(stem):
+                try:
+                    sz = os.path.getsize(cand)
+                except OSError:
+                    continue
+                if sz > biggest:
+                    produced, biggest = cand, sz
+            if not produced:
+                # 这是最贵的一种失败：用户以为录完了，目录里其实什么都没有。
+                # 引擎被「直播还没开始 / 链接失效 / 这根本不是直播清单」挡住时
+                # 就是这副样子，必须明确报错而不是标成完成。
+                re_bin.drop_work_dir(self.id)
+                self.status = "error"
+                self.error = (
+                    "直播没有录到任何内容（引擎退出码 %s%s）。"
+                    "可能是直播还没开始、直链已过期，或这个播放列表其实是点播。"
+                    % (rc, ("，" + err_text) if err_text else "")
+                )[:600]
+                self._emit("error")
+                return
+            re_bin.drop_work_dir(self.id)
+            self.stream_note = "直播录制结束 · 已录 %s" % _secs_hms(self._live_secs)
+            self._finish_stream(produced, [p for p in self._re_outputs(stem) if p != produced])
+            return
+        # 转封装是另一段耗时（长录像几十秒），这期间状态得说是「合并中」，
+        # 否则用户盯着一个不动的百分比以为卡死了。
+        self.status = "merging"
+        self._stream_eta = None
+        self._emit("progress")
+        produced = self._remux_live(ts, recorded_bytes)
+        re_bin.drop_work_dir(self.id)
+        if self._cancel_requested or self.status == "canceled":
+            for half in (ts, produced):
+                try:
+                    os.remove(half)
+                except OSError:
+                    pass
+            self.status = "canceled"
+            self._emit("canceled")
+            return
+        if produced != ts:
+            try:
+                os.remove(ts)
+            except OSError:
+                pass
+        # 分轨/字幕这类 sidecar 直播时也可能有，跟成品一起改名搬走。
+        extras = [p for p in self._re_outputs(stem) if p not in (produced, ts)]
+        self.stream_note = "直播录制结束 · 已录 %s" % _secs_hms(self._live_secs)
+        self._finish_stream(produced, extras)
+
+    def _remux_live(self, ts: str, size: int) -> str:
+        """把直播录下的 .ts 转封装成 mp4；做不到时原样返回 .ts 路径。
+
+        为什么不让引擎自己合（-M format=mp4）：实测那样只在收工那一刻合流，
+        中途停止会零产出；而 -M 配实时合并、由引擎自己合出来的 mp4 会刷
+        Packet corrupt / Non-monotonous DTS。交给 ffmpeg 做一次 -c copy
+        转封装，实测零警告、时长也和录进去的内容一致。
+        """
+        import subprocess
+
+        dst = os.path.splitext(ts)[0] + ".mp4"
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            self.stream_note = "直播录好了 .ts，但找不到 ffmpeg，没转成 mp4"
+            return ts
+        # -fflags +discardcorrupt：直播被打断时最后半片是坏的，默认会报错退出。
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-fflags", "+discardcorrupt", "-i", ts,
+            "-c", "copy", "-movflags", "+faststart", dst,
+        ]
+        proc = None
+        err = b""
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env={**os.environ, "PATH": os.environ.get("PATH", "")},
+                **_no_window(),
+            )
+            # 和 _mux_audio 同理：要用 Popen 存句柄，取消时能从别的线程杀掉它。
+            self._mux_proc = proc
+            try:
+                # 纯拷流，按 1 MB/s 的保守速度给预算，最少 5 分钟。
+                _o, err = proc.communicate(timeout=max(300.0, size / 1024.0 / 1024.0))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                _o, err = proc.communicate()
+        except Exception as e:  # noqa: BLE001
+            self.stream_note = "直播转封装没跑起来（%s），保留 .ts 录制文件" % e
+            return ts
+        finally:
+            self._mux_proc = None
+        ok = (proc is not None and proc.returncode == 0) and os.path.exists(dst) and os.path.getsize(dst)
+        if not ok:
+            try:
+                if os.path.exists(dst):
+                    os.remove(dst)
+            except OSError:
+                pass
+            if not (self._cancel_requested or self.status == "canceled"):
+                raw = (err or b"").decode("utf-8", "ignore").strip()
+                tail = raw.splitlines()[-1] if raw else "ffmpeg 退出码 %s" % (
+                    getattr(proc, "returncode", None)
+                )
+                self.stream_note = "直播转 mp4 失败（%s），保留 .ts 录制文件" % tail
+            return ts
+        return dst
 
     def _move_stream_extras(self, out: str, final: str, extras: List[str]) -> List[str]:
         """把引擎额外落下的分离轨改名搬到成品旁边，返回搬走后的文件名。
@@ -1824,9 +2065,27 @@ class Download:
 
     def _re_message(self, level: str, msg: str) -> None:
         """引擎日志 → 任务状态。ERROR/WARN 的文案由 download() 带回来，
-        这里只处理合流阶段：分片百分比这时不再变化，不标出来的话用户看到的是
-        「卡在 83%」，而实际正在 ffmpeg 合流。
+        这里只处理两件事：合流阶段（分片百分比这时不再变化，不标出来的话用户
+        看到的是「卡在 83%」，而实际正在 ffmpeg 合流），以及引擎自己认出直播。
+
+        后者是兜底：ZDM 探清单时会跟进 master 的第一条变体，但站点千奇百怪，
+        总有认不出来的时候。命令是按点播参数发的（带 -M、没有实时合并），
+        中途停止会颗粒无收 —— 这件事必须在任务上说清楚，不能让用户以为
+        「停止了就有半成品可播」。
         """
+        if level == "WARN":
+            from . import re_bin
+
+            if not re_bin.is_live_notice(msg):
+                return
+            if not self.live and not self._stop.is_set():
+                self.live = True
+                self.stream_note = (
+                    "引擎判定这是直播流（ZDM 建任务时没认出来），这次按点播参数下载；"
+                    "直播录制要等它自己结束，中途停止可能没有成品。"
+                )
+                self._emit("progress")
+            return
         if level != "MERGE" or self._stop.is_set():
             return
         self.status = "merging"
@@ -1837,6 +2096,21 @@ class Download:
 
     def _re_progress(self, d: dict) -> None:
         if self._stop.is_set():
+            return
+        if d.get("live"):
+            # 直播帧和点播帧不是一种语法：没有字节对、没有剩余时间，能信的只有
+            # 「已录多久」和那个 Recording/Waiting 状态。字节数自己量 .ts。
+            self._live_state = str(d.get("state") or "")
+            self._live_secs = float(d.get("recorded") or 0)
+            try:
+                self._stream_bytes = os.path.getsize(self._live_ts)
+            except OSError:
+                pass
+            sp = d.get("speed") or 0
+            if sp:
+                self._yt_speed = float(sp)
+            self.status = "downloading"
+            self._emit("progress")
             return
         done = int(d.get("done") or 0)
         total = int(d.get("total") or 0)
@@ -2205,7 +2479,7 @@ class Download:
         # 音乐站的 .mp3 实际是 m4a…）。改名时以真正产出的容器为准，
         # 否则「能播的文件被改成打不开的后缀」。
         want = _with_ext(want, out)
-        final = _unique_name(self.directory, want)
+        final = _unique_name(self.directory, want, skip=out)
         target = os.path.join(self.directory, final)
         try:
             os.replace(out, target)
@@ -3006,6 +3280,15 @@ class Download:
         return not self._threads
 
     def pause(self) -> None:
+        if self.status == "downloading" and self.live:
+            # 直播没有「暂停」可言：边缘已经过去，挂起之后无从续传。这里直接按
+            # 停止录制收工，让每一个入口（API 的 pause、GUI 的「全部暂停」、
+            # 退出应用时的 shutdown）拿到同一个结果。
+            # 以前这里照旧标成 paused，于是出现「面板上写着已暂停，下载目录里
+            # 躺着没人认领的 .ts」；退出应用时更糟：状态被覆盖成 paused，
+            # 而线程还在转封装，进程一断就留下半截文件。
+            self.stop_recording()
+            return
         if self.status in ("downloading", "queued"):
             # 先记意图再停线程：调度器可能正在把 queued 改成 downloading，
             # 单靠 _stop 会被 start() 清掉。
@@ -3016,6 +3299,25 @@ class Download:
             self._kill_stream_proc()
             self.status = "paused"
             self._join_workers()
+
+    def stop_recording(self) -> bool:
+        """停止直播录制：杀掉引擎，把已经录下的那段封成成品。
+
+        直播不叫「暂停」：直播的边缘已经过去，分片窗口一直在滑，回头续传无从
+        谈起。所以这个动作的语义是收工（→ 转封装 → completed），不是挂起。
+        """
+        if self.status == "queued":
+            # 还没开录就点停止：没有内容可收尾，而 _stop 会被 _start_stream
+            # 清掉（那样任务照旧开录，「停止」等于没反应）。退回普通暂停，
+            # 用户之后可以继续（从继续那一刻起录）或直接删掉任务。
+            self.pause()
+            return True
+        if self.status != "downloading":
+            return False
+        self._stop.set()
+        self._kill_stream_proc()
+        self._emit("progress")
+        return True
 
     def resume(self) -> None:
         if self.status in ("paused", "error", "canceled"):
@@ -3176,9 +3478,15 @@ def _with_ext(filename: str, path_with_ext: str) -> str:
     return stem + actual
 
 
-def _unique_name(directory: str, filename: str) -> str:
+def _unique_name(directory: str, filename: str, skip: str = "") -> str:
+    """目录里不重名的文件名。skip 是「这就是我要改名那个文件」的路径：
+    它自己不算冲突，否则流媒体成品改名时会把 zdm-<id>.mp4 让给自己，
+    变成 zdm-<id>(1).mp4。
+    """
     base = filename
     path = os.path.join(directory, base)
+    if path == skip:
+        return base
     if not os.path.exists(path) and not os.path.exists(path + ".part"):
         return base
     stem, dot, ext = base.rpartition(".")
@@ -3187,6 +3495,6 @@ def _unique_name(directory: str, filename: str) -> str:
     for i in range(1, 1000):
         cand = f"{stem}({i})" + (("." + ext) if ext else "")
         p = os.path.join(directory, cand)
-        if not os.path.exists(p) and not os.path.exists(p + ".part"):
+        if p != skip and not os.path.exists(p) and not os.path.exists(p + ".part"):
             return cand
     return f"{stem}-{int(time.time())}" + (("." + ext) if ext else "")

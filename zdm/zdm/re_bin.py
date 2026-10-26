@@ -31,6 +31,18 @@ _BINARY_NAMES = ("N_m3u8DL-RE", "N_m3u8DL-RE.exe", "m3u8dl", "N_m3u8DL_RE")
 #   ... 4/6 66.67% 5.23MB/7.85MB512.00KBps00:00:04
 #   ...6/6 100.00%5.72MB - 00:00:00
 _FRAME_RE = re.compile(r"(?P<done>\d+)/(?P<total>\d+)\s+(?P<pct>\d+(?:\.\d+)?)%")
+# 直播帧和点播帧**不是一个语法**（同一版引擎实测）：
+#   Vid Kbps 00m00s/00m24s 1/12 Recording   8% 0.00Bps
+#   Vid Kbps 00m32s/00m32s16/16 Waiting  100% -
+# 前半是「已录时长 / 当前窗口预估时长」，没有字节数对，剩余时间也不是 HH:MM:SS；
+# 只按 _FRAME_RE 找「分片数 空格 百分比」会一路 miss（分片和百分比之间隔着
+# Recording/Waiting），直播任务的进度就永远停在 0。state 这个词是唯一的锚点：
+# 点播的横幅「Vid Kbps | 12 Segments | ~00m24s」里也有 00m24s，别拿时长当锚。
+_LIVE_FRAME_RE = re.compile(
+    r"(?P<h>\d+)m(?P<m>\d+)s\s*/\s*(?P<wh>\d+)m(?P<wm>\d+)s\s*"
+    r"(?P<done>\d+)/(?P<total>\d+)\s+(?P<state>Recording|Waiting)\s*"
+    r"(?P<pct>\d+(?:\.\d+)?)%"
+)
 _SIZE_PAIR_RE = re.compile(
     r"(?P<got>[\d.]+)\s*(?P<got_u>[KMG]?B)\s*/\s*(?P<whole>[\d.]+)\s*(?P<whole_u>[KMG]?B)"
 )
@@ -59,6 +71,27 @@ _MERGE_MSG = "ffmpeg merging..."
 # 分离轨的混流目标（-M format=）。只认 mkv/mp4/ts 三种容器，选 mp4：
 # 和 ffmpeg 兜底通道的产物一致，QuickTime/浏览器也能直接放。
 MUX_FORMAT = "mp4"
+# 直播录制固定加这三个：--live-real-time-merge 让引擎把分片**边录边追加**到
+# 一个 .ts，--live-keep-segments false 让它别再把每片另存一份。
+# 为什么非它不可（实测）：直播时传 -M，引擎只在收工那一刻合流，中途
+# SIGTERM / SIGKILL 之后保存目录里一个文件都没有（分片只剩在临时目录），
+# 用户点「停止录制」等于把这几分钟内容扔掉；而实时合并留下的 .ts 被 -9 杀掉
+# 也还是完整的，ffmpeg remux 成 mp4 零警告、时长与录到的内容一致。
+# 代价是直播不能靠引擎自己封容器，收尾由 core 用 ffmpeg 做。
+LIVE_ARGS = ("--live-real-time-merge", "--live-keep-segments", "false")
+# --live-record-limit 的取值上限：引擎按内容时长计，且要到「首个批次取完」
+# 才判，所以短于站点播放列表窗口的上限不会生效（录到的仍是整个窗口）。
+LIVE_LIMIT_MAX = 24 * 3600
+# 引擎自己认出直播时写的那一行（实测：`WARN : Live stream found`）。
+# 只认这一句，不认「文案里出现 live stream」：引擎在参数报错、帮助回显里也提
+# live stream，按子串匹配会把一个正常点播任务翻成直播，收尾走错分支、
+# 报出「直播没有录到任何内容」这种把人带偏的原因。
+LIVE_NOTICE_RE = re.compile(r"live\s+stream\s+(found|detected)", re.IGNORECASE)
+
+
+def is_live_notice(text: object) -> bool:
+    """一条引擎 WARN 是否是「引擎判定这是直播流」。"""
+    return bool(LIVE_NOTICE_RE.search(str(text or "")))
 
 _UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}
 
@@ -200,6 +233,18 @@ def check_tracks(tracks: Dict[str, str]) -> str:
     return ""
 
 
+def live_hms(seconds: object) -> str:
+    """把秒数写成 --live-record-limit 要的 HH:mm:ss；0 / 无效值返回空串（不限时长）。"""
+    try:
+        n = int(float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    n = min(n, LIVE_LIMIT_MAX)
+    return "%02d:%02d:%02d" % (n // 3600, n % 3600 // 60, n % 60)
+
+
 def build_cmd(
     binp: str,
     url: str,
@@ -213,6 +258,8 @@ def build_cmd(
     rate_limit: int = 0,
     ffmpeg: str = "",
     tracks: Optional[Dict[str, str]] = None,
+    live: bool = False,
+    live_limit: int = 0,
     extra: Optional[List[str]] = None,
 ) -> List[str]:
     """拼一条「下到 save_dir/save_name.<容器>，分片放 tmp_dir」的命令。
@@ -224,6 +271,9 @@ def build_cmd(
     tracks 给了任一选择器时**必须撤掉 --auto-select**：实测两者同传时引擎照旧按
     auto-select 的结果下，显式的 -sv/-sa/-ss 被静默忽略 —— 用户勾了「只要西班牙语」
     却拿到默认音轨，比报错更难查。
+
+    live=True 时按直播录制拼参数（见下面 LIVE_ARGS 那段）：不发 -M、发实时合并，
+    live_limit 是可选的内容时长上限（秒）。
     """
     tracks = tracks or {}
     sel = {k: str(v or "").strip() for k, v in tracks.items() if str(v or "").strip()}
@@ -254,11 +304,18 @@ def build_cmd(
     fmt = str(tracks.get("sub_format") or "").strip().upper()
     if fmt in ("SRT", "VTT"):
         cmd += ["--sub-format", fmt]
-    # 把分离出来的音轨/字幕混进一个容器。不开 -M 时引擎**不合流**（实测多音轨
-    # master + --auto-select 会产出「纯视频 mp4 + 两个 .m4a + 一个 .srt」），
-    # 用户拿到的是没声的画面，还以为是自己挑错了。-M 会把中间分片和 sidecar
-    # 一起清掉，最后只剩 <save-name>.mp4。
-    cmd += ["-M", "format=" + MUX_FORMAT]
+    # 容器怎么封，直播和点播是两条路：
+    #   点播：-M format=mp4，引擎把分离出来的音轨/字幕混进一个文件并清掉散件。
+    #         不开 -M 会产出「没声的 mp4 + 几个 .m4a/.srt」（1.17.2 实测）。
+    #   直播：不能开 -M（合流只在收工那一刻做，中途停止 = 什么都没留下），改发
+    #         LIVE_ARGS，由 core 在录制结束后把不断变长的 .ts 封成 mp4。
+    if live:
+        cmd += list(LIVE_ARGS)
+        hms = live_hms(live_limit)
+        if hms:
+            cmd += ["--live-record-limit", hms]
+    else:
+        cmd += ["-M", "format=" + MUX_FORMAT]
     if threads > 0:
         cmd += ["--thread-count", str(max(1, min(int(threads), 64)))]
     if rate_limit > 0:
@@ -283,15 +340,128 @@ def build_cmd(
     return cmd
 
 
+_EXTM3U_RE = re.compile(r"^\s*#EXTM3U\b")
+_ENDLIST_RE = re.compile(r"^\s*#EXT-X-ENDLIST\b", re.M)
+_STREAM_INF_RE = re.compile(r"^\s*#EXT-X-STREAM-INF\b", re.M)
+
+
+def _open_playlist(url: str, headers: Optional[Dict[str, str]], proxy: str, timeout: float) -> str:
+    import urllib.request
+
+    handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {})]
+    opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(url)
+    for k, v in (headers or {}).items():
+        if v:
+            req.add_header(str(k), str(v))
+    resp = opener.open(req, timeout=timeout)
+    try:
+        body = resp.read(1 << 20)
+    finally:
+        try:
+            resp.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return body.decode("utf-8", "ignore")
+
+
+def _live_from_media(text: str) -> Optional[bool]:
+    """媒体清单（列分片那种）→ 是不是直播；不像清单返回 None。
+
+    判据和引擎一致：没有 #EXT-X-ENDLIST 就是「还在播」。
+    """
+    if not text or not _EXTM3U_RE.match(text.lstrip()) or "#EXTINF" not in text:
+        return None
+    return not _ENDLIST_RE.search(text)
+
+
+def _first_variant(text: str) -> str:
+    """master 清单里第一条变体的地址（可能是相对路径）；没有返回空串。"""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if _STREAM_INF_RE.match(ln):
+            for nxt in lines[i + 1:]:
+                nxt = nxt.strip()
+                if nxt and not nxt.startswith("#"):
+                    return nxt
+    return ""
+
+
+def probe_live(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    proxy: str = "",
+    timeout: float = 8.0,
+) -> Optional[bool]:
+    """取一次播放列表，判断它是不是「还在播」：True=直播 / False=点播 / None=问不出来。
+
+    为什么必须在拼命令**之前**问：引擎自己判直播的依据就是清单里有没有 ENDLIST，
+    而直播和点播要用两套不同的参数（直播不能发 -M，点播不发 -M 会产出没声的散件）。
+    等引擎在 stdout 里说 "Live stream found" 再改参数已经来不及 —— 命令早发出去了。
+    这一步多花一个几百字节的 GET，换的是「停止录制后磁盘上到底有没有成品」。
+
+    master（多码率）清单本身永远不写 ENDLIST，直接按它判会把所有 HLS 都误认成直播，
+    所以跟进第一条变体再看。取不到、看不懂一律返回 None，调用方按点播处理 ——
+    那是这一版之前的行为，不会因为探查失败把事情弄得更糟。
+    """
+    from urllib.parse import urljoin
+
+    try:
+        text = _open_playlist(url, headers, proxy, timeout)
+    except Exception:  # noqa: BLE001
+        return None
+    direct = _live_from_media(text)
+    if direct is not None:
+        return direct
+    if not _STREAM_INF_RE.search(text):
+        return None
+    variant = _first_variant(text)
+    if not variant:
+        return None
+    try:
+        sub = _open_playlist(urljoin(url, variant), headers, proxy, timeout)
+    except Exception:  # noqa: BLE001
+        return None
+    return _live_from_media(sub)
+
+
 def parse_progress(text: str) -> Optional[dict]:
     """从（可能粘连成一串的）输出里取**最后一帧**进度。
 
-    返回 {"done","total","pct","downloaded","total_bytes","speed","eta"}，
-    没有可辨认的帧时返回 None。done/total 是分片数，pct 是引擎算好的百分比；
+    点播帧返回 {"done","total","pct","downloaded","total_bytes","speed","eta"}；
+    直播帧另外带 {"live":True,"recorded":墙钟秒,"state":"Recording"/"Waiting"}，
+    且没有字节对和剩余时间（那两个键给 0/None）。没有可辨认的帧时返回 None。
+    done/total 是分片数，pct 是引擎算好的百分比；
     total_bytes 只是引擎按当前均速外推的估计，不能当文件真实大小用。
     """
     if not text:
         return None
+    lm = None
+    for lm in _LIVE_FRAME_RE.finditer(text):
+        pass
+    if lm is not None:
+        # 直播的 pct 是「窗口占满度」（追上边缘时就是 100%），当进度用会显示成
+        # 「已经下完了」；真正有用的是已录时长，调用方要看 recorded。
+        window = text[lm.end(): lm.end() + 48]
+        stop = _WINDOW_STOP_RE.search(window)
+        if stop:
+            window = window[: stop.start()]
+        speed = 0.0
+        pm = _SPEED_RE.search(window)
+        if pm:
+            speed = abs(_to_bytes(pm.group("v"), pm.group("u")))
+        return {
+            "live": True,
+            "state": lm.group("state"),
+            "recorded": int(lm.group("h")) * 60 + int(lm.group("m")),
+            "done": int(lm.group("done")),
+            "total": int(lm.group("total")),
+            "pct": float(lm.group("pct")),
+            "downloaded": 0,
+            "total_bytes": 0,
+            "speed": speed,
+            "eta": None,
+        }
     m = None
     for m in _FRAME_RE.finditer(text):
         pass

@@ -189,6 +189,9 @@ def cmd_add(args) -> int:
         _v = str(getattr(args, _flag, "") or "").strip()
         if _v:
             payload[_key] = _v
+    # 上限给 0 也要照传（= 不限时长）；只有这个参数完全没出现才不改默认。
+    if getattr(args, "live_limit", None) is not None:
+        payload["stream_live_limit"] = args.live_limit
     if args.header:
         headers = {}
         for h in args.header:
@@ -560,6 +563,14 @@ def build_parser() -> argparse.ArgumentParser:
         help='HLS/DASH subtitle track, e.g. \'lang="eng"\' or all',
     )
     s.add_argument("--sub-format", dest="sub_format", help="subtitle format: SRT or VTT")
+    # 直播录制时长上限：秒或 HH:MM:SS 都收（校验在 manager 那一层，四端同一口径）。
+    s.add_argument(
+        "--live-limit",
+        dest="live_limit",
+        metavar="SECONDS|HH:MM:SS",
+        help="live stream only: stop recording after this long "
+        "(0 or omit = record until you stop it)",
+    )
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_add)
 

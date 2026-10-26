@@ -116,6 +116,8 @@
         <option value="SRT">字幕格式：SRT</option>
         <option value="VTT">字幕格式：VTT</option>
       </select>
+      <input id="fliv" placeholder='直播录制上限 如 30:00' style="width:170px"
+        title='只对接到「还在播的」直播流（m3u8 里还没有 #EXT-X-ENDLIST）时生效：录到时长就收工，已录的部分封成成品。&#10;留空＝一直录到你点「停止录制」或直播自己结束。写 30:00 或 1:00:00 都行，上限 24 小时。&#10;很多直播站只保留最近几十秒分片，设得比站点窗口短并不会只下这么长；点播不受这项影响。'>
     </div>
   </div>
 
@@ -189,6 +191,13 @@ const fmtTime = s => {
   const h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = s%60;
   return h ? `${h}h${m}m` : m ? `${m}m${sec}s` : `${sec}s`;
 };
+// 直播录制没有「已下 X / 共 Y」：分片是边录边追加的，能如实展示的是录了多久。
+const fmtRecorded = s => {
+  s = Math.max(0, Math.round(Number(s) || 0));
+  const h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = s%60;
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+           : `${m}:${String(sec).padStart(2,'0')}`;
+};
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const statusText = {queued:'排队中',downloading:'下载中',paused:'已暂停',completed:'已完成',error:'失败',canceled:'已取消',merging:'合并中'};
 
@@ -253,6 +262,14 @@ function render(){
     const canResume = ['paused','error','canceled'].includes(t.status);
     const done = t.status==='completed';
     const merging = t.status==='merging';
+    // 直播任务的状态要说清两件事：在录还是在等开播，以及已经录了多久。
+    // 引擎在直播没开始时也会一直显示 100%（那是「窗口占满度」），照搬百分比
+    // 会让用户以为已经下完了。
+    const rec = n => Math.max(0, Math.round(Number(n) || 0));
+    const liveOn = !!t.live && ['queued','downloading','merging'].includes(t.status);
+    const liveWait = liveOn && !rec(t.live_recorded) && t.live_state === 'Waiting';
+    const pillText = liveOn ? (liveWait ? '等直播开始…' : '直播中')
+                             : (statusText[t.status]||esc(t.status));
     html += `<tr>
       <td>
         <div class="fname">${esc(t.filename)}</div>
@@ -261,12 +278,14 @@ function render(){
       <td>${fmtSize(t.downloaded)} / ${t.size ? fmtSize(t.size) : '未知'}</td>
       <td>
         <div class="bar"><i style="width:${pct}%;background:${done?'var(--ok)':'var(--accent)'}"></i></div>
-        <div class="sub">${pct.toFixed(1)}% · <span class="pill s-${esc(t.status)}">${statusText[t.status]||esc(t.status)}</span>
-        ${t.status==='downloading' ? '· 剩余 '+fmtTime(t.eta) : ''}</div>
+        <div class="sub">${liveOn ? '' : pct.toFixed(1)+'% · '}<span class="pill s-${esc(t.status)}">${pillText}</span>
+        ${liveOn && !liveWait ? '· 已录 '+fmtRecorded(t.live_recorded)+(rec(t.stream_live_limit)?' / '+fmtRecorded(t.stream_live_limit):'') : ''}
+        ${t.status==='downloading' && !liveOn ? '· 剩余 '+fmtTime(t.eta) : ''}
+        ${liveOn && rec(t.stream_live_limit) && t.status==='downloading' ? '· 剩 '+fmtTime(Math.max(0, rec(t.stream_live_limit)-rec(t.live_recorded))) : ''}</div>
       </td>
       <td>${t.status==='downloading' ? fmtSize(t.speed)+'/s' : '—'}</td>
       <td><div class="actions">
-        ${canPause ? `<button class="icon" data-a="pause" data-id="${esc(t.id)}" title="暂停">⏸</button>` : ''}
+        ${canPause ? `<button class="icon" data-a="pause" data-id="${esc(t.id)}" title="${t.live && t.status==='downloading' ? '停止录制（已录的部分会保存下来）' : '暂停'}">⏸</button>` : ''}
         ${canResume ? `<button class="icon" data-a="resume" data-id="${esc(t.id)}" title="继续">▶</button>` : ''}
         ${!done && !merging ? `<button class="icon" data-a="restart" data-id="${esc(t.id)}" title="重新下载">⟳</button>` : ''}
         ${done ? `<button class="icon" data-a="open" data-id="${esc(t.id)}" title="打开文件位置">📂</button>` : ''}
@@ -323,11 +342,12 @@ async function addDownload(){
     if ($('#fsa').value.trim()) body.stream_audio = $('#fsa').value.trim();
     if ($('#fss').value.trim()) body.stream_subtitle = $('#fss').value.trim();
     if ($('#fsf').value) body.stream_sub_format = $('#fsf').value;
+    if ($('#fliv').value.trim()) body.stream_live_limit = $('#fliv').value.trim();
   }
   const r = await api('POST','tasks',body);
   if (!r.ok) return toast(r.error || '添加失败');
   $('#url').value = ''; $('#fname').value = '';
-  ['fsv','fsa','fss'].forEach(id => { $('#'+id).value = ''; });
+  ['fsv','fsa','fss','fliv'].forEach(id => { $('#'+id).value = ''; });
   $('#fsf').value = '';
   toggleTrkBar();
   toast('已加入队列');

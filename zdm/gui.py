@@ -326,6 +326,13 @@ def fmt_eta(s) -> str:
     return f"{sec}秒"
 
 
+def fmt_recorded(secs) -> str:
+    """已录多久：00:23 / 1:02:03。直播没有「总量」，这是唯一有意义的进度数。"""
+    n = max(0, int(_num(secs)))
+    h, m, s = n // 3600, (n % 3600) // 60, n % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
 def fmt_clock(ts) -> str:
     """Unix 时间戳 → 「几点」显示。今天的只给 时:分，更早的带上日期。"""
     try:
@@ -390,6 +397,23 @@ TRACK_SYNTAX_TIP = (
     "也可以整体写 all / best / best2 / worst1。命中 0 条轨道时任务会失败。\n"
     "只有「设置 → 流媒体引擎」是自动或 N_m3u8DL-RE 时才生效；选 ffmpeg 会拒绝。"
 )
+
+
+LIVE_LIMIT_TIP = (
+    "只对接到**还在播的**直播流（m3u8 里还没有 #EXT-X-ENDLIST）时生效：\n"
+    "录到这时长就自动收工，把已经录下的部分封成成品。\n"
+    "留空 = 一直录到你点「停止录制」或直播自己结束。\n"
+    "写 30:00 或 1:00:00 都行；上限 24 小时。\n"
+    "注意：很多直播站只保留最近几十秒的分片，设得比站点窗口短并不会只下这么长，\n"
+    "站点窗口更短时反而会录满整个窗口。点播（电影回放）不受这项影响。"
+)
+
+
+def parse_live_limit(text) -> int:
+    """输入框里的录制时长 → 秒。空 = 0（不限），看不懂抛 ValueError。"""
+    from zdm.manager import normalize_live_limit
+
+    return normalize_live_limit(str(text or "").strip())
 
 
 def _tracks_summary(t: dict) -> str:
@@ -2033,6 +2057,20 @@ class MainWindow(QMainWindow):
             label += f" · 剩 {fmt_eta(t['eta'])}"
         elif status == "error" and t.get("error"):
             label = str(t["error"])[:46]
+        # 直播录制没有「总量」可言（分片窗口一直在滑），进度格里报的是已经录了
+        # 多久；状态格也得说清这是直播而不是普通下载 —— 用户看的是「什么时候
+        # 该点停止」。录完之后就按普通任务显示（那时该看文件大小和完成时刻）。
+        live_text = None
+        if t.get("live") and status in ("queued", "downloading", "merging"):
+            secs = int(_num(t.get("live_recorded")))
+            if not secs and str(t.get("live_state") or "") == "Waiting":
+                label = "等直播开始…"
+            else:
+                label = "已录 " + fmt_recorded(secs)
+                if t.get("eta"):
+                    label += f" · 剩 {fmt_eta(t['eta'])}"
+            if status == "downloading":
+                live_text = "直播中"
 
         speed_text = (
             f"{fmt_size(t.get('speed'))}/s" if status == "downloading" else "—"
@@ -2062,7 +2100,9 @@ class MainWindow(QMainWindow):
         start_at = _num(t.get("start_at"))
         if status == "queued" and start_at > time.time():
             time_text = f"定时 {fmt_clock(start_at)}"
-        return pct, size_text, label, speed_text, STATUS_TEXT.get(status, status), time_text
+        return pct, size_text, label, speed_text, live_text or STATUS_TEXT.get(
+            status, status
+        ), time_text
 
     def _render(self):
         items = self._visible()
@@ -2074,7 +2114,7 @@ class MainWindow(QMainWindow):
         # values that change; structure changes still take the full path.
         sig = tuple(
             (t.get("id"), t.get("status"), t.get("filename"), t.get("source"),
-             t.get("priority"))
+             t.get("priority"), bool(t.get("live")))
             for t in items
         )
         if sig == self._render_sig and self.table.rowCount() == len(items):
@@ -2146,7 +2186,11 @@ class MainWindow(QMainWindow):
             # pause, so the button is shown disabled instead of disappearing
             # (a control that comes and goes per status reads like a bug).
             if status in ("downloading", "queued"):
-                self._glyph_btn(hl, "pause", "暂停这个任务", lambda _=False, i=t["id"]: self._act(i, "pause"))
+                # 直播没有「暂停」：直播的边缘已经过去，接不回去。这个按钮对直播
+                # 任务是停止录制 —— 已经录下的那段会封成成品保住。
+                tip = ("停止录制（已录的部分会保存下来）" if t.get("live")
+                       else "暂停这个任务")
+                self._glyph_btn(hl, "pause", tip, lambda _=False, i=t["id"]: self._act(i, "pause"))
             elif status in ("paused", "error", "canceled"):
                 self._glyph_btn(hl, "play", "继续这个任务", lambda _=False, i=t["id"]: self._act(i, "resume"))
             else:
@@ -3088,12 +3132,22 @@ class MainWindow(QMainWindow):
             w.setToolTip(TRACK_SYNTAX_TIP)
             tf.addRow(label, w)
         tf.addRow("字幕格式", trk_fmt)
+        # 直播录制上限和轨道选择是同一通道（内置 RE）才认的参数，共用一块可见性。
+        live_limit = QLineEdit()
+        live_limit.setPlaceholderText("留空 = 一直录到手动停止；如 30:00 或 1:00:00")
+        live_limit.setToolTip(LIVE_LIMIT_TIP)
+        cur_limit = int(_num(t.get("stream_live_limit")))
+        if cur_limit:
+            live_limit.setText(
+                "%d:%02d:%02d" % (cur_limit // 3600, cur_limit % 3600 // 60, cur_limit % 60)
+            )
+        tf.addRow("直播录制上限", live_limit)
         trk_box.setVisible(is_stream_url and not is_video)
         # 对话框关闭后 isVisible() 永远是 False（父窗口已隐藏），提交时要靠这个
         # 变量而不是控件自己的可见性。
         show_tracks = bool(is_stream_url and not is_video)
         for w in (url, referer, cookie, ua, proxy, sec_start, sec_end,
-                  trk_video, trk_audio, trk_sub):
+                  trk_video, trk_audio, trk_sub, live_limit):
             _zh_standard_menu(w)
         form.addRow("下载地址", url)
         form.addRow("Referer", referer)
@@ -3119,6 +3173,12 @@ class MainWindow(QMainWindow):
                     _section_range(sec_start.text(), sec_end.text())
                 except ValueError as e:
                     QMessageBox.warning(dlg, "选段时间不对", str(e))
+                    return
+            if show_tracks:
+                try:
+                    parse_live_limit(live_limit.text())
+                except ValueError as e:
+                    QMessageBox.warning(dlg, "录制时长不对", str(e))
                     return
             dlg.accept()
 
@@ -3189,6 +3249,10 @@ class MainWindow(QMainWindow):
             payload["stream_sub_format"] = (
                 trk_fmt.currentText() if trk_fmt.currentIndex() else ""
             )
+            new_limit = parse_live_limit(live_limit.text())
+            # 没改过就别回传：正在录的项目改不了这条，回传只是白报错。
+            if new_limit != cur_limit:
+                payload["stream_live_limit"] = new_limit
         self._run(self.api.edit, t["id"], payload)
         self._status("正在保存修改…", hold=4)
 
@@ -3265,8 +3329,12 @@ class MainWindow(QMainWindow):
         tf.addRow("音频轨", trk_audio)
         tf.addRow("字幕轨", trk_sub)
         tf.addRow("字幕格式", trk_fmt)
+        live_limit = QLineEdit()
+        live_limit.setPlaceholderText("留空 = 一直录到手动停止；如 30:00 或 1:00:00")
+        live_limit.setToolTip(LIVE_LIMIT_TIP)
+        tf.addRow("直播录制上限", live_limit)
         for w in (url, name, directory, referer, sec_start, sec_end,
-                  trk_video, trk_audio, trk_sub):
+                  trk_video, trk_audio, trk_sub, live_limit):
             _zh_standard_menu(w)
         form.addRow("链接 URL", url)
         form.addRow("保存为", name)
@@ -3303,6 +3371,11 @@ class MainWindow(QMainWindow):
                 except ValueError as e:
                     QMessageBox.warning(dlg, "选段时间不对", str(e))
                     continue
+            try:
+                limit_secs = parse_live_limit(live_limit.text())
+            except ValueError as e:
+                QMessageBox.warning(dlg, "录制时长不对", str(e))
+                continue
             break
         extra = {"connections": conns.value(), "priority": prio.value()}
         if schedule_cb.isChecked():
@@ -3317,6 +3390,8 @@ class MainWindow(QMainWindow):
             extra["stream_subtitle"] = trk_sub.text().strip()
         if trk_fmt.currentIndex():
             extra["stream_sub_format"] = trk_fmt.currentText()
+        if limit_secs:
+            extra["stream_live_limit"] = limit_secs
         if name.text().strip():
             extra["filename"] = name.text().strip()
         if directory.text().strip():

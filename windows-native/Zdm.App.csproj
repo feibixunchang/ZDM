@@ -25,7 +25,7 @@
     <!-- 版本号跟后端 zdm/__init__.py 的 __version__ 保持一致：
          桌面端、安装包、GitHub Release 三处必须是同一个数字，
          否则「检查更新」看到的最新版本会和标题栏显示的版本互相矛盾。 -->
-    <Version>1.17.2</Version>
+    <Version>1.17.3</Version>
     <Product>ZDM Download Manager</Product>
     <AssemblyTitle>ZDM 下载管理器</AssemblyTitle>
     <Company>ZDM</Company>

@@ -73,6 +73,25 @@ def _track_value(body: dict, key: str):
             return value
     return None
 
+
+_LIVE_LIMIT_KEYS = ("stream_live_limit", "live_limit", "record_limit")
+
+
+def _live_limit_value(body: dict):
+    """直播录制的时长上限（秒），键都没出现时返回 None。
+
+    编辑接口要靠 None 区分「这次没改上限」和「改成不限时长（0）」；数值本身
+    的换算和区间校验交给 manager.normalize_live_limit，四端共用一条口径。
+    """
+    for alias in _LIVE_LIMIT_KEYS:
+        if alias in body:
+            value = body[alias]
+            if value is None or value == "":
+                return 0
+            return value
+    return None
+
+
 # Pinned by the ``key`` field in extension/manifest.json, so it survives
 # reloads and updates. Only this extension may fetch the API token.
 EXTENSION_ID = "mpodbnemeeghjpllgphpemhoogddfhjg"
@@ -686,6 +705,7 @@ class Handler(BaseHTTPRequestHandler):
                     stream_audio=_track_value(body, "stream_audio"),
                     stream_subtitle=_track_value(body, "stream_subtitle"),
                     stream_sub_format=_track_value(body, "stream_sub_format"),
+                    stream_live_limit=_live_limit_value(body),
                     priority=body.get("priority"),
                     start_at=_parse_start_at(body.get("start_at")),
                 )
@@ -758,6 +778,7 @@ class Handler(BaseHTTPRequestHandler):
                         stream_audio=_track_value(body, "stream_audio"),
                         stream_subtitle=_track_value(body, "stream_subtitle"),
                         stream_sub_format=_track_value(body, "stream_sub_format"),
+                        stream_live_limit=_live_limit_value(body),
                         connections=(
                             conns if conns not in (None, "") else None
                         ),

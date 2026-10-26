@@ -115,6 +115,38 @@ def normalize_tracks(cfg: Dict[str, object], raw: Dict[str, object]) -> Dict[str
     return out
 
 
+def normalize_live_limit(value, name: str = "录制时长上限") -> int:
+    """直播录制的时长上限：0 = 一直录到用户手动停止或直播自己结束。
+
+    收两种写法：秒数（1800）和时钟（00:30:00 / 30:00）—— 录直播的人说的是
+    「录半小时」，只认秒会让命令行每次都要心算。换算和校验放在这一层，
+    GUI / 网页 / 命令行 / 扩展走的是同一条口径。
+
+    超上限要报错而不是夹住：这个值最终拼成引擎的 --live-record-limit HH:MM:SS，
+    用户说「录 30 小时」却被悄悄改成 24 小时，等于答应了一件没做的事。
+    """
+    from . import re_bin
+
+    if value in (None, ""):
+        return 0
+    if isinstance(value, str) and ":" in value:
+        from .core import _clock_to_seconds
+
+        num = _clock_to_seconds(value)
+        if num is None:
+            raise ValueError(f"{name}需要秒数或 HH:MM:SS（收到 {value!r}）")
+        value = num
+    num = to_int(value, name, 0)
+    if num < 0:
+        raise ValueError(f"{name}不能是负数（收到 {value!r}）")
+    if num > re_bin.LIVE_LIMIT_MAX:
+        raise ValueError(
+            f"{name}最长 24 小时（{re_bin.LIVE_LIMIT_MAX} 秒），收到 {value!r}。"
+            "要录更久请把上限留空、录完手动停止。"
+        )
+    return num
+
+
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
@@ -396,6 +428,7 @@ class Manager:
         stream_audio: Optional[str] = None,
         stream_subtitle: Optional[str] = None,
         stream_sub_format: Optional[str] = None,
+        stream_live_limit: Optional[int] = None,
     ) -> Download:
         if not url or not str(url).startswith(("http://", "https://")):
             raise ValueError("只支持 http/https 链接")
@@ -446,6 +479,7 @@ class Manager:
             priority=to_priority(priority),
             start_at=float(start_at or 0),
             original_url=original_url,
+            stream_live_limit=normalize_live_limit(stream_live_limit),
             **tracks
         )
         d.set_event_callback(self._on_task_event)
@@ -484,6 +518,12 @@ class Manager:
         # 假的 paused 事件，界面显示暂停、任务却继续跑完。
         if d.status not in ("downloading", "queued"):
             return False
+        if d.status == "downloading" and d.live:
+            # 直播录制没有「暂停」：直播的边缘已经过去，续传无从谈起。这里的
+            # 动作是停止录制 —— 由下载线程把已经录下的 .ts 封成成品并标成
+            # 已完成，所以不能在这外面再发一条 paused（那会把刚完成的任务
+            # 在界面上打回「已暂停」）。
+            return d.stop_recording()
         d.pause()
         self._wait_idle(d)
         self._emit("paused", d)
@@ -516,6 +556,7 @@ class Manager:
         stream_audio: Optional[str] = None,
         stream_subtitle: Optional[str] = None,
         stream_sub_format: Optional[str] = None,
+        stream_live_limit: Optional[int] = None,
     ) -> Dict[str, object]:
         """Edit a task in place. Partial data survives when the URL still fits.
 
@@ -530,6 +571,11 @@ class Manager:
         _t_raw = (stream_video, stream_audio, stream_subtitle, stream_sub_format)
         if d.status in ("completed", "merging"):
             raise ValueError("已完成或正在合并的任务不能修改，请先重新下载")
+        if d.status == "downloading" and d.live:
+            # 录制中的直播不能改：编辑要把任务打回队列重跑，而直播停下就接不回
+            # 之前那段 —— 用户以为只是改个参数，实际丢掉的是已经录了半小时的内容。
+            # 先停止录制（成品会保住），再新建一条。
+            raise ValueError("正在录制的项目不能修改，请先「停止录制」再重新下载")
         if url is not None:
             url = str(url).strip()
             if url and not url.startswith(("http://", "https://")):
@@ -577,6 +623,10 @@ class Manager:
             d.connections = to_connections(connections, d.connections)
             if d.segmenter is not None:
                 d.segmenter.balance(d.connections)
+        if stream_live_limit is not None:
+            # 录制时长上限是拼进引擎命令里的，改完要重跑才生效 —— 正在录的
+            # 已经被上面那道检查挡住，这里改的是排队/暂停/出错的任务。
+            d.stream_live_limit = normalize_live_limit(stream_live_limit)
         if any(v is not None for v in _t_raw):
             # None = 这次没改这一项，留原值；空串 = 用户明确要清掉选择。
             # 改了轨道等于换了要下的内容，已经下完的分片不能续 —— 先删掉。
