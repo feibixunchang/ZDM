@@ -59,9 +59,22 @@ install_pyqt() {
     if "$py" -c "import objc, AppKit" >/dev/null 2>&1; then
       echo "==> PyObjC 已就绪（Dock 图标唤醒窗口）"
     else
-      "$py" -m pip install --user pyobjc-framework-Cocoa >/dev/null 2>&1 \
-        || "$py" -m pip install --user --break-system-packages pyobjc-framework-Cocoa >/dev/null 2>&1 \
-        || echo "==> PyObjC 安装失败，Dock 唤醒将退化为轮询方式（仍可用）"
+      # 最新版 PyObjC 在 macOS 15+/Xcode 16+ 的 SDK 上会以 -Werror 编译失败
+      # （objc_support.m 里 const simd_double4 的默认初始化），用户看到的就是
+      # 「PyObjC 安装失败 → Dock 点击没反应」。10.3.1 有 cp39 universal2
+      # wheel，无需本地编译；它仍依赖新 core 的 wheel，也一并走预编译包。
+      local ok=0 spec
+      for spec in "pyobjc-framework-Cocoa==10.3.1" "pyobjc-framework-Cocoa"; do
+        "$py" -m pip install --user "$spec" >/dev/null 2>&1 \
+          || "$py" -m pip install --user --break-system-packages "$spec" >/dev/null 2>&1 \
+          || continue
+        "$py" -c "import objc, AppKit" >/dev/null 2>&1 && { ok=1; break; }
+      done
+      if [ "$ok" = "1" ]; then
+        echo "==> PyObjC 已就绪（Dock 图标唤醒窗口）"
+      else
+        echo "==> PyObjC 安装失败，Dock 唤醒将退化为轮询方式（仍可用）"
+      fi
     fi
   fi
 }
