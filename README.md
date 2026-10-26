@@ -4,7 +4,7 @@
 
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5），安装后重装系统重装仍可用。
 
-当前版本：**v1.16.5**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.16.6**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -23,9 +23,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` / `ZDM-<version>-x64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**按芯片选择**：Apple Silicon 用 arm64，Intel 用 x64 |
 | macOS | `zdm-macos.zip` | 解压后 `bash install.sh`，自动生成 `ZDM.app` + 登录自启 |
-| Linux | `zdm_1.16.5_amd64.deb` | `sudo apt install ./zdm_1.16.5_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.16.6_amd64.deb` | `sudo apt install ./zdm_1.16.6_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.16.5.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.16.6.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -50,7 +50,7 @@
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.16.5
+bash zdm/build_linux_app.sh ./linux-build 1.16.6
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -172,6 +172,10 @@ v1.15.15 修了重试客户端与直链兜底，v1.15.16 补上了**真正的常
 - 下载目录不许留空；目录建不出来（没权限）当场报错，不会留下半新半旧的配置。
 - 写坏一项（`speed_limit fast`）服务端回 400 并指名是哪一项，CLI 退出码 1，
   桌面端状态栏和网页版给中文提示，同一批里其它项也不会被偷偷改掉。
+- 老版本存下的、或手工改过的 `state.json` 里越界的值也不再原样生效：读回来时
+  数字夹回区间（`max_active=-5` 曾让队列永远起不来、`500` 会一口气开几百个线程），
+  类型写坏的（`connections:"abc"`）退回默认值，端口越界退回 9000 —— 启动时能跑
+  起来比报错更值钱，这些兜底在三端（桌面/网页/命令行/扩展）共用同一张区间表。
 
 端口改动仍需重启服务才生效。
 
@@ -211,7 +215,9 @@ Qt 自身的逻辑）。改成原生主程序后，Dock 图标、点击唤回窗
   不会悄悄套用输入条上残留的值
 - **视频选段下载**：YouTube / B站 等视频页任务可只下一段（如 `00:01:00-00:05:00`），
   桌面端、网页版、CLI 都支持；成品名带区间，同一视频下多段不会互相覆盖。
-  普通文件链接填选段会被明确拒绝（而不是静默下整包）
+  普通文件链接填选段会被明确拒绝（而不是静默下整包）。区间写法在服务入口就校验：
+  写反（结束早于开始）、写成 `5min` 这类当场回 400 说清格式，不会再拖到 yt-dlp
+  跑完才发现「退出码 0 却没有文件」；旧记录里没带 `*` 的写法也能正常下载
 - **剪贴板监听（默认关闭）**：复制 http(s) 链接后自动填入新建下载输入框，
   需要回车确认才开始下载，不会偷偷建任务
 - **GitHub / Hugging Face 镜像加速（默认关闭）**：Release / 归档 / raw 文件走 gh-proxy，

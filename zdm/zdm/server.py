@@ -19,6 +19,7 @@ from . import apitoken
 from . import desktop
 from . import presence
 from . import runtime
+from .core import normalize_section
 from .manager import Manager
 from .videopage import video_page_filename, video_page_url
 
@@ -46,10 +47,7 @@ def _parse_start_at(value) -> float:
 
 def _parse_section(value) -> str:
     """Normalise a yt-dlp section range ("00:01:00-00:05:00" → "*…")."""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    return text if text.startswith("*") else "*" + text
+    return normalize_section(value)
 
 # Pinned by the ``key`` field in extension/manifest.json, so it survives
 # reloads and updates. Only this extension may fetch the API token.
@@ -607,7 +605,10 @@ class Handler(BaseHTTPRequestHandler):
                 and not (body.get("filename") or body.get("name"))
             ):
                 body["filename"] = video_page_filename(url)
-            section = _parse_section(body.get("section"))
+            try:
+                section = _parse_section(body.get("section"))
+            except ValueError as e:
+                return self._error(400, str(e))
             if section and not (body.get("yt_page") or body.get("page_url")):
                 # 普通文件任务没有 yt-dlp 通道，选段只会下整包。静默忽略
                 # 比报错更伤人：用户以为限制生效，结果拉了个全片。

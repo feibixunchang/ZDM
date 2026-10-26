@@ -367,7 +367,9 @@ public sealed class Manager
                 _workers.Remove(id);
         }
 
-        var maxActive = Math.Max(1, Config.MaxActive);
+        // 读取路径已经夹过一遍，这里再兜一次：调度器唯一的并发闸门，
+        // 越界值会让队列永久卡死（-5）或一次开几百个线程（500）。
+        var maxActive = Math.Clamp(Config.MaxActive, 1, 32);
         List<Download> candidates;
         lock (_gate)
         {
@@ -443,8 +445,45 @@ public sealed class Manager
             }
             catch (FormatException) when (!strict)
             {
-                // 旧版本或手工改过的 state 文件：忽略这一项，其余照常恢复。
+                // 旧版本或手工改过的 state 文件：数字越界夹回边界（max_active
+                // 存成 -5 会让调度器永远不给任务开工，存成 500 会一口气开几百
+                // 个线程），其余坏值直接忽略，让其它项照常恢复。
+                Heal(cfg, p.Name, p.Value);
             }
+        }
+    }
+
+    /// <summary>
+    /// Read-path fallback: out-of-range numbers are clamped into
+    /// <see cref="ConfigRanges"/> instead of thrown away, mirroring
+    /// heal_config() in the Python manager. Port is the exception — a stored
+    /// port outside 1~65535 means the file is broken, so fall back to the
+    /// default the desktop client probes instead of binding a port nobody
+    /// can find.
+    /// </summary>
+    private static void Heal(AppConfig cfg, string name, JsonElement v)
+    {
+        if (!ConfigRanges.TryGetValue(name, out var range)) return;
+        double raw;
+        if (v.ValueKind == JsonValueKind.Number) raw = v.GetDouble();
+        else if (v.ValueKind == JsonValueKind.String &&
+                 double.TryParse(v.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var text))
+            raw = text;
+        else return;
+        if (name == "port")
+        {
+            cfg.Port = new AppConfig().Port;
+            return;
+        }
+        var clamped = Math.Clamp(raw, range.Lo, range.Hi);
+        switch (name)
+        {
+            case "connections": cfg.Connections = (int)Math.Round(clamped); break;
+            case "max_active": cfg.MaxActive = (int)Math.Round(clamped); break;
+            case "max_retries": cfg.MaxRetries = (int)Math.Round(clamped); break;
+            case "history_limit": cfg.HistoryLimit = (int)Math.Round(clamped); break;
+            case "speed_limit": cfg.SpeedLimit = (long)Math.Round(clamped); break;
+            case "timeout": cfg.Timeout = clamped; break;
         }
     }
 

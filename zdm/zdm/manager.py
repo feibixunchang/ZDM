@@ -12,7 +12,14 @@ import time
 import uuid
 from typing import Dict, List, Optional
 
-from .core import MAX_CONNECTIONS, Chunk, Download, RateLimiter, Segmenter
+from .core import (
+    MAX_CONNECTIONS,
+    Chunk,
+    Download,
+    RateLimiter,
+    Segmenter,
+    normalize_section,
+)
 from .videopage import is_video_page
 
 APP_NAME = "zdm"
@@ -127,6 +134,85 @@ DEFAULT_CONFIG: Dict[str, object] = {
 }
 
 
+# 配置项的类型表与合法区间。写入（set_config 报错）和读取（heal_config 兜底）
+# 必须共用同一份数字，否则旧版/手改的 state.json 会在重启后原样生效。
+CONFIG_BOOL_KEYS = (
+    "auto_resume",
+    "clipboard_monitor",
+    "mirror_accel",
+    "intercept_browser",
+    "auto_show_gui",
+    "check_updates",
+)
+CONFIG_INT_KEYS = (
+    "connections", "max_active", "max_retries", "speed_limit", "port",
+    "history_limit",
+)
+CONFIG_FLOAT_KEYS = ("timeout",)
+# 数值项的合法区间（None = 不设上限）。网页版的输入框留空时
+# Number('') === 0，以前会连着存进去：连接数 0 让下载悄悄退化成单线程，
+# max_active 0 会把队列卡死，端口 0 则服务根本起不来。
+CONFIG_RANGES = {
+    "connections": (1, MAX_CONNECTIONS),
+    "max_active": (1, 32),
+    "max_retries": (0, 50),
+    "speed_limit": (0, None),
+    "port": (1, 65535),
+    "history_limit": (1, 100000),
+    "timeout": (1, 3600),
+}
+
+
+def clamp_config_number(k: str, num):
+    rng = CONFIG_RANGES.get(k)
+    if rng is None:
+        return num
+    low, high = rng
+    if num < low:
+        return low
+    if high is not None and num > high:
+        return high
+    return num
+
+
+def heal_config(cfg: Dict[str, object]) -> Dict[str, object]:
+    """把已落盘的配置拉回合法取值：类型写坏退回默认值，数字越界就夹到边界。
+
+    set_config 只保证「新写入」的值合法；老版本存下的越界值（max_active=-5
+    会让队列永远起不来，500 会一口气开几百个下载线程；port=0 让服务起不来、
+    客户端却还在敲 9000）只能在这条唯一的读取路径上兜住。启动时能跑起来比
+    报错更值钱，所以这里不抛异常。
+    """
+    healed = dict(cfg)
+    for k in CONFIG_BOOL_KEYS:
+        # null / 缺字段表示「这一项没给」，要退回默认值：to_bool(None) 会是
+        # False，等于悄悄把「重启后自动继续」「自动检查更新」关掉。
+        if healed.get(k) is None:
+            healed[k] = DEFAULT_CONFIG[k]
+            continue
+        try:
+            healed[k] = to_bool(healed[k], k)
+        except ValueError:
+            healed[k] = DEFAULT_CONFIG[k]
+    for k in CONFIG_INT_KEYS + CONFIG_FLOAT_KEYS:
+        cast = int if k in CONFIG_INT_KEYS else float
+        try:
+            num = cast(healed.get(k))
+        except (TypeError, ValueError):
+            healed[k] = DEFAULT_CONFIG[k]
+            continue
+        clamped = cast(clamp_config_number(k, num))
+        # 端口越界不夹到边界：0/99999 说明这份配置本身是坏的，夹到 1 只会让
+        # 服务绑在一个谁都找不到的端口上；退回默认端口才是各端客户端都会试的地址。
+        healed[k] = DEFAULT_CONFIG[k] if k == "port" and clamped != num else clamped
+    text = str(healed.get("download_dir") or "").strip()
+    healed["download_dir"] = text or DEFAULT_CONFIG["download_dir"]
+    if not isinstance(healed.get("site_cookies"), dict):
+        healed["site_cookies"] = {}
+    healed["proxy"] = str(healed.get("proxy") or "")
+    return healed
+
+
 def load_config(state_file: Optional[str] = None) -> Dict[str, object]:
     """Read persisted config only — never starts schedulers or loads tasks."""
     cfg: Dict[str, object] = dict(DEFAULT_CONFIG)
@@ -139,7 +225,7 @@ def load_config(state_file: Optional[str] = None) -> Dict[str, object]:
                 cfg[k] = v
     except Exception:
         pass
-    return cfg
+    return heal_config(cfg)
 
 
 class Manager:
@@ -251,7 +337,7 @@ class Manager:
             # 有页面地址就走 yt-dlp 通道（YouTube 直链不能分块下载）
             yt_page=(yt_page or "") if str(yt_page or "").startswith("http") else "",
             yt_height=to_int(yt_height, "清晰度", 0),
-            section=str(section or ""),
+            section=normalize_section(section),
             priority=to_priority(priority),
             start_at=float(start_at or 0),
             original_url=original_url,
@@ -336,6 +422,10 @@ class Manager:
             url = str(url).strip()
             if url and not url.startswith(("http://", "https://")):
                 raise ValueError("只支持 http/https 链接")
+        # None 表示「这次没改选段」，不能顺手清空；给了值才校验并归一成
+        # yt-dlp 认的 *HH:MM:SS-HH:MM:SS，让文件名标签和实际下的区间一致。
+        if section is not None:
+            section = normalize_section(section)
         if section and not (d.yt_page or (url and is_video_page(url))):
             # 普通文件任务没有 yt-dlp 通道，选了段也只会下整包。与其让用户
             # 以为限制生效，不如直接说清楚。
@@ -540,7 +630,11 @@ class Manager:
     def _tick(self) -> None:
         for tid in [k for k, v in self._workers.items() if not v.is_alive()]:
             self._workers.pop(tid, None)
-        max_active = int(self.config.get("max_active") or 3)
+        # 调度器唯一的并发闸门，读取时再夹一次：config 里若残留 -5，
+        # 「len(running) >= max_active」恒成立，队列会永久卡死；残留 500
+        # 则一次开几百个线程。
+        stored = int(self.config.get("max_active") or 3)
+        max_active = int(clamp_config_number("max_active", stored))
         now = time.time()
         with self._lock:
             running = [d for d in self.downloads.values() if d.is_active()]
@@ -573,44 +667,19 @@ class Manager:
             self._workers.pop(d.id, None)
 
     # ---------------- config / state ----------------
-    BOOL_KEYS = (
-        "auto_resume",
-        "clipboard_monitor",
-        "mirror_accel",
-        "intercept_browser",
-        "auto_show_gui",
-        "check_updates",
-    )
-    INT_KEYS = (
-        "connections", "max_active", "max_retries", "speed_limit", "port",
-        "history_limit",
-    )
-    # 数值项的合法区间（None = 不设上限）。网页版的输入框留空时
-    # Number('') === 0，以前会连着存进去：连接数 0 让下载悄悄退化成单线程，
-    # max_active 0 会把队列卡死，端口 0 则服务根本起不来。
-    CONFIG_RANGES = {
-        "connections": (1, MAX_CONNECTIONS),
-        "max_active": (1, 32),
-        "max_retries": (0, 50),
-        "speed_limit": (0, None),
-        "port": (1, 65535),
-        "history_limit": (1, 100000),
-        "timeout": (1, 3600),
-    }
-
     def _coerce_config(self, k: str, v):
         """Convert one config value; raise instead of half-applying the batch."""
-        if k in self.INT_KEYS:
+        if k in CONFIG_INT_KEYS:
             try:
                 num = int(v)
             except (TypeError, ValueError) as e:
                 raise ValueError(f"{k} 需要整数（收到 {v!r}）") from e
-        elif k == "timeout":
+        elif k in CONFIG_FLOAT_KEYS:
             try:
                 num = float(v)
             except (TypeError, ValueError) as e:
-                raise ValueError(f"timeout 需要数字（收到 {v!r}）") from e
-        elif k in self.BOOL_KEYS:
+                raise ValueError(f"{k} 需要数字（收到 {v!r}）") from e
+        elif k in CONFIG_BOOL_KEYS:
             return to_bool(v, k)
         elif k == "download_dir":
             # 清空目录框存进去的是 ""：os.makedirs("") 当场抛错，界面只会显示
@@ -621,7 +690,7 @@ class Manager:
             return text
         else:
             return v
-        rng = self.CONFIG_RANGES.get(k)
+        rng = CONFIG_RANGES.get(k)
         if rng is not None:
             low, high = rng
             if num < low or (high is not None and num > high):
@@ -710,34 +779,13 @@ class Manager:
                 data = json.load(f)
         except Exception:
             return
-        cfg = data.get("config") or {}
-        for k, v in cfg.items():
-            if k not in DEFAULT_CONFIG or v is None:
-                continue
-            try:
-                if k in (
-                    "connections",
-                    "max_active",
-                    "max_retries",
-                    "speed_limit",
-                    "port",
-                    "history_limit",
-                ):
-                    v = int(v)
-                elif k == "timeout":
-                    v = float(v)
-                elif k in (
-                    "auto_resume",
-                    "clipboard_monitor",
-                    "mirror_accel",
-                    "intercept_browser",
-                    "auto_show_gui",
-                    "check_updates",
-                ):
-                    v = bool(v)
-            except (TypeError, ValueError):
-                continue
-            self.config[k] = v
+        merged = dict(self.config)
+        for k, v in (data.get("config") or {}).items():
+            if k in DEFAULT_CONFIG and v is not None:
+                merged[k] = v
+        # 与 load_config 共用同一套兜底：老版本存下的越界值、手改过的
+        # state.json、以及 bool("off") == True 这类反直觉写法都在这里修好。
+        self.config = heal_config(merged)
         # 限速器在 __init__ 里按默认值 0 建好；不在这里同步，重启后
         # config 里存的限速就完全失效（用户看到「限速 1 MB/s」却满速跑）。
         self.global_limiter.set_rate(

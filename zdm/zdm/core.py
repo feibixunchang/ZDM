@@ -1975,8 +1975,11 @@ class Download:
                 extras = list(extra_args or [])
                 if self.section:
                     # 例如 *00:01:00-00:05:00。yt-dlp 只取落在区间内的分片，
-                    # 再用 ffmpeg 精准切掉两端。
-                    extras += ["--download-sections", self.section]
+                    # 再用 ffmpeg 精准切掉两端。不带 ``*`` 的写法会被当成章节
+                    # 标题正则：匹配不到任何片段时 yt-dlp 退出码 0 却不产出文件，
+                    # 用户只看到一句「没有产出文件」。老状态文件里就存着这种值，
+                    # 所以在这里统一补前缀，而不是指望入口已经处理过。
+                    extras += ["--download-sections", _section_arg(self.section)]
                 if self.audio_only:
                     # 选择器已限定音频；-x 再兜一层：站点只剩合轨格式时
                     # 也能从里面抽出音频，而不是交出带画面的「m4a」。
@@ -2722,6 +2725,46 @@ def _log_download_error(d) -> None:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 - 诊断日志失败不影响下载
         pass
+
+
+def _section_arg(section: str) -> str:
+    """yt-dlp ``--download-sections`` 的取值：时间段必须以 ``*`` 开头。"""
+    text = str(section or "").strip()
+    return text if text.startswith("*") else "*" + text
+
+
+def _clock_to_seconds(text: str) -> Optional[int]:
+    """``[HH:]MM:SS`` → 秒；不是时钟写法时返回 None（不抛异常）。"""
+    parts = str(text or "").strip().split(":")
+    if not 2 <= len(parts) <= 3 or any(not p.isdigit() for p in parts):
+        return None
+    nums = [int(p) for p in parts]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    return nums[0] * 3600 + nums[1] * 60 + nums[2]
+
+
+def normalize_section(value) -> str:
+    """Validate and canonicalise a yt-dlp ``--download-sections`` range.
+
+    以前只是补个 ``*`` 就原样交给 yt-dlp：写反的区间（00:05:00-00:01:00）
+    或随手写的 ``5min`` 要等到 yt-dlp 跑起来才失败，任务列表里只剩一句
+    笼统的错误。在入口校验并归一成 ``*HH:MM:SS-HH:MM:SS``，文件名标签和
+    命令行用的就是同一个值。
+    """
+    text = str(value or "").strip().lstrip("*")
+    if not text:
+        return ""
+    start, sep, end = text.partition("-")
+    a = _clock_to_seconds(start)
+    b = _clock_to_seconds(end)
+    if not sep or a is None or b is None:
+        raise ValueError("选段格式应为「开始-结束」，例如 00:01:00-00:05:00")
+    if b <= a:
+        raise ValueError("选段的结束时间要晚于开始时间")
+    return "*{:02d}:{:02d}:{:02d}-{:02d}:{:02d}:{:02d}".format(
+        a // 3600, a % 3600 // 60, a % 60, b // 3600, b % 3600 // 60, b % 60
+    )
 
 
 def _section_tag(section: str) -> str:

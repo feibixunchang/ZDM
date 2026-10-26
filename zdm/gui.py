@@ -22,6 +22,7 @@ if _HERE not in sys.path:
 from zdm import __version__ as VERSION  # noqa: E402
 from zdm import apitoken, autostart, desktop, runtime, update  # noqa: E402
 from zdm.videopage import is_video_page, is_youtube  # noqa: E402
+from zdm.manager import clamp_config_number  # noqa: E402
 import theme as _theme  # noqa: E402
 
 # ---- 自动检查更新的节奏 -----------------------------------------------------
@@ -258,9 +259,12 @@ def default_port() -> int:
         path = os.path.join(base, "zdm", "state.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return int(json.load(f).get("config", {}).get("port") or 9000)
+            port = int(json.load(f).get("config", {}).get("port") or 9000)
     except Exception:
         return 9000
+    # 老 state.json 里可能存着 port 0/99999：服务不会绑在那个端口上，
+    # 桌面端却一直去敲它，最后显示「无法连接服务」。
+    return int(clamp_config_number("port", port)) if port > 0 else 9000
 
 
 def _num(v, default: float = 0.0) -> float:

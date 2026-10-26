@@ -143,6 +143,7 @@ zdm add URL -c 16                     # 连接数 1~32；越界会被夹到边�
 zdm add URL --start-at 2026-10-27T02:00:00   # 定时开始（也接受 Unix 时间戳）
 zdm add "https://www.bilibili.com/video/BV..." --section 00:01:00-00:05:00
                                        # --section 只适用于视频页面链接，普通文件会被拒绝
+                                       # 写法也校验：结束必须晚于开始，MM:SS / HH:MM:SS 都认
 zdm list --json
 zdm pause <id> / zdm resume <id> / zdm restart <id> / zdm remove <id>
 zdm config connections 16               # 1~32
