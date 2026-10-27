@@ -497,6 +497,15 @@ class Api:
             except Exception:
                 return {"ok": False, "error": raw}
         except Exception as e:  # noqa: BLE001
+            text = str(e) or type(e).__name__
+            # 超时不等于「服务没起」：删除、暂停这类请求很可能已经在服务端做完了，
+            # 只是回话赶在客户端关门之后 —— 以前报「ReadTimeout: The read operation
+            # timed out」，用户以为没删掉，于是反复点删除。
+            if isinstance(e, TimeoutError) or "timed out" in text.lower():
+                return {
+                    "ok": False,
+                    "error": "服务在超时前没有回话；操作可能已经生效，刷新列表确认",
+                }
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def state(self):

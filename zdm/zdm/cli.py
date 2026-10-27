@@ -45,6 +45,14 @@ def _api(method: str, path: str, payload: Optional[dict] = None, port: int = 0,
         except Exception:
             return {"ok": False, "error": body}
     except Exception as e:  # noqa: BLE001
+        text = str(e) or type(e).__name__
+        # 超时不等于「服务没起」：删除、暂停这类请求很可能已经在服务端做完了，
+        # 只是回话赶在客户端关门之后。说成「连不上服务」会让人以为程序坏了并反复点。
+        if isinstance(e, TimeoutError) or "timed out" in text.lower():
+            return {
+                "ok": False,
+                "error": "服务在超时前没有回话；操作可能已经生效，用 zdm list 确认",
+            }
         return {"ok": False, "error": f"service not reachable: {e}"}
 
 

@@ -385,6 +385,11 @@ class Manager:
         self._state_lock = threading.Lock()
         self._listeners: List[queue.Queue] = []
         self._workers: Dict[str, threading.Thread] = {}
+        # 已经删除、但收尾线程还没停的任务 ID。列在这里是为了让 worker 退出时
+        # 补发的事件（canceled / progress）不再推给界面 —— 否则「删除后立刻
+        # 重新出现一条」会替掉现在的假失败。
+        self._closing: set = set()
+        self._finishers: List[threading.Thread] = []
         self.downloads: Dict[str, Download] = {}
         self.config: Dict[str, object] = dict(DEFAULT_CONFIG)
         self.state_file = state_file or os.path.join(config_dir(), "state.json")
@@ -414,6 +419,12 @@ class Manager:
                 self._listeners.remove(q)
 
     def _emit(self, event: str, d: Optional[Download] = None) -> None:
+        if d is not None and event != "removed":
+            with self._lock:
+                if d.id in self._closing:
+                    # 这条任务已经从列表里删掉了，收尾的 worker 再报什么都只会
+                    # 让界面把已删的行重新画出来。
+                    return
         payload = {
             "event": event,
             "id": d.id if d else None,
@@ -534,11 +545,23 @@ class Manager:
         items.sort(key=lambda x: x.created_at, reverse=True)
         return [d.to_dict() for d in items]
 
-    def _wait_idle(self, d: Download, timeout: float = 12.0) -> None:
-        """Wait until the task's runner thread has fully exited."""
+    # 请求线程最多替客户端等这么久。CLI 是 10 秒、桌面端删除是 8 秒，而 worker
+    # 停下手里的写入最坏要十几秒（一次卡住的读就占 30 秒）：在请求线程里等满，
+    # 结局必然是「服务端做完了、客户端报连不上服务」，所以只等这一小段，
+    # 剩下的收尾交给后台线程。
+    SETTLE = 3.0
+
+    def _wait_idle(self, d: Download, timeout: float = 12.0) -> bool:
+        """Wait until the task's runner thread has fully exited.
+
+        Returns whether it exited; False means the caller still has to finish
+        the job without assuming the worker is done.
+        """
         t = self._workers.get(d.id)
-        if t is not None and t.is_alive() and t is not threading.current_thread():
-            t.join(timeout=timeout)
+        if t is None or t is threading.current_thread():
+            return True
+        t.join(timeout=timeout)
+        return not t.is_alive()
 
     def pause(self, task_id: str) -> bool:
         d = self.get(task_id)
@@ -554,8 +577,8 @@ class Manager:
             # 已完成，所以不能在这外面再发一条 paused（那会把刚完成的任务
             # 在界面上打回「已暂停」）。
             return d.stop_recording()
-        d.pause()
-        self._wait_idle(d)
+        d.pause(self.SETTLE)
+        self._wait_idle(d, self.SETTLE)
         self._emit("paused", d)
         return True
 
@@ -565,12 +588,31 @@ class Manager:
             return False
         if d.status not in ("paused", "error", "canceled"):
             return False
-        self._wait_idle(d)
+        if not self._wait_idle(d, self.SETTLE):
+            # 上一轮的线程还没退出就入队，两拨线程会往同一个 .part 里写。
+            # 与其把请求挂十几秒等它（客户端先超时），不如等干净了再入队。
+            self._spawn(self._deferred_resume, (d,))
+            return True
         # 保留 start_at：定时任务被「全部暂停」后再继续，应该回到原定时间，
         # 而不是整批挤到现在一起下。要立刻开始请编辑任务把时间清空。
-        d.resume()
+        d.resume(self.SETTLE)
         self._emit("resumed", d)
         return True
+
+    def _deferred_resume(self, d: Download) -> None:
+        self._wait_idle(d)
+        if d.status in ("paused", "error", "canceled"):
+            d.resume()
+            self._emit("resumed", d)
+
+    def _spawn(self, target, args: tuple = ()) -> None:
+        """把「不能把请求挂住」的收尾挪到后台线程，同时留着句柄好退出时等它。"""
+        # 先清掉已经收工的：线程对象攥着那条任务的 Download，一天删几百条
+        # 就等于攒下几百条永远回收不掉的记录。
+        self._finishers = [t for t in self._finishers if t.is_alive()]
+        t = threading.Thread(target=target, args=args, daemon=True)
+        self._finishers.append(t)
+        t.start()
 
     def set_priority(self, task_id: str, priority: int) -> bool:
         """只改排队档位，不动任务本身。
@@ -702,7 +744,7 @@ class Manager:
         # 原来是暂停的则保持暂停，除非刚设了定时开始时间。
         if was_active or was_error or (d.status == "paused" and d.start_at):
             d.error = None
-            d.resume()
+            d.resume(self.SETTLE)
         self._emit("edited", d)
         self.save_state()
         return {
@@ -718,11 +760,21 @@ class Manager:
         # 合并中/已完成的任务已经（或正在）写出目标文件。不先停掉合并并删掉它，
         # 重下会另存成「文件名(1).mp4」，用户会以为旧文件没删干净。
         was = d.status
+        d.cancel(remove_files=True)
+        if not self._wait_idle(d, self.SETTLE):
+            self._spawn(self._deferred_restart, (d, was))
+            return True
+        self._restart_now(d, was)
+        return True
+
+    def _deferred_restart(self, d: Download, was: str) -> None:
+        self._wait_idle(d)
+        self._restart_now(d, was)
+
+    def _restart_now(self, d: Download, was: str) -> None:
         produced = was == "completed" or (
             was == "merging" and getattr(d, "file_ready", False)
         )
-        d.cancel(remove_files=True)
-        self._wait_idle(d)
         # 取消发生在「.part 已改名、ffmpeg 还没跑完」的窗口里时，file_ready
         # 是等线程退出后才有答案的，所以要在 wait 之后再看一次。
         produced = produced or (
@@ -763,25 +815,27 @@ class Manager:
         # 记下的旧引擎（历史任务加载时可能还是上一个设置）。
         d.stream_engine = str(self.config.get("stream_engine") or "auto")
         self._emit("restarted", d)
-        return True
 
     def cancel(self, task_id: str, remove_files: bool = True) -> bool:
         d = self.get(task_id)
         if not d:
             return False
         was = d.status
-        produced = was == "merging" and getattr(d, "file_ready", False)
         d.cancel(remove_files=remove_files)
-        self._wait_idle(d)
-        produced = produced or (
-            was == "merging" and getattr(d, "file_ready", False)
-        )
-        if remove_files and produced:
+        if self._wait_idle(d, self.SETTLE):
+            self._finish_cancel(d, was, remove_files)
+        else:
+            self._spawn(self._finish_cancel, (d, was, remove_files))
+        return True
+
+    def _finish_cancel(self, d: Download, was: str, remove_files: bool) -> None:
+        # 取消恰好落在「.part 已改名、ffmpeg 还没跑完」的窗口里时，file_ready
+        # 要等线程退出才有答案，所以这一步算在 wait 之后。
+        if remove_files and was == "merging" and getattr(d, "file_ready", False):
             try:
                 os.remove(d.target_path)
             except OSError:
                 pass
-        return True
 
     def remove(self, task_id: str, remove_files: bool = True) -> bool:
         d = self.get(task_id)
@@ -791,45 +845,61 @@ class Manager:
         produced = was == "completed" or (
             was == "merging" and getattr(d, "file_ready", False)
         )
-        if was in ("downloading", "queued", "merging"):
-            # 合并中也是「还在写文件」的状态。以前只把它当普通记录删掉：
-            # ffmpeg 随后仍会把成品写回目录，任务却已经从列表里消失。
-            d.cancel(remove_files=remove_files)
-            self._wait_idle(d)
-            produced = produced or (
-                was == "merging" and getattr(d, "file_ready", False)
-            )
-            if remove_files:
-                paths = [d.part_path, d.meta_path]
-                if produced:
-                    paths.append(d.target_path)
-                for p in paths:
-                    try:
-                        if p and os.path.isfile(p):
-                            os.remove(p)
-                    except OSError:
-                        pass
-        else:
-            if remove_files:
-                # ``part_path``/``meta_path`` only exist for unfinished tasks;
-                # a completed download owns ``target_path``. Deleting the task
-                # used to leave the finished file behind (the GUI's "删除" then
-                # looked like a no-op on disk).
-                paths = [d.part_path, d.meta_path]
-                if produced:
-                    paths.append(d.target_path)
-                for p in paths:
-                    try:
-                        if p and os.path.isfile(p):
-                            os.remove(p)
-                    except OSError:
-                        pass
+        # 合并中也是「还在写文件」的状态。以前只把它当普通记录删掉：
+        # ffmpeg 随后仍会把成品写回目录，任务却已经从列表里消失。
+        if self._workers.get(task_id) is not None or was in ("downloading", "queued", "merging"):
+            # 这里不再原地等 worker 退出：它最坏要十几秒，而命令行 10 秒、桌面端
+            # 8 秒就超时 —— 于是「服务端明明删成了，界面报连不上服务」。列表和
+            # state.json 先更新（这才是用户要的结果），文件与分片目录的清理交给
+            # 后台线程：它有的是时间，而且能等到 worker 松开口再删（Windows 上
+            # 句柄没关是删不掉的）。
+            # 墓碑要先立：worker 被取消时会补发事件，晚一瞬就够把这条已删的任务
+            # 重新画回列表。立了墓碑之后，界面上关于它的最后一个事件只有 removed。
+            with self._lock:
+                self._closing.add(task_id)
+            d.cancel(remove_files=False)
+            with self._lock:
+                self.downloads.pop(task_id, None)
+            self._emit("removed", d)
+            self.save_state()
+            self._spawn(self._finish_removal, (d, remove_files, produced, was))
+            return True
+        if remove_files:
+            # ``part_path``/``meta_path`` only exist for unfinished tasks;
+            # a completed download owns ``target_path``. Deleting the task
+            # used to leave the finished file behind (the GUI's "删除" then
+            # looked like a no-op on disk).
+            self._delete_files(d, produced)
         with self._lock:
             self.downloads.pop(task_id, None)
         self._drop_re_work(task_id)
         self._emit("removed", d)
         self.save_state()
         return True
+
+    def _finish_removal(
+        self, d: Download, remove_files: bool, produced: bool, was: str
+    ) -> None:
+        try:
+            if not self._wait_idle(d):
+                self._wait_idle(d)
+            if remove_files:
+                self._delete_files(
+                    d, produced or (was == "merging" and getattr(d, "file_ready", False))
+                )
+            self._drop_re_work(d.id)
+        finally:
+            with self._lock:
+                self._closing.discard(d.id)
+
+    @staticmethod
+    def _delete_files(d: Download, produced: bool) -> None:
+        for p in ([d.part_path, d.meta_path] + ([d.target_path] if produced else [])):
+            try:
+                if p and os.path.isfile(p):
+                    os.remove(p)
+            except OSError:
+                pass
 
     def _drop_re_work(self, task_id: str) -> None:
         """任务记录删掉时，它在流媒体引擎暂存目录里的分片也没用了。
@@ -1200,6 +1270,11 @@ class Manager:
         for d in list(self.downloads.values()):
             if d.is_active():
                 d.pause()
+        # 删除任务的收尾（等 worker 退出、删文件、回收分片目录）在后台线程里做。
+        # 不给它们一点时间，进程一断这些线程就是 daemon，文件留在磁盘上没人认领；
+        # 但也不能等太久 —— launchd 有自己的退出预算，等过头反而变成「意外退出」。
+        for t in list(self._finishers):
+            t.join(timeout=1.5)
         self.save_state()
 
     # ---------------- shell helpers ----------------

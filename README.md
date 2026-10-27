@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.7**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.8**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.7_amd64.deb` | `sudo apt install ./zdm_1.18.7_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.8_amd64.deb` | `sudo apt install ./zdm_1.18.8_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.7.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.8.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.7
+bash zdm/build_linux_app.sh ./linux-build 1.18.8
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -451,6 +451,23 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.8 = 「删除」不再谎报失败** —— 点删除时，`Manager.remove()` 把 HTTP 请求线程挂在原地：
+先 `_wait_idle` 等 worker 退出（最坏 12 秒），再删 `.part` / `.meta` / 成品、回收 `re-work/<id>`
+分片目录、写 `state.json`；暂停更久，`Download.pause()` 自己还要先 join 一轮连接线程（默认 15 秒）。
+而命令行 10 秒、桌面端 8 秒就超时 —— 于是服务端明明删干净了，界面回一句
+`service not reachable: timed out`，用户以为没删掉，只能反复点。现在请求线程只等 3 秒
+（`Manager.SETTLE`）：列表和 `state.json` 当场更新（这才是用户要的结果），等 worker 退出、删文件、
+回收分片目录挪到后台线程 —— 它有的是时间，而且能等到句柄关掉再删，Windows 上「文件被占用所以删不掉」
+顺带一起解决。`_wait_idle` 现在如实返回「等到了没有」，没等到就把这一步在后台重做一遍，
+而不是默认线程已经停了。继续 / 重下撞上还没退出的 worker 时同样先回话、等干净了再入队
+（两拨线程写同一个 `.part` 是会写坏的）。删除一条正在下的任务，界面上关于它的事件只剩
+`added → removed`：已删的行不会被 worker 收尾时补发的 `canceled` / `progress` 画回来。
+`shutdown()` 退出前给这些收尾线程 1.5 秒 —— 预算刻意这么短，因为 v1.18.3 的教训是等过头会被
+launchd 记成「Python 意外退出」。命令行与桌面端也把「超时」和「服务没起」分开写：前者说
+「操作可能已经生效，刷新列表确认」，不再让人以为程序坏了。离线用例用一个卡住 8 秒的假 worker
+把边界钉住（21 条断言：`remove` 在 1.5 秒内返回、状态与 `state.json` 立刻一致、`.part` 在 worker
+收工后被清掉、`pause` 不等满 8 秒、`resume` / `restart` 先回话后入队、`shutdown` 等得到收尾线程）。
 
 **v1.18.7 = 设置页不再被顶出屏幕** —— 桌面端的「设置」是一整张 25 行的表单，窗口比屏幕高，
 底部那排「保存 / 取消」落在屏幕外面：改完设置点不到保存。这不是难看，是没法用。网页版的设置弹窗

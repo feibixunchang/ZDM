@@ -3329,7 +3329,12 @@ class Download:
         self._threads = [t for t in self._threads if t.is_alive()]
         return not self._threads
 
-    def pause(self) -> None:
+    def pause(self, timeout: float = 15.0) -> bool:
+        """挂起任务；返回连接线程是否在 timeout 内全部退出。
+
+        状态在停线程之前就写好了，等不到退出只是「还没收尾」，不是「没暂停成」——
+        调用方拿这个返回值决定措辞，而不是把没等到当成失败。
+        """
         if self.status == "downloading" and self.live:
             # 直播没有「暂停」可言：边缘已经过去，挂起之后无从续传。这里直接按
             # 停止录制收工，让每一个入口（API 的 pause、GUI 的「全部暂停」、
@@ -3338,7 +3343,7 @@ class Download:
             # 躺着没人认领的 .ts」；退出应用时更糟：状态被覆盖成 paused，
             # 而线程还在转封装，进程一断就留下半截文件。
             self.stop_recording()
-            return
+            return True
         if self.status in ("downloading", "queued"):
             # 先记意图再停线程：调度器可能正在把 queued 改成 downloading，
             # 单靠 _stop 会被 start() 清掉。
@@ -3348,7 +3353,8 @@ class Download:
             # 流媒体任务是 ffmpeg 子进程在写文件，不杀掉它暂停要等整条流下完。
             self._kill_stream_proc()
             self.status = "paused"
-            self._join_workers()
+            return self._join_workers(timeout)
+        return True
 
     def stop_recording(self) -> bool:
         """停止直播录制：杀掉引擎，把已经录下的那段封成成品。
@@ -3369,13 +3375,15 @@ class Download:
         self._emit("progress")
         return True
 
-    def resume(self) -> None:
+    def resume(self, timeout: float = 15.0) -> bool:
         if self.status in ("paused", "error", "canceled"):
-            self._join_workers()
+            settled = self._join_workers(timeout)
             self._pause_requested.clear()
             self._cancel_requested = False
             self.error = None
             self.status = "queued"
+            return settled
+        return True
 
     def cancel(self, remove_files: bool = True) -> None:
         self._pause_requested.clear()
