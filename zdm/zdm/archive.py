@@ -37,6 +37,7 @@ __all__ = [
     "describe",
     "plan_sweep",
     "apply_sweep",
+    "norm_path",
     "TEMP_SUFFIXES",
 ]
 
@@ -241,6 +242,20 @@ def _inside(base: str, path: str) -> bool:
         return False
 
 
+def norm_path(path) -> str:
+    """比较「这个文件是不是那个文件」用的路径键：绝对化 + 解析符号链接。
+
+    任务记录里的目录是建任务时那个字符串，整理时传进来的目录常常是另一条写法
+    （macOS 的 ``/tmp`` 是 ``/private/tmp`` 的链接、外置盘习惯用符号链接、
+    ``~`` 展开方式也可能不同）。纯字符串比较在这种机器上会漏判，而漏判的代价是
+    **把某个任务正在写的文件搬走** —— 宁可多算重，也不能少算。
+    """
+    try:
+        return os.path.realpath(os.path.abspath(str(path or "")))
+    except Exception:  # noqa: BLE001
+        return os.path.abspath(str(path or ""))
+
+
 def plan_sweep(directory, rules, blocked=None, limit=5000):
     """把「按后缀归档」的规则补用到目录里已经下好的文件上，先只出清单不动手。
 
@@ -277,7 +292,7 @@ def plan_sweep(directory, rules, blocked=None, limit=5000):
             "error": "",
             "truncated": False,
         }
-    blocked = {os.path.abspath(str(k)): v for k, v in (blocked or {}).items()}
+    blocked = {norm_path(k): v for k, v in (blocked or {}).items()}
     try:
         names = sorted(os.listdir(base))
     except OSError as e:
@@ -304,7 +319,7 @@ def plan_sweep(directory, rules, blocked=None, limit=5000):
         except OSError as e:
             skipped.append({"name": name, "reason": "stat 失败：%s" % (getattr(e, "strerror", None) or e)})
             continue
-        blocked_src = blocked.get(src)
+        blocked_src = blocked.get(norm_path(src))
         sub = subdir_for(name, norm)
         if not sub:
             continue

@@ -955,14 +955,14 @@ class Manager:
         owner = {}
         for d in list(self.downloads.values()):
             try:
-                final = os.path.abspath(d.target_path)
+                final = archive_mod.norm_path(d.target_path)
             except Exception:  # noqa: BLE001
                 continue
             if d.status == "completed":
                 owner[final] = d.id
                 continue
             why = "任务 %s 还在用它（%s）" % (d.id, d.status)
-            for p in (final, os.path.abspath(d.part_path), os.path.abspath(d.meta_path)):
+            for p in (final, archive_mod.norm_path(d.part_path), archive_mod.norm_path(d.meta_path)):
                 blocked[p] = why
         return blocked, owner
 
@@ -988,14 +988,14 @@ class Manager:
             return plan
         res = archive_mod.apply_sweep(plan)
         for item in res["moved"]:
-            tid = owner.get(os.path.abspath(str(item.get("src") or "")))
+            tid = owner.get(archive_mod.norm_path(item.get("src") or ""))
             d = self.downloads.get(tid) if tid else None
             if d is None:
                 continue
             dst = os.path.abspath(str(item["dst"]))
             # 复核一次：清单是刚才看的，中间用户点了「重新下载」的话这条已经
             # 又在跑，不能把它的记录改成指向那个已经搬走的旧文件。
-            if d.status != "completed" or os.path.abspath(d.target_path) != os.path.abspath(item["src"]):
+            if d.status != "completed" or archive_mod.norm_path(d.target_path) != archive_mod.norm_path(item["src"]):
                 continue
             with self._lock:
                 d.directory = os.path.dirname(dst)

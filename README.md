@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.11**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.12**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.11_amd64.deb` | `sudo apt install ./zdm_1.18.11_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.12_amd64.deb` | `sudo apt install ./zdm_1.18.12_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.11.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.12.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.11
+bash zdm/build_linux_app.sh ./linux-build 1.18.12
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -451,6 +451,18 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.12 = 整理认的是文件，不是路径的那串字符** —— 1.18.11 装到本机、拿真实服务跑第一遍时就抓到
+一个方向很坏的漏判：沙盒目录写成 `/tmp/...`，而 macOS 上它是 `/private/tmp/...` 的链接；任务记录里存的是
+服务端解析过的真路径，界面和命令行传进来的却是链接那一份写法。`manager._sweep_claims` 和
+`archive.plan_sweep` 判断「这个文件是不是某个任务还在用的」用的是字符串比较，于是**一条暂停中的任务
+持有的文件被当成历史欠账搬走了** —— 恰恰是这个功能承诺绝不做的那件事（外置盘用符号链接挂载、
+把 `~/Downloads` 软链到别处的机器都会踩到，而且踩到的人只会看到「下载没了」）。现在两边统一过
+`archive.norm_path`（绝对化 + 解析符号链接），比的是同一个文件而不是一串写法；`owner` 表（搬完要把任务
+记录改到新路径）和动手前那次「这条任务还是 completed、路径还是它」的复核一起跟上。方向也要说清：
+这种漏判只会多搬、不会少搬，所以修完的清单和修前一字一样时才值得放心。补了三类互认用例
+（链接写法扫目录 × 真路径写法的占用表、反过来、换写法清单项不变），纯函数 33 条、接口 25 条、
+桌面端离线 20 条、网页 72 条，并在装机后的真服务上重走一遍整理（沙盒目录用的就是链接写法）。
 
 **v1.18.11 = 规则是后配的，散着的成品要能一次归位** —— v1.18.4 的归档只管「之后」的下载，于是留下一种
 很难受的历史欠账：规则装好之前那几十个文件已经躺在下载目录根上了，界面上没有任何入口能把它们归位，
