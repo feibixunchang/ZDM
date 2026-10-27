@@ -1310,7 +1310,10 @@ class Download:
             # （断点续传的单流任务）不搬：.part/.meta 还在原目录。
             if not os.path.exists(self.part_path) and not os.path.exists(self.meta_path):
                 self._archive_into(self.filename)
-            self.filename = _unique_name(self.directory, self.filename)  # never clobber
+            # skip 带上自己那份 .part：单流任务每次重新探查都会走到这里，而它的
+            # 半截文件正是断点续传的凭据。不算 skip 的话，暂停→继续会把任务改名成
+            # 「xxx(1).bin」，旧 .part 成为孤儿、已下的字节作废。
+            self.filename = _unique_name(self.directory, self.filename, skip=self.part_path)
             # 只有支持 Range 才用分块器。单流任务用它的话，工作线程从不更新
             # 分块位置，downloaded 永远是 0 —— 进度条就会一直卡在 0%。
             self.segmenter = Segmenter(total) if (total and self.supports_range) else None
@@ -3540,10 +3543,13 @@ def _unique_name(directory: str, filename: str, skip: str = "") -> str:
     """目录里不重名的文件名。skip 是「这就是我要改名那个文件」的路径：
     它自己不算冲突，否则流媒体成品改名时会把 zdm-<id>.mp4 让给自己，
     变成 zdm-<id>(1).mp4。
+    skip 也可能是那份文件的 .part —— 断点续传的任务重新探查时，目录里躺着的
+    正是它自己下到一半的 .part，把它当成别人的重名会把任务改名，旧的半截文件
+    当场变成没人认领的孤儿（进度白下，删除也只删得掉新名字那一份）。
     """
     base = filename
     path = os.path.join(directory, base)
-    if path == skip:
+    if path == skip or path + ".part" == skip:
         return base
     if not os.path.exists(path) and not os.path.exists(path + ".part"):
         return base
