@@ -145,6 +145,8 @@ QWidget {{ {base_font} color: {p.text}; }}
 QToolBar {{ background: {p.surface}; border: none; border-bottom: 1px solid {p.border};
     padding: 8px 10px; spacing: 6px; }}
 QToolBar QLabel {{ color: {p.text_muted}; }}
+QWidget#vsep {{ background: {p.border}; }}
+QLabel#toolSummary {{ color: {p.text_muted}; background: transparent; }}
 QLineEdit, QSpinBox {{ background: {p.surface}; border: 1px solid {p.border};
     border-radius: 7px; padding: 6px 9px; color: {p.text}; }}
 QLineEdit:focus, QSpinBox:focus {{ border-color: {p.accent}; }}

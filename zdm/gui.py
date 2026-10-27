@@ -1564,6 +1564,15 @@ class SingleApp:
         return bool(ok)
 
 
+def _vsep() -> "QWidget":
+    """工具条里两组按钮之间的细竖线：颜色走 theme.py 的 QSS（#vsep），跟主题走。"""
+    w = QWidget()
+    w.setObjectName("vsep")
+    w.setFixedWidth(1)
+    w.setFixedHeight(20)
+    return w
+
+
 class MainWindow(QMainWindow):
     def __init__(self, api: Api, port: int):
         super().__init__()
@@ -1641,10 +1650,10 @@ class MainWindow(QMainWindow):
         # Per-task pause / resume live on each row (see _render); the global
         # "pause everything / resume everything" sit next to the filter chips in
         # plain Chinese, so the two levels never look alike.
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(spacer)
-
+        # 输入框自己就是 Expanding 的：第一行的空余全归它，右边两组按钮贴住右缘，
+        # 行中间不再留一块没人认领的空白。两组之间加一根细竖线，和第二行一样是
+        # 「左边一簇 + 中间吃满 + 右边一簇」的节奏。
+        tb.addWidget(_vsep())
         for text, fn in (
             ("打开网页版", self._open_web),
             ("软件发布页", self._open_update_page),
@@ -1669,7 +1678,17 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, k=key: self._set_filter(k))
             self.filter_btns[key] = b
             hl.addWidget(b)
-        hl.addStretch(1)
+        # 第二行中间以前是 addStretch 撑出来的死空白：窗口越宽洞越大，和第一行的洞
+        # 还不对齐，两行摆在一起显得参差。现在这块放一栏实时汇总（进行中几个、总速度、
+        # 排队/暂停/合并/失败/完成各几个），没任务时是一句引导文案 —— 空白变成有内容
+        # 的一栏。内容见 _update_summary()。
+        self.summary_label = QLabel()
+        self.summary_label.setObjectName("toolSummary")
+        self.summary_label.setAlignment(Qt.AlignCenter)
+        self.summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.summary_label.setMinimumWidth(80)
+        self.summary_label.setContentsMargins(10, 0, 10, 0)
+        hl.addWidget(self.summary_label, 1)
         # 「清除已完成 / 打开目录 / 设置」从上面那行挪到这里。默认 1080 宽的窗口里
         # 第一行装不下它们，QToolBar 会弹出「>>」把按钮收进溢出菜单 —— 用户看到的
         # 就是「设置按钮不见了」；而筛选条这一行右侧一直空着四百多像素，正好接住。
@@ -1682,6 +1701,7 @@ class MainWindow(QMainWindow):
         self.btn_resume_all = self._bulk_button(
             hl, "play", "全部继续", "继续所有已暂停的任务", lambda: self._bulk("resume_all")
         )
+        hl.addWidget(_vsep())
         for text, fn in (("打开目录", self._open_dir), ("设置", self._settings)):
             b = QPushButton(text)
             b.clicked.connect(fn)
@@ -1989,6 +2009,7 @@ class MainWindow(QMainWindow):
     def _on_state(self, st: dict):
         self.config = st.get("config") or {}
         self.tasks = st.get("tasks") or []
+        self._update_summary()
         warn = str(st.get("warning") or "")
         # 同一条只提醒一次：轮询每 0.8 秒跑一遍，反复弹同一条反而会让人忽略它。
         if warn and warn != getattr(self, "_state_warning_shown", ""):
@@ -2000,11 +2021,32 @@ class MainWindow(QMainWindow):
         # that was just shown: the poll runs every 0.8s.
         if time.time() < getattr(self, "_status_hold_until", 0.0):
             return
-        running = [t for t in self.tasks if t.get("status") == "downloading"]
-        total_speed = sum(_num(t.get("speed")) for t in running)
+        # 进行中和总速度这些数字搬到工具条中间的汇总栏（_update_summary）去了，
+        # 状态栏只留连接信息，两处不再报同一串数。
         self.statusBar().showMessage(
-            f"桌面端已连接本机服务 · v{VERSION} · 端口 {self.config.get('port', self.port)} · "
-            f"进行中 {len(running)} · 总速度 {fmt_size(total_speed)}/s · 共 {len(self.tasks)} 项"
+            f"桌面端已连接本机服务 · v{VERSION} · 端口 {self.config.get('port', self.port)}"
+        )
+
+    def _update_summary(self) -> None:
+        """工具条第二行中间的实时汇总：把以前那块死空白变成有内容的一栏。"""
+        counts = {}
+        for t in self.tasks:
+            k = t.get("status") or "queued"
+            counts[k] = counts.get(k, 0) + 1
+        parts = []
+        if counts.get("downloading"):
+            speed = sum(_num(t.get("speed")) for t in self.tasks
+                        if (t.get("status") or "queued") == "downloading")
+            parts.append(f"进行中 {counts['downloading']} · {fmt_size(speed)}/s")
+        for key, label in (("queued", "排队"), ("paused", "暂停"),
+                           ("merging", "合并"), ("error", "失败")):
+            if counts.get(key):
+                parts.append(f"{label} {counts[key]}")
+        if counts.get("completed"):
+            parts.append(f"已完成 {counts['completed']}")
+        self.summary_label.setText(
+            " · ".join(parts) if parts
+            else "暂无任务 —— 上面输入链接后回车，或把链接直接拖进窗口"
         )
 
     def _status(self, msg: str, hold: float = 3.0):
