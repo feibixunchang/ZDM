@@ -88,6 +88,14 @@
   .field label{font-size:12px;color:var(--muted)}
   .field.full{grid-column:1/-1}
   .dlg-f{padding:12px 18px;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--border)}
+  /* 播放列表名单：整份清单可能几百条，必须有界可滚，否则对话框被撑出屏幕。 */
+  .listbox{max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px;
+    padding:4px 8px;font-size:12px;background:#fff}
+  .listbox div{display:flex;gap:8px;padding:2px 0;border-bottom:1px dashed #f1f5f9}
+  .listbox div:last-child{border-bottom:none}
+  .listbox i{color:var(--muted);font-style:normal;min-width:34px;text-align:right}
+  .listbox em{color:var(--muted);font-style:normal;margin-left:auto;white-space:nowrap}
+  .listbox .none{padding:10px;color:var(--muted);display:block}
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111827;color:#fff;
     padding:10px 16px;border-radius:8px;font-size:13px;opacity:0;transition:.2s;pointer-events:none;z-index:99}
   .toast.show{opacity:1}
@@ -124,6 +132,7 @@
     <input id="fstart" type="datetime-local" style="width:186px" title="定时开始，留空立即开始">
     <button class="primary" id="btnGo">下载</button>
     <button id="btnBatch" title="一次粘贴多行链接">批量…</button>
+    <button id="btnList" title="把播放列表/合集/频道投稿页展开成一条条任务">播放列表…</button>
     <div class="trkbar" id="trkBar" hidden>
       <span>HLS/DASH 轨道（留空＝自动挑最佳；只在内置流媒体引擎下生效）</span>
       <input id="fsv" placeholder='视频轨 如 res="1280"' title='引擎的轨道选择语法：子键=值，多个用冒号分隔。常用子键：id / lang / name / codecs / res / for；也可整体写 all / best / best2 / worst1。命中 0 条轨道时任务会失败。'>
@@ -189,6 +198,11 @@
         <option value="ffmpeg">只用 ffmpeg</option>
       </select>
     </div>
+    <div class="field full"><label>按后缀自动归档（每行「后缀 = 子目录」，留空=关闭）</label>
+      <textarea id="cfgArchive" rows="5" spellcheck="false"
+        placeholder="mp4,mkv,webm = Video&#10;mp3,m4a,flac = Music&#10;zip,7z,rar = Archives"></textarea>
+      <small>命中的成品落进「下载目录/子目录」，没命中的照旧；字幕/音轨这类附带文件留在成品旁边，不单独归档。只对之后的下载生效，不会搬已经下好的文件。</small>
+    </div>
     <div class="field full"><label><input type="checkbox" id="cfgRpc"> 兼容 aria2 JSON-RPC（AriaNg 等客户端可直接驱动 ZDM）</label></div>
     <div class="field full"><label>RPC 地址（aria2 客户端里填这个）</label>
       <div style="display:flex;gap:6px">
@@ -230,6 +244,45 @@
   <div class="dlg-f">
     <button id="btnBatchCancel">取消</button>
     <button class="primary" id="btnBatchGo">加入队列</button>
+  </div>
+</dialog>
+
+<dialog id="dlgList">
+  <div class="dlg-h">播放列表</div>
+  <div class="dlg-b" style="grid-template-columns:1fr">
+    <div class="field full">
+      <label>清单链接（YouTube 播放列表 / 频道视频页、B 站投稿·合集·收藏夹…）</label>
+      <div style="display:flex;gap:6px">
+        <input id="listUrl" placeholder="https://www.youtube.com/playlist?list=…">
+        <button id="btnListGo" type="button">展开</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>最多展开（条）</label>
+      <input id="listMax" type="number" min="1" max="500" value="100" title="清单越大翻的页越多；频道投稿页一页 30 条，可能要等几十秒">
+    </div>
+    <div class="field">
+      <label>选哪几条</label>
+      <input id="listRange" value="all" placeholder="all 或 1-20、1,3,5-8">
+    </div>
+    <div class="field full"><div id="listInfo" class="sub"></div></div>
+    <div class="field full">
+      <label>名单</label>
+      <div class="listbox" id="listItems"><span class="none">展开后在这里列出</span></div>
+    </div>
+    <div class="field">
+      <label>优先级（数字越大越先下载，留空按 0）</label>
+      <input id="listPrio" type="number" min="-99" max="99">
+    </div>
+    <div class="field">
+      <label>定时开始（留空 = 立即开始，作用于本批全部条目）</label>
+      <input id="listStart" type="datetime-local">
+    </div>
+    <div class="field full"><label><input type="checkbox" id="listSub" checked> 收进以清单标题命名的子目录</label></div>
+  </div>
+  <div class="dlg-f">
+    <button id="btnListCancel">取消</button>
+    <button class="primary" id="btnListAdd" disabled>加入队列</button>
   </div>
 </dialog>
 
@@ -348,6 +401,25 @@ const T_EXACT = {
   '优先级（数字越大越先下载，留空按 0）': 'Priority (higher numbers download first; blank = 0)',
   '定时开始（留空 = 立即开始，作用于本批全部链接）': 'Scheduled start (blank = start now; applies to every link in this batch)',
   '取消': 'Cancel', '加入队列': 'Add to queue',
+  // 播放列表对话框
+  '播放列表': 'Playlist',
+  '播放列表…': 'Playlist…',
+  '把播放列表/合集/频道投稿页展开成一条条任务': 'Expand a playlist / collection / channel upload list into separate tasks',
+  '清单链接（YouTube 播放列表 / 频道视频页、B 站投稿·合集·收藏夹…）': 'Playlist link (YouTube playlist / channel videos tab; bilibili uploads · collections · favorites…)',
+  '展开': 'Expand',
+  '最多展开（条）': 'Expand at most (items)',
+  '清单越大翻的页越多；频道投稿页一页 30 条，可能要等几十秒': 'Bigger lists mean more pages — a channel’s upload tab holds 30 per page, so it can take tens of seconds',
+  '选哪几条': 'Which entries',
+  'all 或 1-20、1,3,5-8': 'all, or 1-20, or 1,3,5-8',
+  '名单': 'Entries',
+  '展开后在这里列出': 'The entries appear here once you expand',
+  '收进以清单标题命名的子目录': 'Put them in a subfolder named after the playlist',
+  '定时开始（留空 = 立即开始，作用于本批全部条目）': 'Scheduled start (blank = start now; applies to every entry in this batch)',
+  // 设置：按后缀归档
+  '按后缀自动归档（每行「后缀 = 子目录」，留空=关闭）': 'Archive by extension (one “extension = subfolder” per line; blank = off)',
+  '命中的成品落进「下载目录/子目录」，没命中的照旧；字幕/音轨这类附带文件留在成品旁边，不单独归档。只对之后的下载生效，不会搬已经下好的文件。':
+    'A finished file whose extension matches lands in “download folder/subfolder”; anything else stays where it was. Sidecar files such as subtitles and extra audio tracks stay next to the media instead of being archived separately. This affects later downloads only — files already downloaded are not moved.',
+  '需要 http(s) 的链接': 'A http(s) link is required',
   '修改任务': 'Edit task',
   '下载地址': 'Download URL',
   '留空则不发送': 'Leave blank to omit',
@@ -370,6 +442,7 @@ const T_EXACT = {
   '重新下载': 'Download again', '打开文件': 'Open file', '在文件夹中显示': 'Show in folder',
   '删除任务（保留文件）': 'Delete task (keep the files)',
   '换引擎的理由': 'Why the engine was switched',
+  '按后缀归档没生效的原因': 'Why extension archiving did not apply',
   // 提示条
   '下载地址不能为空': 'The download URL cannot be empty',
   '已更新，已下载进度保留（开始时自动核对文件）': 'Updated — the downloaded progress is kept (the file is checked again when it starts)',
@@ -378,6 +451,7 @@ const T_EXACT = {
   '已加入队列，到点开始': 'Queued — it starts at the scheduled time',
   '已加入队列': 'Added to the queue',
   '添加失败': 'Could not add the task',
+  '加入失败': 'Could not add the tasks',
   '没找到可下载的链接（http/https/ftp/ftps/sftp）': 'No downloadable links found (http/https/ftp/ftps/sftp)',
   '未知错误': 'Unknown error',
   '删除失败': 'Could not delete', '操作失败': 'Action failed', '保存失败': 'Could not save',
@@ -397,6 +471,65 @@ const T_EXACT = {
 // 模板/拼接出来的句子：先整段精确匹配，不中就按这些规则逐段替换。
 // 规则里带上「·」这类分隔符，拼出来的句子才不会缺标点。
 const T_RULES = [
+  // 播放列表对话框里拼出来的句子
+  [/正在展开…（清单越大越久，频道投稿页一页 30 条）/g,
+   'Expanding… (bigger lists take longer; a channel tab holds 30 per page)'],
+  [/正在建任务…/g, 'Creating tasks…'],
+  [/展开失败：/g, 'Could not expand: '],
+  [/这份清单里没有条目/g, 'this list has no entries'],
+  [/已展开 (\d+) 条/g, 'Expanded $1 item(s)'],
+  [/按上限 (\d+) 条截断，后面还有没列出/g, 'capped at $1 item(s) — more are not listed'],
+  [/已加入 (\d+) 条任务/g, 'Added $1 task(s)'],
+  [/，(\d+) 条失败：/g, ', $1 failed: '],
+  [/( ?)名单只列出前 (\d+) 条，选条按序号照常有效/g, '$1only the first $2 entries are shown; picking by index still works'],
+  [/( ?)(\d+) 条没有可下载的地址，已跳过/g, '$1$2 entries had no downloadable URL and were skipped'],
+  [/这条链接其实只有一段视频/g, 'this link is actually a single video'],
+  // 服务端回的话（清单通道）
+  [/这是播放列表\/合集地址，一条任务装不下整份/g,
+   'This is a playlist/collection link — a single task cannot hold the whole list'],
+  [/（会一集覆盖一集，只留最后一个文件）/g,
+   ' (episodes would overwrite each other and only the last file would stay)'],
+  [/请展开后按条下载/g, 'Expand it and add the entries one by one'],
+  [/网页版「播放列表…」/g, 'the web UI’s "Playlist…"'],
+  [/命令行 zdm add <链接> --playlist/g, 'the CLI: zdm add <link> --playlist'],
+  [/需要 http\(s\) 的播放列表链接/g, 'A http(s) playlist link is required'],
+  [/max_items 需要是整数/g, 'max_items must be a whole number'],
+  [/范围超出清单条数（共 (\d+) 条，收到 (.*?)）/g, 'The range goes past the list ($1 entries in total, got $2)'],
+  [/范围要从小到大，收到 /g, 'A range must go low → high, got '],
+  [/无法识别的序号或范围：/g, 'Unrecognised entry number or range: '],
+  [/没有选中任何一条/g, 'Nothing was selected'],
+  [/播放列表是空的/g, 'The playlist is empty'],
+  [/清单里没有这一条/g, 'That entry is not in the list'],
+  [/没法创建清单子目录 /g, 'Could not create the playlist subfolder '],
+  [/这份清单里没有可下载的条目（可能是私密\/地区限制）/g,
+   'This list has no downloadable entries (it may be private or region-locked)'],
+  [/展开播放列表超时（清单太大或站点在风控）/g,
+   'Expanding the playlist timed out (the list is huge, or the site is rate-limiting)'],
+  [/这条链接里没有可下载的视频/g, 'There is no downloadable video in this link'],
+  // 按后缀归档：设置框里的行校验提示（网页端自己判）+ 服务端 archive.py 回的话
+  // + 任务行上的 archive_note。整句匹配的规则排在前面，片段规则垫后。
+  [/按后缀归档第 (\d+) 行少了等号：要写成「mp4 = Video」/g,
+   'Archive rules: line $1 is missing "=" — write it as “mp4 = Video”'],
+  [/按后缀归档第 (\d+) 行少了后缀：要写成「mp4 = Video」/g,
+   'Archive rules: line $1 is missing the extension — write it as “mp4 = Video”'],
+  [/按后缀归档第 (\d+) 行少了子目录：要写成「mp4 = Video」/g,
+   'Archive rules: line $1 is missing the subfolder — write it as “mp4 = Video”'],
+  [/按后缀归档第 (\d+) 行的子目录「(.*?)」要写成下载目录里面的相对路径/g,
+   'Archive rules: the subfolder “$2” on line $1 must be a relative path inside the download folder'],
+  [/第 (\d+) 行「(.*?)」少了等号：要写成「mp4 = Video」/g,
+   'Line $1 “$2” is missing "=" — write it as “mp4 = Video”'],
+  [/第 (\d+) 行有问题：/g, 'Line $1 has a problem: '],
+  [/归档规则的形状不认识：/g, 'Unrecognised archive rule: '],
+  [/（要「后缀 = 目录」）/g, ' (expected “extension = folder”)'],
+  [/归档规则需要「后缀 = 子目录」的对照表/g, 'Archive rules need an “extension = subfolder” table'],
+  [/归档规则「(.*?)」没写后缀/g, 'The archive rule “$1” has no extension'],
+  [/归档规则「(.*?)」没写要归档到的子目录/g, 'The archive rule “$1” has no subfolder'],
+  [/归档目录「(.*?)」要写成下载目录里面的相对路径/g,
+   'The archive folder “$1” must be a relative path inside the download folder'],
+  [/后缀 \.(.*?) 同时出现在「(.*?)」和「(.*?)」两条规则里，归档到哪条说不清/g,
+   'Extension .$1 is in both “$2” and “$3” — which folder should win is ambiguous'],
+  [/按后缀归档没建出子目录 (.*?)（/g, 'Could not create the archive subfolder $1 ('],
+  [/），文件留在 /g, ') — the file stayed in '],
   [/· 共 (\d+) 项/g, '· $1 items in total'],
   [/总速度/g, 'Total speed'],
   [/本地服务已连接 · (\S+) · 端口 (\d+)/g, 'Local service connected · $1 · port $2'],
@@ -730,7 +863,7 @@ function render(){
     html += `<tr>
       <td>
         <div class="fname">${esc(t.filename || '未命名')}${badge(t)}</div>
-        <div class="sub">${esc(t.url || '')}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}${t.stream_note ? ' · <span style="color:var(--warn)" title="换引擎的理由">'+esc(t.stream_note)+'</span>' : ''}${tracksSummary(t) ? ' · <span class="trkline">'+esc(tracksSummary(t))+'</span>' : ''}</div>
+        <div class="sub">${esc(t.url || '')}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}${t.stream_note ? ' · <span style="color:var(--warn)" title="换引擎的理由">'+esc(t.stream_note)+'</span>' : ''}${t.archive_note ? ' · <span style="color:var(--warn)" title="按后缀归档没生效的原因">'+esc(t.archive_note)+'</span>' : ''}${tracksSummary(t) ? ' · <span class="trkline">'+esc(tracksSummary(t))+'</span>' : ''}</div>
       </td>
       <td>${fmtSize(num(t.downloaded))} / ${t.size ? fmtSize(num(t.size)) : '未知'}</td>
       <td>
@@ -927,6 +1060,12 @@ async function refresh(){
 async function addDownload(){
   const url = $('#url').value.trim();
   if (!url) return toast('请先填入链接');
+  if (PLAYLIST_URL.test(url)){
+    // 清单地址建成一条任务是**错**的（服务端会直接拒绝）：与其让用户点「下载」
+    // 之后看见一条红字，不如把展开对话框开在他面前。
+    openList(url);
+    return;
+  }
   const body = { url, source: 'webui' };
   if ($('#fname').value.trim()) body.filename = $('#fname').value.trim();
   if ($('#fconn').value) body.connections = Number($('#fconn').value);
@@ -985,6 +1124,110 @@ $('#btnBatchGo').onclick = async () => {
   refresh();
 };
 
+// ---- 播放列表：把一份清单展开成 N 条任务 ----
+// 形态表和后端 zdm/videopage.py 的 _LIST_* 是同一份规则；这里只用来「粘上去就
+// 开清单对话框」，真正的判断以服务端为准 —— 两份万一漂了，最坏结果是多开一次
+// 空对话框，不会把清单当一条视频下（那条路服务端已经拒绝）。
+const PLAYLIST_URL = /^https?:\/\/(?:[\w.-]+\.)?(?:youtube\.com\/playlist\?|music\.youtube\.com\/(?:playlist\?|browse\/|library\/songs)|(?:youtube\.com|music\.youtube\.com)\/(?:(?:channel|user|c)\/[^/?#]+|@[^/?#]+)\/(?:videos|shorts|streams|live)|space\.bilibili\.com\/\d+(?:\/(?:video|videos|archive|channels\/[^/?#]+))?(?:[?#]|$)|m\.bilibili\.com\/space\/\d+|(?:[\w.-]+\.)?bilibili\.com\/(?:medialist\/|favorite\/|list\/|bangumi\/play\/ss)|music\.163\.com\/(?:#\/)?(?:playlist|album|m\/playlist|m\/album)|y\.qq\.com\/(?:n\/ryqq\/)?(?:playlist|album)\/|music\.migu\.cn\/v3\/music\/(?:playlist|album)\/|soundcloud\.com\/[^/?#]+\/sets\/|bandcamp\.com\/album\/)/i;
+
+let listData = null;
+
+const fmtDur = s => {
+  s = Math.max(0, Math.round(num(s)));
+  if (!s) return '';
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return (h ? h + ':' + String(m).padStart(2, '0') : String(m))
+    + ':' + String(s % 60).padStart(2, '0');
+};
+
+function setListInfo(msg, isErr){
+  const el = $('#listInfo');
+  el.textContent = msg || '';
+  el.style.color = isErr ? 'var(--err)' : 'var(--muted)';
+}
+
+function renderList(r){
+  const box = $('#listItems');
+  const items = (r && r.items) || [];
+  if (!items.length){ box.innerHTML = '<span class="none">展开后在这里列出</span>'; return; }
+  box.innerHTML = items.map(it => `<div><i>${num(it.index)}</i>`
+    + `<span>${esc(it.title || it.id || '未命名')}</span>`
+    + `<em>${fmtDur(it.duration)}</em></div>`).join('');
+}
+
+async function expandList(){
+  const url = $('#listUrl').value.trim();
+  if (!URL_OK.test(url)) return setListInfo('需要 http(s) 的链接', true);
+  listData = null;
+  $('#btnListAdd').disabled = true;
+  renderList(null);
+  setListInfo('正在展开…（清单越大越久，频道投稿页一页 30 条）');
+  $('#btnListGo').disabled = true;
+  const max = Number($('#listMax').value) || 100;
+  const r = await api('POST', 'playlist/preview', { url, max_items: max, source: 'webui' });
+  $('#btnListGo').disabled = false;
+  const items = r.items || [];
+  if (!r.ok || !items.length){
+    setListInfo('展开失败：' + (r.error || '这份清单里没有条目'), true);
+    return;
+  }
+  listData = r;
+  renderList(r);
+  const bits = [`已展开 ${r.count} 条`];
+  if (r.truncated) bits.push(`按上限 ${r.limit} 条截断，后面还有没列出`);
+  if (r.skipped) bits.push(`${r.skipped} 条没有可下载的地址，已跳过`);
+  if (r.preview_truncated) bits.push(`名单只列出前 ${items.length} 条，选条按序号照常有效`);
+  if (!r.is_playlist) bits.push('这条链接其实只有一段视频');
+  setListInfo((r.title ? r.title + ' · ' : '') + bits.join(' · '));
+  $('#btnListAdd').disabled = false;
+}
+
+function openList(url){
+  $('#listUrl').value = url || '';
+  // 不显示就等于偷偷套用：主输入条上的优先级/定时要一起带进来
+  $('#listPrio').value = $('#fprio').value;
+  $('#listStart').value = $('#fstart').value;
+  listData = null;
+  $('#btnListAdd').disabled = true;
+  renderList(null);
+  setListInfo('');
+  $('#dlgList').showModal();
+  if (url && PLAYLIST_URL.test(url.trim())) expandList();
+}
+
+$('#btnList').onclick = () => openList($('#url').value.trim());
+$('#btnListGo').onclick = expandList;
+$('#btnListCancel').onclick = () => $('#dlgList').close();
+$('#listUrl').addEventListener('keydown', e => { if (e.key === 'Enter') expandList(); });
+// 改了链接或上限，之前那份名单就不作数了：否则「选哪几条」的序号对着的是旧名单
+$('#listUrl').addEventListener('input', () => {
+  listData = null; $('#btnListAdd').disabled = true; setListInfo('');
+});
+$('#listMax').addEventListener('change', () => {
+  listData = null; $('#btnListAdd').disabled = true;
+});
+$('#btnListAdd').onclick = async () => {
+  const url = $('#listUrl').value.trim();
+  if (!url) return toast('请先填入链接');
+  const body = { url, source: 'webui', range: $('#listRange').value.trim() || 'all' };
+  const max = Number($('#listMax').value) || 100;
+  body.max_items = max;
+  if (!$('#listSub').checked) body.subdir = false;
+  if ($('#listPrio').value) body.priority = Number($('#listPrio').value);
+  const startAt = fromLocalInput($('#listStart').value);
+  if (startAt) body.start_at = startAt;
+  $('#btnListAdd').disabled = true;
+  setListInfo('正在建任务…');
+  const r = await api('POST', 'playlist/add', body);
+  $('#btnListAdd').disabled = false;
+  if (!r.ok){ setListInfo(r.error || '加入失败', true); return toast(r.error || '加入失败'); }
+  $('#dlgList').close();
+  $('#url').value = '';
+  toast(`已加入 ${r.added} 条任务 · ${r.directory}`
+    + ((r.failed || []).length ? `，${r.failed.length} 条失败：${(r.failed[0] || {}).error || ''}` : ''));
+  refresh();
+};
+
 // drag & drop a link
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', e => {
@@ -1011,6 +1254,29 @@ $('#btnPauseAll').onclick = bulk('pause_all', '已暂停 {n} 个任务', '没有
 $('#btnResumeAll').onclick = bulk('resume_all', '已开始 {n} 个任务', '没有等待开始的任务');
 $('#btnClear').onclick = bulk('clear_finished', '已清除 {n} 条记录', '没有已完成的任务');
 
+// 与后端 archive.py 的行格式保持一致：注释行（# 或 //）和空行跳过，其余每行
+// 必须有一个分隔符，且左右两边都不能空。目录必须是下载目录里的相对路径 ——
+// 绝对路径、盘符、~ 会把文件写到用户没打算动的地方去。
+function checkArchiveRules(text) {
+  const DIV = /\s*(?:=>|->|→|=|:|：)\s*/;
+  const lines = String(text || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i].trim();
+    if (!raw || raw.startsWith('#') || raw.startsWith('//')) continue;
+    // 和后端 _DIV.split(line, maxsplit=1) 一样只切第一个分隔符：C:\Video
+    // 里的冒号也是分隔符，全切开就把盘符当成了目录名的一部分。
+    const div = DIV.exec(raw);
+    if (!div) return `按后缀归档第 ${i + 1} 行少了等号：要写成「mp4 = Video」`;
+    const exts = raw.slice(0, div.index).trim();
+    const sub = raw.slice(div.index + div[0].length).trim();
+    if (!exts) return `按后缀归档第 ${i + 1} 行少了后缀：要写成「mp4 = Video」`;
+    if (!sub) return `按后缀归档第 ${i + 1} 行少了子目录：要写成「mp4 = Video」`;
+    if (/^[/~]/.test(sub) || /^[A-Za-z]:/.test(sub) || sub.startsWith('\\'))
+      return `按后缀归档第 ${i + 1} 行的子目录「${sub}」要写成下载目录里面的相对路径`;
+  }
+  return '';
+}
+
 $('#btnSettings').onclick = () => {
   $('#cfgDir').value = config.download_dir || '';
   $('#cfgConn').value = config.connections || 8;
@@ -1024,6 +1290,10 @@ $('#btnSettings').onclick = () => {
   // 服务端 heal_config 认不出的值会退回 auto，这里也用同一个集合，
   // 免得选择框停在 undefined 上、保存时把 undefined 发回去。
   $('#cfgStream').value = ['auto','re','ffmpeg'].includes(config.stream_engine) ? config.stream_engine : 'auto';
+  // 规则在服务端是 {"mp4,mkv": "Video"} 这样的表；界面上按「每行一条」编辑，
+  // 保存时把整段文本原样交回去（服务端认文本，也认表）。
+  $('#cfgArchive').value = Object.entries(config.archive_rules || {})
+    .map(([k, v]) => k + ' = ' + v).join('\n');
   // 只有服务端明确说没开才显示成没开：config 里缺这个键（老 state.json）时
   // 服务端按默认值「开」在跑，勾却空着，就是骗人。
   $('#cfgRpc').checked = config.rpc_enabled !== false;
@@ -1092,6 +1362,10 @@ $('#btnSaveCfg').onclick = async () => {
   const port = num('#cfgPort', '服务端口'); if (port === null) return;
   const dir = $('#cfgDir').value.trim();
   if (!dir) { toast('下载目录不能为空'); return; }
+  // 归档规则在服务端是严格解析的，但那边的报错要等一次往返才看得到，而且会把
+  // 整份设置一起挡下来。这里先按行校一遍，让用户知道是哪一行写错了。
+  const archErr = checkArchiveRules($('#cfgArchive').value);
+  if (archErr) { toast(archErr); return; }
   const r = await api('POST','config',{
     download_dir: dir,
     connections: conn,
@@ -1103,6 +1377,7 @@ $('#btnSaveCfg').onclick = async () => {
     auto_resume: $('#cfgAuto').checked,
     mirror_accel: $('#cfgMirror').checked,
     stream_engine: $('#cfgStream').value,
+    archive_rules: $('#cfgArchive').value.trim(),
     rpc_enabled: $('#cfgRpc').checked,
   });
   if (r.ok){ toast(r.warning || '已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }

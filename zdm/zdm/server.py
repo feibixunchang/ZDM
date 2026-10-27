@@ -22,7 +22,7 @@ from . import runtime
 from .aria2 import Aria2Rpc
 from .core import normalize_section
 from .manager import Manager
-from .videopage import video_page_filename, video_page_url
+from .videopage import is_playlist_page, video_page_filename, video_page_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -33,6 +33,32 @@ RPC_MAX_BODY = 4 * 1024 * 1024
 # 被拒的请求体在多大范围内还值得「读干净再回错」：超过这个数就当作有人在乱来，
 # 直接断开，不给它慢慢灌。
 RPC_DRAIN_LIMIT = RPC_MAX_BODY * 4
+
+# 预览一次最多回多少条给界面。上限只管**响应体大小**，不影响能选的范围：
+# count 仍是展开到的总数，加任务用的是序号，不依赖界面收到过那一条。
+PLAYLIST_PREVIEW_MAX = 200
+
+
+def _playlist_indices(body: dict, count: int):
+    """播放列表 add 要建哪几条：range 文本（"1-20"）或显式 indices，二选一。"""
+    from .yt_playlist import parse_range
+
+    raw = body.get("indices")
+    if isinstance(raw, list) and raw:
+        out = []
+        for v in raw:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"indices 里需要整数（收到 {v!r}）") from None
+            if n < 1 or n > count:
+                raise ValueError(f"序号超出清单条数（共 {count} 条，收到 {n}）")
+            out.append(n)
+        if not out:
+            raise ValueError("没有选中任何一条")
+        return sorted(set(out))
+    return parse_range(body.get("range"), count)
+
 
 _RPC: Optional[Aria2Rpc] = None
 _RPC_LOCK = threading.Lock()
@@ -975,19 +1001,176 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"ok": False, "formats": [], "title": "", "error": str(e)}
             return self._json(result)
 
+        # 播放列表：列出名单（preview）和按范围建任务（add）。
+        # 两步都放在服务端，网页版 / Qt / CLI / 扩展才可能有同一份语义 ——
+        # 尤其是「跳过了几条」「清单被上限截断」这种说漏了就会让用户以为
+        # 下全了的细节，不该由四个客户端各写一遍。
+        if len(parts) == 2 and parts[0] == "playlist" and parts[1] in ("preview", "add"):
+            return self._playlist(parts[1], body)
+
         return self._error(404, "not found")
 
-    def _create_task(self, body: dict) -> dict:
+    def _playlist(self, action: str, body: dict):
+        """POST /api/playlist/preview 与 /api/playlist/add 的共同实现。"""
+        from .yt_playlist import (
+            DEFAULT_ITEMS,
+            MAX_ITEMS,
+            item_filename,
+            list_items,
+            safe_dirname,
+        )
+
+        url = str(body.get("url") or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            return self._error(400, "需要 http(s) 的播放列表链接")
+        cookie = body.get("cookie") or self._site_cookie_for(url) or None
+        proxy = self.manager.config.get("proxy") or None
+        try:
+            wanted_max = int(body.get("max_items") or DEFAULT_ITEMS)
+        except (TypeError, ValueError):
+            return self._error(400, "max_items 需要是整数")
+        cap = min(MAX_ITEMS, max(1, wanted_max))
+
+        try:
+            res = list_items(url, cookie=cookie, proxy=proxy, max_items=cap)
+        except Exception as e:  # noqa: BLE001
+            res = {"ok": False, "is_playlist": False, "title": "", "items": [],
+                   "count": 0, "skipped": 0, "truncated": False, "error": str(e)}
+        items = res.get("items") or []
+        base = {
+            "ok": bool(res.get("ok")),
+            "is_playlist": bool(res.get("is_playlist")),
+            "title": res.get("title") or "",
+            "count": len(items),
+            "skipped": int(res.get("skipped") or 0),
+            "truncated": bool(res.get("truncated")),
+            # 界面据此决定「还有更多」的话术与 max_items 默认值
+            "limit": int(res.get("limit") or cap),
+            "error": res.get("error") or "",
+            "playlist_url": url,
+        }
+        if not items:
+            # 展开失败（要登录 / 私密清单 / 站点没有清单）也要带 is_playlist，
+            # 界面才知道该说「这不是播放列表」还是「展开失败」。
+            base["items"] = []
+            return self._json(base)
+        if action == "preview":
+            base["items"] = items[:PLAYLIST_PREVIEW_MAX]
+            base["preview_truncated"] = len(items) > PLAYLIST_PREVIEW_MAX
+            return self._json(base)
+
+        # ---- add ----
+        if res.get("is_playlist"):
+            try:
+                picked = _playlist_indices(body, len(items))
+            except ValueError as e:
+                return self._error(400, str(e))
+        else:
+            picked = [1]
+        by_index = {int(it["index"]): it for it in items}
+
+        directory = body.get("dir") or body.get("directory")
+        directory = str(directory).strip() if directory else str(
+            self.manager.config.get("download_dir") or ""
+        )
+        folder = ""
+        # 整份清单默认收进一个以清单标题命名的子目录：几十集散在「下载」里
+        # 会和别的文件混成一团，而跨清单的同名分集（第 1 集、第 2 集）会互相
+        # 顶成 "…(1)"，谁都认不出谁。给 false 就按用户点的目录原样落。
+        if res.get("is_playlist") and body.get("subdir", True) is not False:
+            given = body.get("subdir")
+            folder = safe_dirname(
+                given if isinstance(given, str) and given.strip() else res.get("title"),
+                fallback="",
+            )
+        dest = os.path.join(directory, folder) if folder else directory
+        if folder:
+            # 子目录当场建出来：任务可能是「暂停/定时」状态，引擎要到真正开始
+            # 下载才 makedirs；那之前界面里已经出现一份指向不存在目录的任务，
+            # 用户点「打开目录」会落空。建不出来（只读盘、路径被文件占了）就
+            # 直接报错，不能悄悄改用上级目录 —— 那等于把整份清单下到别处。
+            try:
+                os.makedirs(dest, exist_ok=True)
+            except OSError as e:
+                return self._error(400, f"没法创建清单子目录 {dest}：{e}")
+
+        added: List[str] = []
+        failed: List[Dict] = []
+        for idx in picked:
+            it = by_index.get(idx)
+            if not it:
+                failed.append({"index": idx, "error": "清单里没有这一条"})
+                continue
+            task_body = {
+                "url": it["url"],
+                "yt_page": it["url"],
+                "kind": "video",
+                "filename": item_filename(it, url),
+                "directory": dest,
+                "source": body.get("source") or "manual",
+                "yt_height": body.get("yt_height") or body.get("height") or 0,
+                "priority": body.get("priority"),
+                "start_at": body.get("start_at"),
+                "paused": body.get("paused"),
+            }
+            if cookie:
+                # 展开用的是调用方给的 cookie（扩展会把页面 cookie 一起送过来），
+                # 建出来的每条任务也该带着它，否则设置里没有这个站点时就变成匿名下载。
+                task_body["cookie"] = cookie
+            try:
+                reply = self._create_task(task_body, show_desktop=False)
+                if reply.get("ok"):
+                    added.append(reply.get("id") or "")
+                else:
+                    failed.append({"index": idx, "error": reply.get("error") or "建任务失败"})
+            except ValueError as e:
+                failed.append({"index": idx, "url": it["url"], "error": str(e)[:300]})
+        if added and self.manager.config.get("auto_show_gui", True):
+            threading.Thread(
+                target=desktop.ensure_desktop,
+                args=([], int(self.manager.config.get("port") or 9000)),
+                daemon=True,
+            ).start()
+        base.update(
+            {
+                "ok": bool(added),
+                "added": len(added),
+                "ids": added,
+                "directory": dest,
+                "failed": failed,
+                "error": "" if added else (failed[0]["error"] if failed else "没有建成任何任务"),
+            }
+        )
+        return self._json(base)
+
+    def _create_task(self, body: dict, show_desktop: bool = True) -> dict:
         """建一条任务：POST /api/tasks 与 aria2 兼容层的 addUri 共用这一段。
 
         这样 RPC 建出来的任务和桌面端 / 网页版 / 扩展建的完全同路 —— 视频页面
         链接一样会转成 yt-dlp 任务，站点 Cookie 一样兜底，一样受重复下载约束。
         失败一律抛 ValueError（REST 侧回 400，RPC 侧回 JSON-RPC 错误），
         成功返回响应体。
+
+        show_desktop=False 供播放列表批量建任务用：那一路几十条任务只该唤起
+        一次桌面窗口，不该每条都起一个线程去问一遍。
         """
         url = (body.get("url") or "").strip()
         if not url:
             raise ValueError("缺少下载链接")
+        if (
+            not body.get("yt_page")
+            and not body.get("page_url")
+            and is_playlist_page(url)
+        ):
+            # 实测（随包 yt-dlp 2026.08.19）：--no-playlist 只对「既是视频又是清单」
+            # 的地址生效，纯清单地址照样整份下完；而下载通道的输出模板是固定的
+            # zdm-<任务id>.%(ext)s，于是每一集覆盖上一集，最后只剩一个文件、
+            # 状态还是「已完成」。这种假成功必须当场拦下来，并说清该走哪条路。
+            raise ValueError(
+                "这是播放列表/合集地址，一条任务装不下整份（会一集覆盖一集，只留最后一个文件）。"
+                "请展开后按条下载：网页版「播放列表…」/ 命令行 zdm add <链接> --playlist"
+                " / POST /api/playlist/add"
+            )
         headers = self._normalize_headers(body, url)
         # 视频**页面**链接（YouTube/B站…）不能当普通文件下：那样存下来的
         # 是一个叫 watch 的 HTML。桌面端、网页版、CLI 都在这里汇合，所以
@@ -1087,7 +1270,7 @@ class Handler(BaseHTTPRequestHandler):
         # from the browser extension), bring it up so the user sees the task.
         # Pass NO urls: the task is already queued above, and handing the
         # url to the GUI makes it add a second copy.
-        if self.manager.config.get("auto_show_gui", True):
+        if show_desktop and self.manager.config.get("auto_show_gui", True):
             threading.Thread(
                 target=desktop.ensure_desktop,
                 args=([], int(self.manager.config.get("port") or 9000)),

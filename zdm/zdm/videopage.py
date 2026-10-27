@@ -94,13 +94,95 @@ _DIRECT = re.compile(
 )
 
 
+# 清单/合集页：一条地址背后是**一串**视频。
+#
+# 为什么单独认这一类：下载通道给 yt-dlp 的一律带 --no-playlist，而实测（随包
+# yt-dlp 2026.08.19）它对「清单地址」根本不起作用 —— 只有「既是视频又是清单」
+# 的地址（watch?v=…&list=…）才会被它收回一条视频。于是把 /playlist?list= 直接
+# 建成一条任务的实际结果是：yt-dlp 把整份清单下完，而 outtmpl 是同一个
+# zdm-<任务id>.%(ext)s，每一集覆盖上一集，最后用户拿到**一个**文件、状态还是
+# 「已完成」。宁可当场拒绝并告诉他该走哪条路。
+_LIST_YT = re.compile(
+    r"^https?://(?:[a-z0-9-]+\.)*"
+    r"(?:"
+    r"youtube\.com/playlist\?|"
+    r"music\.youtube\.com/(?:playlist\?|browse/|library/songs)|"
+    # 频道/用户主页的视频标签页：整页就是一串视频。
+    # 注意斜杠的位置 —— /channel/<id>、/user/<name>、/c/<name> 的 id 在
+    # 下一段，而 @handle 是写在同一段的（先写错过一次：`com/(?:channel|c)
+    # [^/?#]+` 里 [^/]+ 顶到 `channel` 后面那个 `/`，channel/user/c 三种形态
+    # 全都匹配不上，只有 @NASA 这种恰好没有中间斜杠的能用）。
+    r"(?:music\.youtube\.com|youtube\.com)/"
+    r"(?:(?:channel|user|c)/[^/?#]+|@[^/?#]+)"
+    r"/(?:videos|shorts|streams|live)"
+    r")",
+    re.I,
+)
+_LIST_BILI = re.compile(
+    r"^https?://"
+    r"(?:"
+    # UP 主投稿列表（space.bilibili.com/<uid> 默认就是「视频」标签页；
+    # /homepage、/dynamic 这些别的标签页不算清单，展开它们只会拿到一堆动态）
+    r"space\.bilibili\.com/\d+(?:/(?:video|videos|archive|channels/[^/?#]+))?(?:[?#]|$)"
+    r"|m\.bilibili\.com/space/\d+"
+    # 合集 / 收藏夹 / 番剧**季**页（ss…=整季，ep…=单集，后者不算清单）
+    r"|(?:[a-z0-9-]+\.)*bilibili\.com/(?:medialist/|favorite/|list/|bangumi/play/ss)"
+    r")",
+    re.I,
+)
+_LIST_MUSIC = re.compile(
+    r"^https?://"
+    r"(?:"
+    r"music\.163\.com/(?:#/)?(?:playlist|album|m/playlist|m/album)"
+    r"|y\.qq\.com/(?:n/ryqq/)?(?:playlist|album)/"
+    r"|music\.migu\.cn/v3/music/(?:playlist|album)/"
+    r"|soundcloud\.com/[^/?#]+/sets/"
+    # Bandcamp 的专辑页基本都在艺人的子域上（xxx.bandcamp.com/album/…），
+    # 只认主域等于把最常见的形态漏掉。
+    r"|(?:[a-z0-9-]+\.)*bandcamp\.com/album/"
+    r")",
+    re.I,
+)
+
+
 def is_youtube(url: str) -> bool:
     return bool(_YT.match((url or "").strip()))
+
+
+def is_playlist_page(url: str) -> bool:
+    """地址是一份清单/合集/频道视频页（不是一个文件、也不是一段视频）。"""
+    u = (url or "").strip()
+    if not u or _DIRECT.search(u):
+        return False
+    return bool(_LIST_YT.match(u) or _LIST_BILI.match(u) or _LIST_MUSIC.match(u))
+
+
+# watch?v=…&list=… 与 /video/BV…?p=… 这类地址**点到了具体一集**（所以下载时是
+# 一条视频），但它们同时属于一份清单 —— 界面该提示「要不要整份都下」。
+_IN_LIST_Q = re.compile(r"(?:[?&]list=|[#?&]p=[0-9]+|[?&]play[?&=#])", re.I)
+
+
+def playlist_hint(url: str) -> bool:
+    """值得提示「按播放列表展开」的地址：清单页本身，或带着清单参数的单视频页。
+
+    与 is_playlist_page 分工不同：那个决定「这条地址能不能建成一条任务」，
+    这个只决定「要不要给用户看一眼整份清单」。
+    """
+    u = (url or "").strip()
+    if not u or _DIRECT.search(u):
+        return False
+    if _LIST_YT.match(u) or _LIST_BILI.match(u) or _LIST_MUSIC.match(u):
+        return True
+    return bool(is_video_page(u) and _IN_LIST_Q.search(u))
 
 
 def is_video_page(url: str) -> bool:
     u = (url or "").strip()
     if not u or _DIRECT.search(u):
+        return False
+    # 清单页不算视频页：/bangumi/play/ss… 这种既像「一个页面」又是一串集，
+    # 归给播放列表那条路，别建成一条会自相覆盖的页面任务。
+    if is_playlist_page(u):
         return False
     return bool(_YT.match(u) or _SITE.match(u) or _GENERIC.match(u))
 
@@ -127,6 +209,17 @@ def _youtube_id(url: str) -> str:
     return ""
 
 
+def _playlist_id(url: str) -> str:
+    """清单地址里的列表 id（/playlist?list=… 或 watch?v=…&list=… 的 list）。"""
+    try:
+        p = urlparse(url)
+        if p.path in ("/playlist", "/watch", "/embed", "/shorts", "/live"):
+            return (parse_qs(p.query).get("list") or [""])[0].strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _clean_stem(text: str) -> str:
     text = unquote(text or "").strip()
     text = re.sub(r"[\\/:*?\"<>|]+", "_", text)
@@ -140,11 +233,22 @@ def video_page_filename(url: str) -> str:
     web UI and ``zdm add``, where nobody resolved the title. Without it the
     yt-dlp channel renames the finished file to ``download`` (the Download
     default) and the user gets an extension-less file.
+
+    清单页（``/playlist?list=…``）没有视频 id，取列表 id 也比一律叫
+    ``YouTube.mp4`` 有用：几十条这样的任务排在列表里谁也认不出谁。
     """
     u = (url or "").strip()
-    if is_youtube(u):
+    # _LIST_YT 也要进来：`is_youtube` 只认 watch/shorts/live/embed 那些形态，
+    # /playlist?list= 不在其中，落到底下的通用分支就变成 Video-<哈希> ——
+    # 而清单地址唯一有意义的名字就是那个列表 id。
+    if is_youtube(u) or _LIST_YT.match(u):
         vid = _youtube_id(u)
-        return f"YouTube-{vid}.mp4" if vid else "YouTube.mp4"
+        if vid:
+            return f"YouTube-{vid}.mp4"
+        lid = _playlist_id(u)
+        if lid:
+            return f"YouTube-Playlist-{_clean_stem(lid)[:40]}.mp4"
+        return "YouTube.mp4"
     try:
         p = urlparse(u)
         host = (p.hostname or "").lower()

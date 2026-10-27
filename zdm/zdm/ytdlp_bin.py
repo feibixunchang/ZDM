@@ -249,6 +249,69 @@ def extract_json(
         return None, f"yt-dlp 输出不是 JSON：{e}"
 
 
+def flat_playlist_json(
+    binp: str,
+    url: str,
+    *,
+    cookie_path: Optional[str] = None,
+    proxy: Optional[str] = None,
+    items_limit: int = 0,
+    timeout: float = 240.0,
+) -> Tuple[Optional[dict], str]:
+    """`yt-dlp -J --flat-playlist`：只取播放列表的**名单**，不逐条解格式。
+
+    和 ``extract_json`` 的区别正是这条通道存在的原因：
+      * ``extract_json`` 带 ``--no-playlist``，为的是「一段视频的清晰度阶梯」；
+      * 展开几百集的清单如果也逐条解析，会为每条跑一遍 player 提取
+        （几十分钟 + 必被 YouTube 按请求风控）。flat 一次请求只给
+        id/标题/地址，格式留给之后每条任务自己解。
+
+    ``--yes-playlist`` 是给 ``watch?v=…&list=…`` 这种「既是视频也是列表」的地址用的：
+    用户点的是「按播放列表下载」，这里不能又退回单条。
+
+    ``items_limit`` 不是「拿完之后丢掉多余的」，而是**让 yt-dlp 别去翻后面的页**：
+    实测频道视频页一页只有 30 条，一次翻页约 3~4 秒（NASA 频道取 26 条 = 87 秒），
+    不限就是整频道几千条一路翻到底。超时也因此按「翻清单」而不是「解一条视频」给。
+    """
+    args = [
+        binp,
+        "-J",
+        "--no-warnings",
+        "--flat-playlist",
+        "--yes-playlist",
+        "--ignore-errors",
+    ]
+    if items_limit and int(items_limit) > 0:
+        args += ["--playlist-items", "1:%d" % int(items_limit)]
+    args += js_runtime_args(binp)
+    if cookie_path:
+        args += ["--cookies", cookie_path]
+    if proxy:
+        args += ["--proxy", proxy]
+    args.append(url)
+    try:
+        p = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=child_env(),
+            check=False,
+            **_no_window(),
+        )
+    except subprocess.TimeoutExpired:
+        return None, "展开播放列表超时（清单太大或站点在风控）"
+    except OSError as e:
+        return None, f"无法执行 yt-dlp：{e}"
+    if p.returncode != 0:
+        lines = [x for x in (p.stderr or "").strip().splitlines() if x.strip()]
+        return None, (lines[-1] if lines else f"yt-dlp 退出码 {p.returncode}")[:400]
+    try:
+        return json.loads(p.stdout), ""
+    except Exception as e:  # noqa: BLE001
+        return None, f"yt-dlp 输出不是 JSON：{e}"
+
+
 def download(
     binp: str,
     page_url: str,

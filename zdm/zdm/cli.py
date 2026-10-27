@@ -23,7 +23,8 @@ def _detached() -> dict:
     return {"start_new_session": True}
 
 
-def _api(method: str, path: str, payload: Optional[dict] = None, port: int = 0) -> dict:
+def _api(method: str, path: str, payload: Optional[dict] = None, port: int = 0,
+         timeout: int = 10) -> dict:
     import urllib.error
     import urllib.request
 
@@ -35,7 +36,7 @@ def _api(method: str, path: str, payload: Optional[dict] = None, port: int = 0) 
     req.add_header("X-ZDM-Token", apitoken.get_token())
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(req, timeout=10) as r:
+        with opener.open(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
@@ -196,6 +197,11 @@ def cmd_add(args) -> int:
             k, _, v = h.partition(":")
             headers[k.strip()] = v.strip()
         payload["headers"] = headers
+    if getattr(args, "playlist", None) is not None:
+        # 清单链接建成**一条**任务是错的：yt-dlp 的 --no-playlist 对纯清单地址
+        # 不起作用（实测），于是整份清单下进同一个 outtmpl，一集覆盖一集，最后
+        # 只剩一个「已完成」的文件。--playlist 改走展开通道：列名单 → 按范围建 N 条。
+        return _add_playlist(args, port, payload)
     r = _api("POST", "tasks", payload, port=port)
     if not r.get("ok"):
         print(f"error: {r.get('error')}")
@@ -221,6 +227,117 @@ def cmd_add(args) -> int:
         # duplicate task.
         desktop.ensure_desktop([], port)
     return 0
+
+
+def _fmt_dur(seconds) -> str:
+    """清单条目的时长：65 分钟以上也给的读出来的形状。"""
+    try:
+        s = int(seconds or 0)
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0:
+        return ""
+    if s >= 3600:
+        return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _playlist_body(args, payload: dict, action: str) -> dict:
+    """把 add 的参数挑出「对整份清单也成立」的那些，交给 playlist 端点。
+
+    逐条任务级的参数（-n 文件名、--section 选段、轨道选择、直播时长）在这里
+    **没有意义**：N 条任务不可能共用一个文件名或一个选段区间。与其悄悄丢掉，
+    不如打印一句「按条命名/选段请对单条链接用」。
+    """
+    body = {"url": args.url, "source": "cli"}
+    for key in ("dir", "priority", "start_at", "headers"):
+        if payload.get(key) is not None:
+            body[key] = payload[key]
+    if getattr(args, "max_items", None):
+        body["max_items"] = int(args.max_items)
+    if getattr(args, "no_subdir", False):
+        body["subdir"] = False
+    if action == "add":
+        body["range"] = str(args.playlist or "all")
+        if getattr(args, "paused", False):
+            body["paused"] = True
+    ignored = [
+        label
+        for label, present in (("-n/--name", payload.get("filename")),
+                               ("--section", payload.get("section")),
+                               ("--select-*", payload.get("stream_video") or
+                                payload.get("stream_audio") or
+                                payload.get("stream_subtitle")),
+                               ("--live-limit", payload.get("stream_live_limit")))
+        if present
+    ]
+    if ignored:
+        print("note: %s do not apply to a whole playlist and were ignored "
+              "(set them per episode by adding that episode's own URL)"
+              % ", ".join(ignored), file=sys.stderr)
+    return body
+
+
+def _print_playlist(r: dict) -> None:
+    """把展开结果打成一页能看的名单。"""
+    items = r.get("items") or []
+    head = r.get("title") or "(no title)"
+    print(f"{head}  ·  {len(items)} entries")
+    if r.get("skipped"):
+        print(f"  ({r['skipped']} entries had no downloadable URL and were skipped)")
+    if r.get("truncated"):
+        print(f"  (capped at {r.get('limit')} — raise --max-items or the rest is missing)")
+    for it in items:
+        dur = _fmt_dur(it.get("duration"))
+        print(f"{it['index']:>4}  {dur:>9}  {it.get('title') or it.get('id') or ''}"
+              f"\n        {it.get('url') or ''}")
+
+
+def cmd_playlist(args) -> int:
+    """zdm playlist URL：只列名单，不建任务（先看清有多少集再决定范围）。"""
+    port = _resolve_port(args)
+    if not server.ping(port=port):
+        print("service not running. Start it first:  zdm start --daemon")
+        return 1
+    body = _playlist_body(args, {}, "preview")
+    # 展开是**联网翻清单**：频道页一页 30 条、一次请求在本机实测要 10~90 秒
+    # （TLS 到 youtube.com 的握手在这台机器上就要 20 秒），10 秒超时必然误报。
+    r = _api("POST", "playlist/preview", body, port=port, timeout=600)
+    if args.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if not (r.get("items") or []):
+        print(f"error: {r.get('error') or 'could not expand this link'}")
+        return 1
+    _print_playlist(r)
+    print("add with:  zdm add \"%s\" --playlist 1-%d" % (args.url, len(r["items"])))
+    return 0
+
+
+def _add_playlist(args, port: int, payload: dict) -> int:
+    """zdm add URL --playlist [RANGE]：展开 + 一次性建 N 条任务。"""
+    body = _playlist_body(args, payload, "add")
+    r = _api("POST", "playlist/add", body, port=port, timeout=600)
+    if not r.get("added"):
+        err = r.get("error") or "no task created"
+        print(f"error: {err}")
+        if r.get("failed"):
+            for f in r["failed"][:5]:
+                print(f"  #{f.get('index')}: {f.get('error')}", file=sys.stderr)
+        return 1
+    print(f"queued {r['added']} task(s) from \"{r.get('title') or args.url}\""
+          f" -> {r.get('directory')}")
+    if r.get("skipped"):
+        print(f"  ({r['skipped']} entries in the list had no downloadable URL)")
+    if r.get("truncated"):
+        print(f"  (list capped at {r.get('limit')} entries; raise --max-items for more)")
+    for f in (r.get("failed") or [])[:5]:
+        print(f"  #{f.get('index')} failed: {f.get('error')}", file=sys.stderr)
+    if len(r.get("failed") or []) > 5:
+        print(f"  ({len(r['failed'])} failures in total)", file=sys.stderr)
+    if load_config().get("auto_show_gui", True):
+        desktop.ensure_desktop([], port)
+    return 0 if not r.get("failed") else 1
 
 
 def cmd_list(args) -> int:
@@ -569,6 +686,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-p", "--priority", type=int, help="queue priority, higher goes first")
     s.add_argument("--start-at", help="scheduled start: Unix time or ISO-8601")
     s.add_argument("--section", help="video section, e.g. 00:01:00-00:05:00")
+    # 播放列表/合集/频道投稿页：展开成 N 条任务，而不是自相覆盖的一条。
+    s.add_argument(
+        "--playlist",
+        nargs="?",
+        const="all",
+        default=None,
+        metavar="RANGE",
+        help="treat URL as a playlist: RANGE like 1-20 or 1,3,5-8 (default: all)",
+    )
+    s.add_argument("--max-items", type=int, dest="max_items", metavar="N",
+                   help="how many entries to expand (default 100, max 500)")
+    s.add_argument("--no-subdir", action="store_true", dest="no_subdir",
+                   help="put files straight in --dir instead of a playlist-named subfolder")
+    s.add_argument("--paused", action="store_true",
+                   help="with --playlist: create the tasks queued but not started")
     # HLS/DASH 轨道选择（只有 N_m3u8DL-RE 认）：值原样传给引擎的 -sv/-sa/-ss。
     s.add_argument(
         "--select-video",
@@ -601,6 +733,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser(
+        "playlist",
+        help="show what is inside a playlist/collect/channel link (no download)",
+    )
+    s.add_argument("url")
+    s.add_argument("--max-items", type=int, dest="max_items", metavar="N",
+                   help="how many entries to expand (default 100, max 500)")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--port", type=int, default=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_playlist)
 
     for name, action in (("pause", "pause"), ("resume", "resume"), ("cancel", "cancel"), ("restart", "restart")):
         s = sub.add_parser(name, help=f"{action} a download")

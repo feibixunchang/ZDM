@@ -223,6 +223,13 @@ zdm add URL --start-at 2026-10-27T02:00:00   # 定时开始（也接受 Unix 时
 zdm add "https://www.bilibili.com/video/BV..." --section 00:01:00-00:05:00
                                        # --section 只适用于视频页面链接，普通文件会被拒绝
                                        # 写法也校验：结束必须晚于开始，MM:SS / HH:MM:SS 都认
+zdm playlist "https://www.youtube.com/playlist?list=PL..."     # 只列名单，不建任务
+zdm playlist URL --max-items 300        # 展开上限：默认 100，最高 500
+zdm add URL --playlist                  # 整份清单都下
+zdm add URL --playlist 1-20,25 --paused # 只下这些序号；范围写法与网页版/桌面端同一份实现
+zdm add URL --playlist 1-50 --no-subdir # 默认按清单标题建子目录，--no-subdir 并进 -o 的目录
+                                       # 清单地址不加 --playlist 直接建任务会被拒绝
+                                       # （引擎对播放列表输出固定文件名，一集覆盖一集）
 zdm list --json
 zdm pause <id> / zdm resume <id> / zdm restart <id> / zdm remove <id>
 zdm config connections 16               # 1~32
@@ -235,6 +242,11 @@ zdm config stream_engine re             # HLS/DASH 引擎：auto(默认) / re / 
                                         # re=只用它（找不到可执行文件就报错，不假装按你选的做完了）
                                         # ffmpeg=只用 ffmpeg
                                         # 换了引擎的任务会在列表里写明理由（stream_note）
+zdm config archive_rules "mp4,mkv = Video
+srt,ass = Subtitles"                    # 按后缀自动归档；整段留空 = 关闭（默认）
+                                        # 每行「后缀 = 子目录」，`#` 开头的行跳过
+                                        # 子目录必须是下载目录里的相对路径（`/x`、`D:\x`、`~/x` 会被拒）
+                                        # 同一个后缀写在两条规则里也会被拒，并点名是哪两条
                                         # 写坏一项（zdm config port abc）会退出码 1 并指名是哪一项，
                                         # 且这一批配置整体不生效，不会改一半留一半
 zdm stop
@@ -246,7 +258,9 @@ zdm stop
 |---|---|---|
 | GET | `/api/state` | 配置 + 任务列表 |
 | GET | `/api/tasks` | 任务列表 |
-| POST | `/api/tasks` | `{url, filename?, dir?, connections?, headers?, proxy?, speed_limit?, paused?, priority?, start_at?, section?}` |
+| POST | `/api/tasks` | `{url, filename?, dir?, connections?, headers?, proxy?, speed_limit?, paused?, priority?, start_at?, section?}`；清单 / 合集地址在这里会被 400 拒绝，要走下面的 playlist 通道 |
+| POST | `/api/playlist/preview` | `{url, max_items?}` → `{items:[{index,title,duration,url}], count, skipped, truncated, preview_truncated, limit, title, playlist_url}`：只展开名单，不建任务（`items` 最多回 `PLAYLIST_PREVIEW_MAX` 条，`count` 才是真实条数） |
+| POST | `/api/playlist/add` | `{url, max_items?, range?, indices?, subdir?, dir?, priority?, start_at?, paused?, cookie?, source?}` → `{added, ids, failed:[{index,error}], directory, count, skipped, truncated, limit}`：一次建 N 条独立任务 |
 | POST | `/api/tasks/{id}/edit` | 改 `{url?, headers?, proxy?, connections?, priority?, start_at?, section?}`，已下载进度尽量保留 |
 | POST | `/api/tasks/{id}/pause\|resume\|restart\|cancel\|open` | 任务操作 |
 | DELETE | `/api/tasks/{id}?files=0` | 删除任务（`files=0` 保留文件） |
@@ -263,12 +277,21 @@ zdm stop
 
 `download_dir`、`connections`(8)、`max_active`(3)、`speed_limit`(bytes/s)、`proxy`、
 `max_retries`(5)、`timeout`(30)、`port`(9000)、`auto_resume`、`clipboard_monitor`、
-`mirror_accel`、`stream_engine`(`auto`)。
+`mirror_accel`、`stream_engine`(`auto`)、`archive_rules`(`{}` = 关闭)。
 
 `stream_engine` 只管 HLS `.m3u8` / DASH `.mpd` 这类分片流：`auto` 先用 N_m3u8DL-RE
 （分片并发、单片重试、暂停后按分片续传），找不到它的可执行文件或它失败时用 ffmpeg
 重下一遍；`re` / `ffmpeg` 是点名只用一个。降级或换引擎的理由会挂在任务上（`stream_note`），
 桌面端、网页版和 `/api/tasks` 都看得到，不会静默换个引擎说「按你选的做好了」。
+
+`archive_rules` 是「后缀 → 子目录」的对照表，正式形状是 `{"mp4,mkv": "Video"}`，界面上按每行
+`mp4,mkv = Video` 编辑（`#` 开头的行跳过；`=` 也接受 `:`、`->`、`→`）。**默认空表 = 关闭**：
+没人希望下载器悄悄改动自己的目录结构。命中的成品落进 `<任务目录>/<子目录>`，没命中的照旧；
+字幕、额外音轨这类 sidecar 跟着成品走，不单独归档，免得 `.srt` 在 Subtitles、`.mkv` 在 Video。
+子目录只能是任务目录里的相对路径 —— `/Volumes/x`、`D:\Video`、`~/x` 一律当场拒绝（硬把它改成
+`<下载目录>/D/Video` 是猜，报错才是答），同一个后缀出现在两条规则里也拒绝并点名是哪两条。
+规则在**这一轮真正开跑时**才取，改设置只影响之后的下载，不会搬已经下好的文件；没归档成功时
+不静默回退原目录，而是在任务上留一句 `archive_note`（三端和 `/api/tasks` 同样可见）。
 
 ## 结构
 

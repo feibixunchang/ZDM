@@ -25,6 +25,7 @@ from .core import (
 )
 from .transport import URL_SCHEME_HINT, has_supported_scheme
 from .videopage import is_video_page
+from . import archive as archive_mod  # 按后缀归档：规则的解释只有一个地方
 
 APP_NAME = "zdm"
 DEFAULT_PORT = 9000
@@ -259,6 +260,10 @@ DEFAULT_CONFIG: Dict[str, object] = {
     # each task; these are the fallback for tasks started from the desktop app
     # or for servers that only accept a first-party session.
     "site_cookies": {},
+    # 按后缀自动归档：{"mp4,mkv": "Video", "srt,ass": "Subtitles"}。命中的成品
+    # 落进 <任务目录>/<子目录>，没命中的按原目录落。默认空表 = 关闭 —— 没人
+    # 希望下载器悄悄改动自己的目录结构。子目录只能是相对路径，出不了任务目录。
+    "archive_rules": {},
 }
 
 
@@ -349,6 +354,9 @@ def heal_config(cfg: Dict[str, object]) -> Dict[str, object]:
         healed[k] = val if val in allowed else DEFAULT_CONFIG[k]
     if not isinstance(healed.get("site_cookies"), dict):
         healed["site_cookies"] = {}
+    # 归档规则坏了一条不能整表丢：重启后用户看到的是「规则全不生效」，那比
+    # 少一个子目录更难查。prune_rules 只留能用的，后缀冲突时先写的赢。
+    healed["archive_rules"] = archive_mod.prune_rules(healed.get("archive_rules"))
     healed["proxy"] = str(healed.get("proxy") or "")
     return healed
 
@@ -903,6 +911,11 @@ class Manager:
                 t.start()
 
     def _run_task(self, d: Download) -> None:
+        # 归档规则在「这一轮真正开跑」时取，而不是建任务那一刻：设置改了，还
+        # 排在队里/暂停过的任务下次起跑就按新规则落盘（已经落了 .part 的不搬，
+        # 见 core._prepare）。用 prune_rules 是因为这里不能让一条坏规则把整次
+        # 下载炸掉 —— 最坏应该是「不按规则归档」，不是「下不了」。
+        d.archive_rules = archive_mod.prune_rules(self.config.get("archive_rules"))
         try:
             d.start()
         except Exception as e:  # noqa: BLE001
@@ -946,6 +959,11 @@ class Manager:
             if not text:
                 raise ValueError("下载目录不能为空")
             return text
+        elif k == "archive_rules":
+            # 设置界面交上来的是那一整栏文本（每行「mp4,mkv = Video」），接口
+            # 和 state.json 交上来的是对照表，两种都认；写错当场报错，不能存
+            # 一份「看起来保存了、下东西时一条都不生效」的规则。
+            return archive_mod.normalize_rules(v)
         else:
             return v
         rng = CONFIG_RANGES.get(k)
@@ -1133,6 +1151,7 @@ class Manager:
             # 重启后一条降级完成的记录和正常记录长得一模一样，理由就丢了。
             d.stream_engine_used = str(t.get("stream_engine_used") or "")
             d.stream_note = str(t.get("stream_note") or "")
+            d.archive_note = str(t.get("archive_note") or "")
             if d.size:
                 d.segmenter = Segmenter(d.size, [Chunk(0, d.size, d.size)])
             self.downloads[d.id] = d

@@ -15,6 +15,7 @@ import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import transport as transport_mod
+from . import archive as archive_mod
 from .http import HttpError, filename_from_headers
 from .runtime import silent_proc_kwargs
 
@@ -814,6 +815,13 @@ class Download:
         # 跑完就当没事发生：界面上要能看出「这次不是用你选的那个下下来的」。
         self.stream_engine_used = ""
         self.stream_note = ""
+        # 按后缀自动归档：{"mp4,mkv": "Video", "srt,ass": "Subtitles"}。manager
+        # 每轮开跑前按**当下**的设置写入（空表 = 关闭，绝不擅自挪目录）。命中
+        # 规则的成品落在 <任务目录>/<子目录>，见 _archive_into。
+        self.archive_rules: Dict[str, str] = {}
+        # 规则命中了但子目录建不起来时的说明：下载照旧落在原目录，不因为
+        # 归档失败而失败，但「这次没按你选的规则来」必须看得见。
+        self.archive_note = ""
 
         self.size = 0
         self.status = "queued"
@@ -914,6 +922,8 @@ class Download:
             # 这一轮真正用的流媒体通道，以及换通道/降级的原因（三端都要显示）
             "stream_engine_used": self.stream_engine_used,
             "stream_note": self.stream_note,
+            # 按后缀归档没生效时的原因（生效时目录本身就已经是归档后的位置）
+            "archive_note": self.archive_note,
             # 轨道选择（三端可见、可改；只有 N_m3u8DL-RE 通道生效）
             "stream_video": self.stream_video,
             "stream_audio": self.stream_audio,
@@ -1193,6 +1203,33 @@ class Download:
             except Exception:
                 pass
 
+    def _archive_into(self, want_name: str) -> str:
+        """按「按后缀归档」规则决定这份成品落在哪个目录，返回目录（可能没变）。
+
+        只在**还没落过盘**的地方调用：.part/.meta 在原目录，改了目录等于把一次
+        下载拆成两半。子目录建不起来（只读盘、那个位置被一个文件占了）不报错
+        打断下载 —— 文件留在原目录，规则没生效这件事写进 archive_note，界面
+        上看得见。「下不下来」和「落在哪个子目录」不能混成一件事。
+        """
+        sub = archive_mod.subdir_for(want_name, self.archive_rules or {})
+        if not sub:
+            return self.directory
+        base = os.path.normpath(self.directory)
+        # 老任务重启后 directory 已经是 …/Video 了：不能再套一层 Video/Video。
+        if base.endswith(os.sep + os.path.normpath(sub)):
+            return self.directory
+        target = os.path.join(base, sub)
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as e:
+            self.archive_note = "按后缀归档没建出子目录 %s（%s），文件留在 %s" % (
+                sub, getattr(e, "strerror", None) or e, base,
+            )
+            return self.directory
+        self.directory = target
+        self.archive_note = ""
+        return target
+
     def _prepare(self) -> None:
         os.makedirs(self.directory, exist_ok=True)
         meta_file = self.meta_path
@@ -1268,6 +1305,11 @@ class Download:
             self.size = total
             if not self.filename or self.filename == "download":
                 self.filename = filename_from_headers(info["headers"], self.final_url)
+            # 归档在这里定：文件名的后缀此刻已经是服务端给的真实后缀，而 .part
+            # 还没建（下面才 open），改目录不会把一次下载劈成两半。已经落了盘的
+            # （断点续传的单流任务）不搬：.part/.meta 还在原目录。
+            if not os.path.exists(self.part_path) and not os.path.exists(self.meta_path):
+                self._archive_into(self.filename)
             self.filename = _unique_name(self.directory, self.filename)  # never clobber
             # 只有支持 Range 才用分块器。单流任务用它的话，工作线程从不更新
             # 分块位置，downloaded 永远是 0 —— 进度条就会一直卡在 0%。
@@ -2479,6 +2521,10 @@ class Download:
         # 音乐站的 .mp3 实际是 m4a…）。改名时以真正产出的容器为准，
         # 否则「能播的文件被改成打不开的后缀」。
         want = _with_ext(want, out)
+        # 归档目录在改名之前定下来：分离轨（字幕/音轨）由 _move_stream_extras
+        # 跟着 self.directory 走，这样它们和成品落在同一个子目录里，不会一个
+        # 在 Video、一个在下载根目录。
+        self._archive_into(want)
         final = _unique_name(self.directory, want, skip=out)
         target = os.path.join(self.directory, final)
         try:
@@ -2722,6 +2768,10 @@ class Download:
             # 同一视频下多段时，成品名要能区分，而不是靠系统的「(1)」。
             base, ext = os.path.splitext(want)
             want = f"{base} [{_section_tag(self.section)}]{ext}"
+        # 归档按**实际产出**的后缀决定目录：音乐页下回来的是 .m4a，规则里写的
+        # 可能是 .mp4。meta 记在原目录里，改目录之前要先把它的位置拿到手。
+        meta_before = self.meta_path
+        self._archive_into(want)
         final = _unique_name(self.directory, want)
         target = os.path.join(self.directory, final)
         moved = None
@@ -2746,7 +2796,7 @@ class Download:
             pass
         self._yt_bytes = self.size
         try:
-            os.remove(self.meta_path)
+            os.remove(meta_before)
         except OSError:
             pass
         self.status = "completed"

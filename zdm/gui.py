@@ -22,7 +22,9 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from zdm import __version__ as VERSION  # noqa: E402
 from zdm import apitoken, autostart, desktop, firefox_ext, runtime, update  # noqa: E402
-from zdm.videopage import is_video_page, is_youtube  # noqa: E402
+from zdm.archive import format_rules_text, normalize_rules  # noqa: E402
+from zdm.videopage import is_playlist_page, is_video_page, is_youtube  # noqa: E402
+from zdm.yt_playlist import DEFAULT_ITEMS, MAX_ITEMS, parse_range  # noqa: E402
 from zdm.manager import clamp_config_number  # noqa: E402
 from zdm.transport import URL_SCHEME_HINT, has_supported_scheme  # noqa: E402
 
@@ -510,6 +512,19 @@ class Api:
             "POST", "youtube/resolve", {"url": url, "cookie": cookie}, timeout=120.0
         )
 
+    def playlist_preview(self, url: str, max_items: int = 0):
+        """展开播放列表：服务端跑 ``yt-dlp --flat-playlist``，频道投稿页要翻页，
+        实测本机一次 10~90 秒（TLS 到 youtube.com 的握手就能占 20 秒），
+        所以超时按「翻清单」给，不按普通的 8 秒接口给。"""
+        body = {"url": url, "source": "desktop"}
+        if max_items:
+            body["max_items"] = int(max_items)
+        return self._req("POST", "playlist/preview", body, timeout=600.0)
+
+    def playlist_add(self, payload: dict):
+        """按范围批量建任务；服务端会复用刚展开的那份名单（5 分钟缓存）。"""
+        return self._req("POST", "playlist/add", payload, timeout=600.0)
+
     def add(self, payload=None, **kw):
         """Create a task.
 
@@ -589,6 +604,7 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -1595,6 +1611,10 @@ class MainWindow(QMainWindow):
         btn_batch.setToolTip("一次粘贴多行链接，可设置优先级 / 定时开始")
         btn_batch.clicked.connect(self._batch_import)
         tb.addWidget(btn_batch)
+        btn_pl = QPushButton("播放列表…")
+        btn_pl.setToolTip("把 YouTube 播放列表/频道投稿页、B 站合集/收藏夹整份展开成一条条任务")
+        btn_pl.clicked.connect(self._playlist_clicked)
+        tb.addWidget(btn_pl)
 
         # Per-task pause / resume live on each row (see _render); the global
         # "pause everything / resume everything" sit next to the filter chips in
@@ -2227,7 +2247,8 @@ class MainWindow(QMainWindow):
             st_item.setForeground(QColor(color))
             st_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             note = str(t.get("stream_note") or "").strip()
-            tip = "\n".join(x for x in (note, _tracks_summary(t)) if x)
+            arch = str(t.get("archive_note") or "").strip()
+            tip = "\n".join(x for x in (note, arch, _tracks_summary(t)) if x)
             if tip:
                 st_item.setToolTip(tip)
             self.table.setItem(row, 4, st_item)
@@ -2321,7 +2342,8 @@ class MainWindow(QMainWindow):
             # 换过引擎（或没找到引擎）的理由挂在状态列上：任务照样下完了，但
             # 「用的是哪个、为什么不是设置里那个」必须能查到，不能只在日志里。
             note = str(t.get("stream_note") or "").strip()
-            tip = "\n".join(x for x in (note, _tracks_summary(t)) if x)
+            arch = str(t.get("archive_note") or "").strip()
+            tip = "\n".join(x for x in (note, arch, _tracks_summary(t)) if x)
             if tip:
                 item.setToolTip(tip)
             elif item.toolTip():
@@ -2953,6 +2975,12 @@ class MainWindow(QMainWindow):
         if not is_downloadable_url(url):
             self._status(f"{URL_SCHEME_HINT}，例如 https://example.com/file.zip")
             return
+        if is_playlist_page(url):
+            # 清单地址建成**一条**任务会被服务端直接拒绝（引擎固定文件名，
+            # 一集覆盖一集，只剩最后一个文件）。这里是桌面端「粘贴 → 下载」
+            # 的唯一汇合点，所以在这拐进展开流程。
+            self._playlist_add(url, extra)
+            return
         if is_youtube(url):
             self._add_youtube(url, extra)
             return
@@ -3037,6 +3065,183 @@ class MainWindow(QMainWindow):
         self._run(self.api.add, payload)
         self._status(f"已加入下载：{title}（{pick}）")
 
+    # ---------------- 播放列表 ----------------
+    def _playlist_clicked(self):
+        url = self.url_edit.text().strip()
+        if not url:
+            clip = QApplication.clipboard().text().strip()
+            if is_downloadable_url(clip):
+                url = clip
+        if not url:
+            self._status("请先填入播放列表/频道链接", hold=5)
+            return
+        if not is_playlist_page(url):
+            self._status("这不像播放列表/合集/频道投稿页，试试直接点「下载」", hold=6)
+            return
+        self._playlist_add(url, {})
+
+    def _playlist_add(self, url: str, extra: dict = None) -> None:
+        """展开清单 → 让用户挑几条 → 逐条建任务。展开要走网络，放后台。"""
+        self._status("正在展开播放列表（清单越大越久，可能要几十秒）…", hold=120)
+        self._background(
+            self.api.playlist_preview,
+            lambda res, _u=url, _e=dict(extra or {}): self._on_playlist(_u, _e, res),
+            url,
+        )
+
+    def _on_playlist(self, url: str, extra: dict, res) -> None:
+        if not isinstance(res, dict) or not res.get("ok"):
+            err = res.get("error") if isinstance(res, dict) else res
+            self._status(f"展开失败：{err or '未知错误'}", hold=10)
+            return
+        items = res.get("items") or []
+        if not items:
+            self._status(
+                "清单里没有可下载的条目"
+                + (f"：{res.get('error')}" if res.get("error") else ""),
+                hold=8,
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("播放列表")
+        form = QFormLayout(dlg)
+        info = QLabel()
+        info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lst = QListWidget()
+        lst.setMinimumSize(640, 260)
+        rng = QLineEdit("all")
+        rng.setPlaceholderText("all 或 1-20、1,3,5-8")
+        rng.setToolTip("要下载哪几条（按下面列出的序号）；不改动就是整份")
+        _zh_standard_menu(rng)
+        maxb = QSpinBox()
+        maxb.setRange(1, MAX_ITEMS)
+        maxb.setValue(min(MAX_ITEMS, max(1, int(res.get("limit") or DEFAULT_ITEMS))))
+        maxb.setToolTip("一次最多翻多少条：频道投稿页一页 30 条，翻得越多等得越久")
+        again = QPushButton("重新展开")
+        prio = QSpinBox()
+        prio.setRange(-99, 99)
+        prio.setValue(int(extra.get("priority") or 0))
+        prio.setToolTip("数字越大越先下载；对这次选中的全部条目生效")
+        sub = QCheckBox("收进以清单标题命名的子目录")
+        sub.setChecked(True)
+        sub.setToolTip("关掉就按「设置」里的下载目录原样存放，几十集会和别的文件混在一起")
+        state = {"count": len(items)}  # 重新展开会换掉列表，校验要用当前这份的条数
+        start_cb = QCheckBox("定时开始")
+        start_edit = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
+        start_edit.setCalendarPopup(True)
+        start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        start_edit.setEnabled(False)
+        start_cb.toggled.connect(start_edit.setEnabled)
+        if extra.get("start_at"):
+            # 从批量导入转过来时用户已经填过一次时间，别再让他填第二遍
+            start_cb.setChecked(True)
+            start_edit.setDateTime(QDateTime.fromSecsSinceEpoch(int(extra["start_at"])))
+
+        def fill(data) -> None:
+            rows = data.get("items") or []
+            state["count"] = len(rows)  # 重新展开后条数会变，校验得跟着新列表走
+            parts = [f"{data.get('title') or '播放列表'} · 列出 {len(rows)} 条"]
+            if data.get("skipped"):
+                parts.append(f"跳过 {data['skipped']} 条（没解析出地址）")
+            if data.get("truncated"):
+                parts.append(f"到 {data.get('limit')} 条截断了，可加大「最多展开」再看后面")
+            if data.get("preview_truncated"):
+                parts.append("界面只列前 200 条，选号时可用序号仍在其中")
+            info.setText(" · ".join(parts))
+            lst.clear()
+            for it in rows:
+                dur = fmt_recorded(it.get("duration") or 0)
+                name = (it.get("title") or "").strip() or it.get("url") or ""
+                lst.addItem(f"{it.get('index')}. {name}" + (f"  · {dur}" if dur else ""))
+
+        def re_expand():
+            """同一份清单换个上限再翻一次：默认 100 条时用户看不到第 101 集。"""
+            again.setEnabled(False)
+            self._status("正在重新展开…", hold=120)
+            self._background(
+                self.api.playlist_preview,
+                lambda r: _on_re_expand(r),
+                url,
+                int(maxb.value()),
+            )
+
+        def _on_re_expand(r):
+            again.setEnabled(True)
+            if isinstance(r, dict) and r.get("ok") and (r.get("items") or []):
+                fill(r)
+                self._status(f"已重新展开，列出 {len(r['items'])} 条", hold=5)
+            else:
+                err = (r.get("error") if isinstance(r, dict) else str(r)) or "未知错误"
+                self._status(f"重新展开失败：{err}", hold=8)
+
+        def submit() -> None:
+            text = rng.text().strip()
+            try:
+                parse_range(text, state["count"])  # 本地先校验，免得等一轮网络才报错
+            except ValueError as e:
+                self._status(str(e), hold=8)
+                return
+            body = {
+                "url": url,
+                "range": text,
+                "max_items": int(maxb.value()),
+                "subdir": bool(sub.isChecked()),
+                "priority": int(prio.value()),
+                "source": "desktop",
+            }
+            if start_cb.isChecked():
+                body["start_at"] = int(start_edit.dateTime().toSecsSinceEpoch())
+            for k in ("dir", "directory", "headers", "cookie"):
+                if extra.get(k):
+                    body[k] = extra[k]
+            ok_btn.setEnabled(False)
+            self._background(
+                self.api.playlist_add,
+                lambda r, _d=dlg: self._on_playlist_added(r, _d),
+                body,
+            )
+
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = box.button(QDialogButtonBox.Ok)
+        ok_btn.setText("加入队列")
+        box.button(QDialogButtonBox.Cancel).setText("取消")
+        box.accepted.connect(submit)
+        box.rejected.connect(dlg.reject)
+        again.clicked.connect(re_expand)
+        row = QHBoxLayout()
+        row.addWidget(maxb)
+        row.addWidget(again)
+        form.addRow("清单", info)
+        form.addRow("", lst)
+        form.addRow("选哪几条", rng)
+        form.addRow("最多展开（条）", row)
+        form.addRow("", sub)
+        form.addRow("优先级", prio)
+        form.addRow("", start_cb)
+        form.addRow("开始时间", start_edit)
+        form.addRow(box)
+        fill(res)
+        dlg.exec_()
+
+    def _on_playlist_added(self, res, dlg=None) -> None:
+        if not isinstance(res, dict) or not res.get("ok"):
+            err = res.get("error") if isinstance(res, dict) else res
+            self._status(f"加入失败：{err or '未知错误'}", hold=10)
+            if dlg is not None:
+                dlg.reject()
+            return
+        failed = res.get("failed") or []
+        msg = f"已加入 {res.get('added', 0)} 条任务 · {res.get('directory') or ''}"
+        if failed:
+            msg += f"，{len(failed)} 条失败（{failed[0].get('error') or ''}）"
+        if res.get("skipped"):
+            msg += f"，{res['skipped']} 条没解析出地址被跳过"
+        self._status(msg, hold=10)
+        if dlg is not None:
+            dlg.accept()
+        self._refresh()
+
     def _batch_import(self):
         """Paste many links at once; priority / scheduled start apply to all."""
         dlg = QDialog(self)
@@ -3077,6 +3282,10 @@ class MainWindow(QMainWindow):
         if not urls:
             self._status("没找到可下载的链接（http/https/ftp/sftp）", hold=5)
             return
+        # 清单链接混在批量里最坑：服务端会拒（一条任务装不下整份），用户只
+        # 看到「N 个失败」。直接把第一个交给展开对话框，剩下的在状态栏点名。
+        lists = [u for u in urls if is_playlist_page(u)]
+        urls = [u for u in urls if not is_playlist_page(u)]
         extra = {"priority": prio.value()}
         if start_cb.isChecked():
             extra["start_at"] = int(start_edit.dateTime().toSecsSinceEpoch())
@@ -3093,16 +3302,23 @@ class MainWindow(QMainWindow):
                     fail += 1
             return {"ok": True, "added": ok, "failed": fail}
 
-        self._background(
-            work,
-            lambda res: self._status(
+        hint = f"，{len(lists)} 个是播放列表（改用「播放列表…」展开）" if lists else ""
+
+        def done(res):
+            self._status(
                 f"批量导入：已加入 {res.get('added', 0)} 个"
-                + (f"，{res.get('failed')} 个失败" if res.get("failed") else ""),
-                hold=6,
-            ),
-            urls,
-            extra,
-        )
+                + (f"，{res.get('failed')} 个失败" if res.get("failed") else "")
+                + hint,
+                hold=8,
+            )
+            self._refresh()
+
+        if not urls:
+            # 全是清单：直接进展开对话框，别让用户再去复制粘贴一次。
+            self._status(f"这 {len(lists)} 个是播放列表，正在展开…", hold=8)
+            self._playlist_add(lists[0], extra)
+            return
+        self._background(work, done, urls, extra)
 
     def _edit_task(self, t):
         if t.get("status") in ("completed", "merging"):
@@ -3606,6 +3822,42 @@ class MainWindow(QMainWindow):
             "合流都要用 ffmpeg。本机" + ("已找到" if have_re else "未找到")
             + " N_m3u8DL-RE 可执行文件（应在 app 的 bin/ 目录）。"
         )
+        # ---- 按后缀自动归档 ----
+        arch_box = QGroupBox("按后缀自动归档（默认关闭）")
+        arch_box.setToolTip(
+            "每一行「后缀 = 子目录」，后缀可以逗号连着写。命中规则的成品落进\n"
+            "<下载目录>/<子目录>，没命中的按原目录落。子目录只能是相对路径，\n"
+            "永远出不了下载目录。\n"
+            "只对**之后**的下载生效：已经在下/已经下完的文件不会被搬来搬去。"
+        )
+        af = QFormLayout(arch_box)
+        arch_text = QPlainTextEdit()
+        arch_text.setPlaceholderText(
+            "留空 = 不分档，全部落在下载目录\n"
+            "例如：\nmp4,mkv,webm = Video\nmp3,m4a,flac = Music\nzip,7z,rar = Archives"
+        )
+        arch_text.setMaximumHeight(120)
+        arch_text.setPlainText(format_rules_text(cfg.get("archive_rules") or {}))
+        _zh_standard_menu(arch_text)
+        arch_preset = QPushButton("套用常见分档（视频/音频/图片/压缩包/文档/字幕）")
+
+        def _fill_preset():
+            arch_text.setPlainText(
+                "mp4,mkv,webm,flv,avi = Video\n"
+                "mp3,m4a,flac,aac,ogg = Music\n"
+                "jpg,jpeg,png,gif,webp = Images\n"
+                "zip,7z,rar,tar,gz = Archives\n"
+                "pdf,epub,mobi,txt = Docs\n"
+                "srt,ass,vtt = Subtitles"
+            )
+
+        arch_preset.clicked.connect(_fill_preset)
+        af.addRow(arch_text)
+        af.addRow("", arch_preset)
+        af.addRow(QLabel(
+            "字幕/音轨这类跟着视频的附带文件会留在成品旁边，不按 .srt 的规则单独挪走 —— "
+            "播放器是在视频旁边找字幕的。"
+        ))
         # ---- appearance: follow the OS appearance by default ----
         appearance = QComboBox()
         for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
@@ -3631,6 +3883,7 @@ class MainWindow(QMainWindow):
         form.addRow("", clip_cb)
         form.addRow("", mirror_cb)
         form.addRow("流媒体（m3u8/mpd）引擎", stream_cb)
+        form.addRow(arch_box)
         form.addRow(rpc_box)
         # ---- site cookies (YouTube / Bilibili need a logged-in session) ----
         cookies_box = QGroupBox("站点 Cookie（用于需要登录的视频站）")
@@ -3691,6 +3944,13 @@ class MainWindow(QMainWindow):
                 # system appearance flip is mistaken for "no change".
                 tm.prime()
             return
+        # 归档规则先本地过一遍：服务端是「一批设置全成或全不成」，一行笔误会
+        # 让目录、限速、代理那些一起改的东西全部回滚，看上去像「保存失败」。
+        try:
+            archive_rules = normalize_rules(arch_text.toPlainText())
+        except ValueError as e:
+            self._status("按后缀归档的规则有问题，设置没有保存：" + str(e), hold=10.0)
+            return
         # Persist the chosen appearance (and apply it if it changed).
         self._theme_preview = None
         tm = theme_manager()
@@ -3721,6 +3981,7 @@ class MainWindow(QMainWindow):
             "clipboard_monitor": clip_cb.isChecked(),
             "mirror_accel": mirror_cb.isChecked(),
             "stream_engine": stream_cb.currentData() or "auto",
+            "archive_rules": archive_rules,
             "rpc_enabled": rpc_cb.isChecked(),
             "site_cookies": {
                 "youtube": yt_cookie.toPlainText().strip(),
