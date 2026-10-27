@@ -21,7 +21,7 @@ from . import presence
 from . import runtime
 from .aria2 import Aria2Rpc
 from .core import normalize_section
-from .manager import Manager
+from .manager import Manager, to_bool
 from .videopage import is_playlist_page, video_page_filename, video_page_url
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -947,6 +947,28 @@ class Handler(BaseHTTPRequestHandler):
             if self.manager.state_error:
                 reply["warning"] = "设置已生效，但没能写入磁盘：" + self.manager.state_error
             return self._json(reply)
+
+        if parts == ["archive", "sweep"]:
+            # 把归档规则补用到**已经下好**的文件上。默认只出清单不动手：移动用户
+            # 的文件不是「忘了传参数」就该发生的事，得有人明确说 apply。
+            from . import archive as archive_mod
+
+            apply_it = to_bool(body.get("apply", False), "apply")
+            directory = str(body.get("directory") or body.get("dir") or "").strip()
+            if directory and not self.manager.can_open_path(directory):
+                return self._error(403, "只能整理下载目录（或任务目录）里的文件")
+            report = self.manager.archive_sweep(directory or None, apply_files=apply_it)
+            if not report.get("ok") and not report.get("moves"):
+                # 目录根本读不了：这已经是失败，不该让界面拿着一份空清单说「整理好了」。
+                return self._error(400, report.get("error") or "整理失败")
+            report["rules"] = archive_mod.describe(self.manager.config.get("archive_rules"))
+            # 界面把「真正生效的那份规则」和输入框里的内容对一下：改了规则没点保存
+            # 就来整理，看到的是空清单，很容易误判成「规则没管用」。
+            report["archive_rules"] = archive_mod.prune_rules(
+                self.manager.config.get("archive_rules")
+            )
+            report["applied"] = bool(apply_it)
+            return self._json(dict(report, ok=True))
 
         if parts == ["open"]:
             path = body.get("path") or str(self.manager.config["download_dir"])

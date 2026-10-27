@@ -453,6 +453,60 @@ def _python_with_qt() -> Optional[str]:
     return None
 
 
+def cmd_archive(args) -> int:
+    """zdm archive：把归档规则补用到**已经下好**的文件上。
+
+    默认只列清单不动手，`--apply` 才真搬。规则本来就只管之后下的文件，
+    仓库里散着的成品是历史欠账 —— 但一次移动几百个文件这种事，必须先让人
+    看清「哪些文件要去哪儿、哪些为什么没动」。
+    """
+    port = _resolve_port(args)
+    if not server.ping(port=port):
+        print("service not running. Start it first:  zdm start --daemon")
+        return 1
+    body = {"apply": bool(args.apply)}
+    if args.dir:
+        body["directory"] = args.dir
+    r = _api("POST", "archive/sweep", body, port=port, timeout=600)
+    if args.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0 if r.get("ok") else 1
+    if not r.get("ok"):
+        print(f"error: {_err(r, '整理失败')}")
+        return 1
+    print(f"规则：{r.get('rules') or '（未配置）'}")
+    print(f"目录：{r.get('directory')}")
+    moves = r.get("moves") or []
+    moved = r.get("moved") or []
+    failed = r.get("failed") or []
+    skipped = r.get("skipped") or []
+    if args.apply:
+        tail = f"，{len(failed)} 个没动" if failed else ""
+        print(f"已移动 {len(moved)} 个文件{tail}")
+        for it in moved[:30]:
+            print(f"  {it['name']}  →  {it['dst']}")
+        if len(moved) > 30:
+            print(f"  （另外 {len(moved) - 30} 个略）")
+    else:
+        if moves:
+            print(f"将移动 {len(moves)} 个文件（还没动手，加 --apply 才真搬）：")
+            for it in moves[:30]:
+                print(f"  {it['name']}  →  {it['dst']}  ({_fmt_size(it.get('size') or 0)})")
+            if len(moves) > 30:
+                print("  （清单只列前 30 个，--json 看全部）")
+        else:
+            print("没有需要移动的文件。")
+    for it in skipped[:30]:
+        print(f"  跳过：{it['name']} —— {it['reason']}")
+    if len(skipped) > 30:
+        print(f"  （另外 {len(skipped) - 30} 条跳过记录略）")
+    if r.get("truncated"):
+        print("  （待移动的文件超过上限，先跑一次再跑一次）")
+    for it in failed[:10]:
+        print(f"  没动：{it['name']} —— {it['reason']}", file=sys.stderr)
+    return 1 if failed else 0
+
+
 def cmd_gui(args) -> int:
     """Launch the native desktop window (falls back to the web UI)."""
     import webbrowser
@@ -783,6 +837,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("value", nargs="?")
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
     s.set_defaults(func=cmd_config)
+
+    s = sub.add_parser(
+        "archive",
+        help="apply the archive rules to files already downloaded (list first, --apply to move)",
+    )
+    s.add_argument("--apply", action="store_true", help="真的移动文件（默认只列清单）")
+    s.add_argument("-o", "--dir", default="", help="要整理的目录（默认＝设置里的下载目录）")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--port", type=int, default=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_archive)
 
     s = sub.add_parser("gui", help="open the native desktop window")
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)

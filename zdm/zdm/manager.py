@@ -942,6 +942,76 @@ class Manager:
         self.save_state()
         return n
 
+    # ---------------- 一次性整理已下好的文件 ----------------
+    def _sweep_claims(self):
+        """整理时「这个路径别动」和「这个路径是谁家的成品」两张表。
+
+        还在跑/暂停/失败的任务一律拦下来：它们目录里那份同名文件或 .part
+        是断点续传的凭据，挪走就等于把一次下载废掉。已完成的反过来要认领 ——
+        文件搬进子目录后，任务记录里的路径必须跟着改，否则界面上的「打开文件」
+        「定位」全指向搬走之前的位置（看起来就像文件丢了）。
+        """
+        blocked = {}
+        owner = {}
+        for d in list(self.downloads.values()):
+            try:
+                final = os.path.abspath(d.target_path)
+            except Exception:  # noqa: BLE001
+                continue
+            if d.status == "completed":
+                owner[final] = d.id
+                continue
+            why = "任务 %s 还在用它（%s）" % (d.id, d.status)
+            for p in (final, os.path.abspath(d.part_path), os.path.abspath(d.meta_path)):
+                blocked[p] = why
+        return blocked, owner
+
+    def archive_preview(self, directory=None) -> dict:
+        """按当前规则列出「会把哪些已下好的文件搬进哪个子目录」，不动手。"""
+        base = os.path.abspath(str(directory or self.config.get("download_dir") or ""))
+        blocked, _ = self._sweep_claims()
+        plan = archive_mod.plan_sweep(base, self.config.get("archive_rules"), blocked=blocked)
+        plan["applied"] = False
+        plan["moved"] = []
+        plan["failed"] = []
+        return plan
+
+    def archive_sweep(self, directory=None, apply_files=False) -> dict:
+        """把归档规则补用到已经下好的文件上。默认只看清单，``apply_files`` 才真搬。"""
+        base = os.path.abspath(str(directory or self.config.get("download_dir") or ""))
+        blocked, owner = self._sweep_claims()
+        plan = archive_mod.plan_sweep(base, self.config.get("archive_rules"), blocked=blocked)
+        if not plan.get("ok") or not apply_files:
+            plan.setdefault("moved", [])
+            plan.setdefault("failed", [])
+            plan["applied"] = False
+            return plan
+        res = archive_mod.apply_sweep(plan)
+        for item in res["moved"]:
+            tid = owner.get(os.path.abspath(str(item.get("src") or "")))
+            d = self.downloads.get(tid) if tid else None
+            if d is None:
+                continue
+            dst = os.path.abspath(str(item["dst"]))
+            # 复核一次：清单是刚才看的，中间用户点了「重新下载」的话这条已经
+            # 又在跑，不能把它的记录改成指向那个已经搬走的旧文件。
+            if d.status != "completed" or os.path.abspath(d.target_path) != os.path.abspath(item["src"]):
+                continue
+            with self._lock:
+                d.directory = os.path.dirname(dst)
+                d.filename = os.path.basename(dst)
+        if res["moved"]:
+            self.save_state()
+        plan.update(
+            {
+                "applied": True,
+                "moved": res["moved"],
+                "failed": res["failed"],
+                "ok": bool(res["ok"]),
+            }
+        )
+        return plan
+
     # ---------------- scheduling ----------------
     def _loop(self) -> None:
         while not self._stop.is_set():

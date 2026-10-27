@@ -11,6 +11,10 @@
 
 这里只管「该落哪儿」，不碰落盘：建目录失败由调用方兜住（文件留在原处），
 下载本身永远不因归档规则而失败。
+
+规则只管**之后**下的文件，仓库里已经散着的成品是历史欠账；``plan_sweep`` /
+``apply_sweep`` 把那笔欠账一次还清 —— 先出清单（默认不动手），冲突只跳过不
+改名，还在下的文件一律不碰。
 """
 from __future__ import annotations
 
@@ -31,6 +35,9 @@ __all__ = [
     "prune_rules",
     "subdir_for",
     "describe",
+    "plan_sweep",
+    "apply_sweep",
+    "TEMP_SUFFIXES",
 ]
 
 
@@ -195,3 +202,178 @@ def describe(rules) -> str:
     if not norm:
         return "未按后缀归档（关闭）"
     return "、".join(f".{k} → {v}" for k, v in norm.items())
+
+
+# 断点/临时文件：这些不是「下好的文件」，移动它们等于打断一次下载。
+TEMP_SUFFIXES = (".part", ".zdm", ".ytdl", ".tmp", ".temp")
+
+
+def _is_temp(name: str) -> bool:
+    low = str(name).lower()
+    return any(low.endswith(s) for s in TEMP_SUFFIXES)
+
+
+def _logical_name(name: str) -> str:
+    """断点文件名 → 它下完之后将要叫的那个名字（``a.mp4.part.zdm`` → ``a.mp4``）。
+
+    报告里只提「规则管得着的那份断点」：用户想知道的是「为什么我的 movie.mp4.part
+    没被归档」，不是「为什么 notes.txt.part 没被归档」（那条规则本来就不管 txt）。
+    """
+    out = str(name or "")
+    for _ in range(4):
+        low = out.lower()
+        for suf in TEMP_SUFFIXES:
+            if low.endswith(suf):
+                out = out[: -len(suf)]
+                break
+        else:
+            break
+        if not out:
+            break
+    return out
+
+
+def _inside(base: str, path: str) -> bool:
+    """归档后的落点还得在下载目录里 —— 规则写歪成「../../x」时宁可不动手。"""
+    try:
+        return os.path.commonpath([base, path]) == base
+    except ValueError:  # 不同盘符（Windows）
+        return False
+
+
+def plan_sweep(directory, rules, blocked=None, limit=5000):
+    """把「按后缀归档」的规则补用到目录里已经下好的文件上，先只出清单不动手。
+
+    规则只管新下载，仓库里已经散着的成品是历史欠账 —— 这个把欠账一次还清。
+    ``blocked`` 是 ``{绝对路径: 理由}``：调用方（Manager）把还在用的文件标进来，
+    这里只负责尊重它，判断不了「这个 .mp4 是不是某个任务的半成品」。
+
+    只看 ``directory`` 的第一层：子目录里的东西已经归过类（或者是用户自己分的），
+    递归进去会把「已经归档好的」再套一层，猜错一次的代价是文件找不到。
+
+    返回 ``{"ok", "directory", "moves", "skipped", "error", "truncated"}``；
+    冲突（目标位置已有同名文件）只跳过并写明理由，**不自动改名** —— 一次性整理
+    里凭空多出 ``video(1).mp4`` 比原地不动更难解释。
+    """
+    base = os.path.abspath(str(directory or ""))
+    moves: list = []
+    skipped: list = []
+    if not base or not os.path.isdir(base):
+        return {
+            "ok": False,
+            "directory": base,
+            "moves": moves,
+            "skipped": skipped,
+            "error": f"下载目录不存在：{base}",
+            "truncated": False,
+        }
+    norm = prune_rules(rules)
+    if not norm:
+        return {
+            "ok": True,
+            "directory": base,
+            "moves": moves,
+            "skipped": skipped,
+            "error": "",
+            "truncated": False,
+        }
+    blocked = {os.path.abspath(str(k)): v for k, v in (blocked or {}).items()}
+    try:
+        names = sorted(os.listdir(base))
+    except OSError as e:
+        return {
+            "ok": False,
+            "directory": base,
+            "moves": moves,
+            "skipped": skipped,
+            "error": "读不了这个目录：%s" % (getattr(e, "strerror", None) or e),
+            "truncated": False,
+        }
+    for name in names:
+        src = os.path.join(base, name)
+        if _is_temp(name):
+            if subdir_for(_logical_name(name), norm):
+                skipped.append({"name": name, "reason": "是没下完的断点/临时文件，移动会打断下载"})
+            continue
+        try:
+            if os.path.islink(src):
+                skipped.append({"name": name, "reason": "是符号链接，按链接指向整理容易出事"})
+                continue
+            if not os.path.isfile(src):
+                continue  # 子目录：已经是「归好类」的样子，不递归进去
+        except OSError as e:
+            skipped.append({"name": name, "reason": "stat 失败：%s" % (getattr(e, "strerror", None) or e)})
+            continue
+        blocked_src = blocked.get(src)
+        sub = subdir_for(name, norm)
+        if not sub:
+            continue
+        # 拦下来的理由放在「本来会动它」之后报：规则没管到的文件没必要出现在报告里。
+        if blocked_src:
+            skipped.append({"name": name, "reason": blocked_src})
+            continue
+        dst = os.path.join(base, sub, name)
+        if os.path.normpath(dst) == os.path.normpath(src):
+            skipped.append({"name": name, "reason": "已经在归档目录里了"})
+            continue
+        if not _inside(base, dst):
+            skipped.append({"name": name, "reason": "规则算出的落点跑到了下载目录外面"})
+            continue
+        if os.path.exists(dst):
+            skipped.append({"name": name, "reason": f"{sub}{os.sep} 里已有同名文件，不覆盖"})
+            continue
+        if len(moves) >= int(limit or 0):
+            return {
+                "ok": True,
+                "directory": base,
+                "moves": moves,
+                "skipped": skipped,
+                "error": "",
+                "truncated": True,
+            }
+        try:
+            size = os.path.getsize(src)
+        except OSError:
+            size = 0
+        moves.append({"name": name, "sub": sub, "src": src, "dst": dst, "size": size})
+    return {
+        "ok": True,
+        "directory": base,
+        "moves": moves,
+        "skipped": skipped,
+        "error": "",
+        "truncated": False,
+    }
+
+
+def apply_sweep(plan):
+    """执行 plan_sweep 的清单。逐个复核再动手：清单是几分钟前看的，目录是活的。
+
+    同一个文件失败不影响别的文件，失败理由留在报告里 —— 一次性整理跑一半崩掉、
+    剩下的没影，是比「不动」更糟的结果。
+    """
+    import shutil
+
+    moved: list = []
+    failed: list = []
+    for item in (plan or {}).get("moves") or []:
+        src, dst = item.get("src"), item.get("dst")
+        name = item.get("name") or os.path.basename(str(src or ""))
+        if not src or not dst:
+            failed.append({"name": name, "reason": "清单项缺路径"})
+            continue
+        if not os.path.exists(src):
+            failed.append({"name": name, "reason": "文件已经不在了"})
+            continue
+        if os.path.exists(dst):
+            failed.append({"name": name, "reason": "目标位置出现了同名文件，不覆盖"})
+            continue
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(src, dst)
+        except OSError as e:
+            failed.append({"name": name, "reason": getattr(e, "strerror", None) or str(e)})
+            continue
+        moved.append({"name": name, "sub": item.get("sub") or "", "src": src, "dst": dst})
+    return {"moved": moved, "failed": failed, "ok": not failed}
+

@@ -249,6 +249,10 @@ srt,ass = Subtitles"                    # 按后缀自动归档；整段留空 =
                                         # 同一个后缀写在两条规则里也会被拒，并点名是哪两条
                                         # 写坏一项（zdm config port abc）会退出码 1 并指名是哪一项，
                                         # 且这一批配置整体不生效，不会改一半留一半
+zdm archive                             # 按上面的规则清点**已经下好**的文件：只列清单，不动手
+zdm archive --apply                     # 看过清单了，真搬（撞名只跳过、不自动改名）
+zdm archive -o /Volumes/移动盘/剧集      # 整理别的目录（必须是下载目录或某个任务的目录）
+zdm archive --json                      # 给脚本看的完整报告（moves / skipped / failed）
 zdm stop
 ```
 
@@ -265,6 +269,7 @@ zdm stop
 | POST | `/api/tasks/{id}/pause\|resume\|restart\|cancel\|open` | 任务操作 |
 | DELETE | `/api/tasks/{id}?files=0` | 删除任务（`files=0` 保留文件） |
 | POST | `/api/config` | 修改配置 |
+| POST | `/api/archive/sweep` | `{apply?, directory?}` → 按后缀规则一次性整理**已经下好**的文件。默认只列清单（`moves:[{name,sub,src,dst,size}]` + `skipped` + `rules` + `truncated`），`apply:true` 才真搬并回 `moved`/`failed`。`directory` 只接受下载目录或某个任务自己的目录（越界 403）；在跑/暂停中的任务持有的文件、半截 `.part`、子目录里的文件都不动，目标撞名只跳过 |
 | GET | `/api/events` | SSE 实时推送 |
 | GET | `/api/extension/firefox.xpi` | 把随包扩展现场打成 Firefox 的 `.xpi`（需令牌） |
 
@@ -290,8 +295,11 @@ zdm stop
 字幕、额外音轨这类 sidecar 跟着成品走，不单独归档，免得 `.srt` 在 Subtitles、`.mkv` 在 Video。
 子目录只能是任务目录里的相对路径 —— `/Volumes/x`、`D:\Video`、`~/x` 一律当场拒绝（硬把它改成
 `<下载目录>/D/Video` 是猜，报错才是答），同一个后缀出现在两条规则里也拒绝并点名是哪两条。
-规则在**这一轮真正开跑时**才取，改设置只影响之后的下载，不会搬已经下好的文件；没归档成功时
-不静默回退原目录，而是在任务上留一句 `archive_note`（三端和 `/api/tasks` 同样可见）。
+规则在**这一轮真正开跑时**才取，改设置只影响之后的下载 —— 已经下好的文件不会被自动重排，
+要归位得走 `zdm archive`（桌面端设置页 / 网页版设置页的「整理已经下好的文件…」，
+`POST /api/archive/sweep`）：先列清单、`--apply` 或点确认才真搬，在跑的任务持有的文件不碰、
+子目录不再递归、撞名只跳过不改名，搬成功的文件会把任务记录里的新路径一起改掉。
+没归档成功时不静默回退原目录，而是在任务上留一句 `archive_note`（三端和 `/api/tasks` 同样可见）。
 
 ## 结构
 

@@ -560,6 +560,17 @@ class Api:
     def set_config(self, patch: dict):
         return self._req("POST", "config", patch)
 
+    def archive_sweep(self, apply_files: bool = False, directory: str = ""):
+        """把归档规则补用到已经下好的文件上。默认只要清单，``apply_files`` 才真搬。
+
+        一次可能翻几百个文件、还要改名后的记录写回 state.json，比普通的 8 秒接口
+        慢 —— 预算给足，别让「其实搬完了」变成界面上的一句超时。
+        """
+        body = {"apply": bool(apply_files)}
+        if directory:
+            body["directory"] = directory
+        return self._req("POST", "archive/sweep", body, timeout=120.0)
+
     def open_path(self, path: str):
         return self._req("POST", "open", {"path": path})
 
@@ -3719,6 +3730,17 @@ class MainWindow(QMainWindow):
             extra["headers"] = {"Referer": referer.text().strip()}
         self._add_url(u, extra)
 
+    def _confirm_archive_sweep(self, parent, text: str) -> bool:
+        """整理前的最后一次确认：把清单摆出来，点了「真正移动」才动手。"""
+        box = QMessageBox(parent)
+        box.setWindowTitle("整理已经下好的文件")
+        box.setIcon(QMessageBox.Question)
+        box.setText(text)
+        do_it = box.addButton("真正移动这些文件", QMessageBox.AcceptRole)
+        box.addButton("先不动", QMessageBox.RejectRole)
+        box.exec_()
+        return box.clickedButton() is do_it
+
     def _settings(self):
         cfg = self.config or {}
         dlg = QDialog(self)
@@ -3923,9 +3945,102 @@ class MainWindow(QMainWindow):
             "播放器是在视频旁边找字幕的。"
         )
         arch_note.setWordWrap(True)
+        # 规则只管「之后」的下载，仓库里已经散着的成品是历史欠账。给一个
+        # 「先看清单、确认了再动手」的入口，比让用户对着设置框自己写 mv 脚本安全。
+        arch_sweep_btn = QPushButton("整理已经下好的文件…")
+        arch_sweep_btn.setToolTip(
+            "把上面的规则补用到下载目录里已经下好的文件上。\n"
+            "先列清单（不动手），确认了才真搬。只整理这一层，子目录里不会再套一层；\n"
+            "还在下载或暂停中的任务持有的文件一律不动；目标位置撞名只跳过、不自动改名。"
+        )
+
+        def _rel(p, base):
+            try:
+                return os.path.relpath(str(p), str(base))
+            except Exception:  # noqa: BLE001
+                return str(p)
+
+        def _sweep_text(rep, applied):
+            base = rep.get("directory") or ""
+            items = (rep.get("moved") if applied else rep.get("moves")) or []
+            skipped = rep.get("skipped") or []
+            failed = rep.get("failed") or []
+            head = "已移动 %d 个文件" % len(items) if applied else "将移动 %d 个文件" % len(items)
+            lines = ["%s（目录：%s）" % (head, base), "用到的规则：%s" % (rep.get("rules") or "（未配置）")]
+            try:
+                want = normalize_rules(arch_text.toPlainText())
+            except ValueError as e:
+                lines.insert(1, "框里的规则现在写错了（%s），上面用的是上一次保存的那份。" % e)
+                want = None
+            if want is not None and want != (rep.get("archive_rules") or {}):
+                lines.insert(
+                    1,
+                    "注意：上面用的是已保存的规则，和框里写的不一样 —— 改完规则要先点「保存」再整理。",
+                )
+            for it in items[:200]:
+                lines.append("  %s  →  %s" % (it.get("name"), _rel(it.get("dst"), base)))
+            if len(items) > 200:
+                lines.append("  （另外 %d 个略）" % (len(items) - 200))
+            if rep.get("truncated"):
+                lines.append("  （要搬的文件超过一次的上限，整理完可以再点一次）")
+            if skipped:
+                lines.append("")
+                lines.append("跳过 %d 个：" % len(skipped))
+                for it in skipped[:80]:
+                    lines.append("  %s —— %s" % (it.get("name"), it.get("reason")))
+                if len(skipped) > 80:
+                    lines.append("  （另外 %d 条略）" % (len(skipped) - 80))
+            if failed:
+                lines.append("")
+                lines.append("没能移动 %d 个：" % len(failed))
+                for it in failed[:40]:
+                    lines.append("  %s —— %s" % (it.get("name"), it.get("reason")))
+            if not applied and not items:
+                lines.append("")
+                lines.append("（没有要搬的。要么规则没命中任何文件，要么早就归好类了。）")
+            return "\n".join(lines)
+
+        def _sweep_done(rep):
+            arch_sweep_btn.setEnabled(True)
+            if not isinstance(rep, dict):
+                self._status("整理没成功：服务没有回话", hold=10.0)
+                return
+            if not rep.get("ok"):
+                self._status("整理没成功：" + str(rep.get("error") or "服务没有回话"), hold=12.0)
+                return
+            QMessageBox.information(dlg, "整理已经下好的文件", _sweep_text(rep, True))
+            # 文件的新位置写进了任务记录，列表要跟着刷新，否则「打开文件」还指着旧路径
+            self._refresh()
+
+        def _sweep_apply():
+            arch_sweep_btn.setEnabled(False)
+            self._status("正在移动文件…", hold=600.0)
+            self._background(self.api.archive_sweep, _sweep_done, True)
+
+        def _sweep_preview(rep):
+            arch_sweep_btn.setEnabled(True)
+            if not isinstance(rep, dict):
+                self._status("整理没成功：服务没有回话", hold=10.0)
+                return
+            if not rep.get("ok"):
+                self._status("整理没成功：" + str(rep.get("error") or "服务没有回话"), hold=12.0)
+                return
+            if not (rep.get("moves") or []):
+                QMessageBox.information(dlg, "整理已经下好的文件", _sweep_text(rep, False))
+                return
+            if self._confirm_archive_sweep(dlg, _sweep_text(rep, False)):
+                _sweep_apply()
+
+        def _on_archive_sweep():
+            arch_sweep_btn.setEnabled(False)
+            self._status("正在按规则清点已经下好的文件…", hold=600.0)
+            self._background(self.api.archive_sweep, _sweep_preview)
+
+        arch_sweep_btn.clicked.connect(_on_archive_sweep)
         af.addRow(arch_text)
         af.addRow("", arch_preset)
         af.addRow(arch_note)
+        af.addRow("", arch_sweep_btn)
         # ---- appearance: follow the OS appearance by default ----
         appearance = QComboBox()
         for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):

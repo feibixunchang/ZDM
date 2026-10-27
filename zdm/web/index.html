@@ -252,6 +252,10 @@
               placeholder="mp4,mkv,webm = Video&#10;mp3,m4a,flac = Music&#10;zip,7z,rar = Archives"></textarea>
             <small>命中的成品落进「下载目录/子目录」，没命中的照旧；字幕/音轨这类附带文件留在成品旁边，不单独归档。只对之后的下载生效，不会搬已经下好的文件。</small>
           </div>
+          <div class="field full">
+            <button id="btnArchiveSweep" type="button">整理已经下好的文件…</button>
+            <small>把上面这条规则补用到下载目录里已经下好的文件：先列清单，确认了才真搬。只整理这一层目录，还在下载或暂停中的任务持有的文件不动，目标位置撞名只跳过、不自动改名。</small>
+          </div>
         </div>
       </div>
 
@@ -343,6 +347,20 @@
   <div class="dlg-f">
     <button id="btnListCancel">取消</button>
     <button class="primary" id="btnListAdd" disabled>加入队列</button>
+  </div>
+</dialog>
+
+<dialog id="dlgSweep">
+  <div class="dlg-h">整理已经下好的文件</div>
+  <div class="dlg-b" style="grid-template-columns:1fr">
+    <div class="field full"><div id="sweepNote" class="sub"></div></div>
+    <div class="field full"><label>将要移动</label><div class="listbox" id="sweepMoves"></div></div>
+    <div class="field full"><label>跳过</label><div class="listbox" id="sweepSkips"></div></div>
+    <div class="field full"><label>没能移动</label><div class="listbox" id="sweepFails"></div></div>
+  </div>
+  <div class="dlg-f">
+    <button id="btnSweepClose">关闭</button>
+    <button class="primary" id="btnSweepGo">真正移动这些文件</button>
   </div>
 </dialog>
 
@@ -490,6 +508,26 @@ const T_EXACT = {
   '按后缀自动归档（每行「后缀 = 子目录」，留空=关闭）': 'Archive by extension (one “extension = subfolder” per line; blank = off)',
   '命中的成品落进「下载目录/子目录」，没命中的照旧；字幕/音轨这类附带文件留在成品旁边，不单独归档。只对之后的下载生效，不会搬已经下好的文件。':
     'A finished file whose extension matches lands in “download folder/subfolder”; anything else stays where it was. Sidecar files such as subtitles and extra audio tracks stay next to the media instead of being archived separately. This affects later downloads only — files already downloaded are not moved.',
+  // 一次性整理已经下好的文件（设置 → 流媒体与归档）
+  '整理已经下好的文件…': 'Tidy up files already downloaded…',
+  '未按后缀归档（关闭）': 'No per-extension archiving (off)',
+  '整理已经下好的文件': 'Tidy up files already downloaded',
+  '把上面这条规则补用到下载目录里已经下好的文件：先列清单，确认了才真搬。只整理这一层目录，还在下载或暂停中的任务持有的文件不动，目标位置撞名只跳过、不自动改名。':
+    'Apply the rules above to the files that are already sitting in the download folder: the list comes first, nothing moves until you confirm. Only this level of the folder is tidied; files a running or paused task still owns are left alone, and a name clash in the target subfolder is skipped rather than silently renamed.',
+  '将要移动': 'To move',
+  '跳过': 'Skipped',
+  '没能移动': 'Not moved',
+  '真正移动这些文件': 'Move these files',
+  '关闭': 'Close',
+  '无': 'None',
+  '注意：上面用的是已保存的规则，和框里写的不一样 —— 改完规则要先点「保存」再整理。':
+    'Note: the list above uses the saved rules, which differ from what you typed in the box — save the rules first, then tidy up.',
+  '要搬的文件超过一次的上限，整理完可以再点一次。':
+    'There are more matching files than one run handles; click again after this one finishes.',
+  '正在按规则清点已经下好的文件…': 'Matching files already downloaded against the rules…',
+  '没有需要移动的文件': 'Nothing needs moving.',
+  '只能整理下载目录（或任务目录）里的文件': 'Only files inside the download folder (or a task folder) can be tidied',
+  '服务没有回话': 'the service did not reply',
   '需要 http(s) 的链接': 'A http(s) link is required',
   '修改任务': 'Edit task',
   '下载地址': 'Download URL',
@@ -601,6 +639,23 @@ const T_RULES = [
    'Extension .$1 is in both “$2” and “$3” — which folder should win is ambiguous'],
   [/按后缀归档没建出子目录 (.*?)（/g, 'Could not create the archive subfolder $1 ('],
   [/），文件留在 /g, ') — the file stayed in '],
+  // 一次性整理：清点数、跳过理由（archive.py / manager.py 回的话）
+  [/已移动 (\d+) 个文件/g, 'Moved $1 file(s)'],
+  [/将移动 (\d+) 个文件/g, 'About to move $1 file(s)'],
+  [/^目录：/g, 'Folder: '],
+  [/^用到的规则：/g, 'Rules in effect: '],
+  [/未按后缀归档（关闭）/g, 'no per-extension archiving (off)'],
+  [/整理失败：/g, 'Tidy-up failed: '],
+  [/^整理失败$/g, 'Tidy-up failed'],
+  [/（另外 (\d+) 条略）/g, '($1 more not shown)'],
+  [/下载目录不存在：/g, 'The download folder does not exist: '],
+  [/读不了这个目录：/g, 'Cannot read this folder: '],
+  [/是没下完的断点\/临时文件，移动会打断下载/g, 'a partial or temporary file — moving it would break the download'],
+  [/是符号链接，按链接指向整理容易出事/g, 'a symbolic link — following where it points is risky'],
+  [/已经在归档目录里了/g, 'is already inside the archive subfolder'],
+  [/规则算出的落点跑到了下载目录外面/g, 'the rules resolve to a destination outside the download folder'],
+  [/(.*?) 里已有同名文件，不覆盖/g, '“$1” already holds a file with that name — left alone'],
+  [/任务 (\S+?) 还在用它（(\w+)）/g, 'task $1 still owns it ($2)'],
   [/· 共 (\d+) 项/g, '· $1 items in total'],
   [/总速度/g, 'Total speed'],
   [/本地服务已连接 · (\S+) · 端口 (\d+)/g, 'Local service connected · $1 · port $2'],
@@ -1509,6 +1564,86 @@ $('#btnOpenDir').onclick = async () => {
   if (!dir) return toast('请先填写目录');
   const r = await api('POST','open',{path:dir});
   if (!r.ok) toast(r.error || '打开目录失败');
+};
+
+// 一次性整理已经下好的文件。规则只管「之后」的下载，目录里散着的成品是历史欠账；
+// 而一次移动几百个文件这种事不能是「点一下就发生」，必须先出清单，并且把
+// 「为什么这个文件没动」写在同一屏上（还在跑的任务持有的、目标位置撞名的）。
+function parseArchiveText(text) {
+  const DIV = /\s*(?:=>|->|→|=|:|：)\s*/;
+  const out = {};
+  String(text || '').split('\n').forEach(line => {
+    const raw = line.trim();
+    if (!raw || raw.startsWith('#') || raw.startsWith('//')) return;
+    const div = DIV.exec(raw);
+    if (!div) return;
+    const exts = raw.slice(0, div.index).trim().split(/[,，;；、\s]+/)
+      .map(s => s.replace(/^[.*]/, '').toLowerCase()).filter(Boolean);
+    const sub = raw.slice(div.index + div[0].length).trim();
+    if (!exts.length || !sub) return;
+    out[exts.join(',')] = sub;
+  });
+  return out;
+}
+// 服务端把规则里的分隔符统一成 os.sep（Windows 上是 \），框里写的是 /。
+// 比的是「同一份规则没有」，不是字符串一模一样。
+function rulesKey(map) {
+  return Object.keys(map || {}).sort()
+    .map(k => k + '=' + String(map[k]).replace(/\\/g, '/').replace(/\/+/g, '/'))
+    .join(';');
+}
+function relIn(base, path) {
+  const p = String(path || '');
+  return base && p.startsWith(base) ? p.slice(base.length).replace(/^[\\/]+/, '') : p;
+}
+function sweepRows(el, items, fmt) {
+  if (!items.length) { el.innerHTML = '<span class="none">无</span>'; return; }
+  el.innerHTML = items.slice(0, 200).map(fmt).join('')
+    + (items.length > 200 ? `<div>（另外 ${items.length - 200} 条略）</div>` : '');
+}
+function paintSweep(rep, applied) {
+  const base = rep.directory || '';
+  const items = applied ? (rep.moved || []) : (rep.moves || []);
+  const notes = [
+    applied ? `已移动 ${items.length} 个文件` : `将移动 ${items.length} 个文件`,
+    `目录：${base}`,
+    `用到的规则：${rep.rules || '（未配置）'}`,
+  ];
+  if (!applied && rulesKey(parseArchiveText($('#cfgArchive').value)) !== rulesKey(rep.archive_rules))
+    notes.push('注意：上面用的是已保存的规则，和框里写的不一样 —— 改完规则要先点「保存」再整理。');
+  if (rep.truncated) notes.push('要搬的文件超过一次的上限，整理完可以再点一次。');
+  $('#sweepNote').innerHTML = notes.map(n => esc(n)).join('<br>');
+  sweepRows($('#sweepMoves'), items,
+    it => `<div>${esc(it.name)} <span class="sub">→ ${esc(relIn(base, it.dst))}</span></div>`);
+  sweepRows($('#sweepSkips'), rep.skipped || [],
+    it => `<div>${esc(it.name)} <span class="sub">— ${esc(it.reason)}</span></div>`);
+  sweepRows($('#sweepFails'), rep.failed || [],
+    it => `<div>${esc(it.name)} <span class="sub">— ${esc(it.reason)}</span></div>`);
+  $('#btnSweepGo').style.display = (!applied && items.length) ? '' : 'none';
+}
+$('#btnArchiveSweep').onclick = async () => {
+  const btn = $('#btnArchiveSweep');
+  btn.disabled = true;
+  toast('正在按规则清点已经下好的文件…');
+  const rep = await api('POST', 'archive/sweep', {});
+  btn.disabled = false;
+  if (!rep.ok) { toast('整理失败：' + (rep.error || '服务没有回话')); return; }
+  if (!(rep.moves || []).length && !(rep.skipped || []).length) {
+    toast('没有需要移动的文件');
+    return;
+  }
+  paintSweep(rep, false);
+  $('#dlgSweep').showModal();
+};
+$('#btnSweepClose').onclick = () => $('#dlgSweep').close();
+$('#btnSweepGo').onclick = async () => {
+  const btn = $('#btnSweepGo');
+  btn.disabled = true;
+  const rep = await api('POST', 'archive/sweep', { apply: true });
+  btn.disabled = false;
+  if (!rep.ok) { toast('整理失败：' + (rep.error || '服务没有回话')); return; }
+  paintSweep(rep, true);
+  refresh();
 };
 
 let es;
