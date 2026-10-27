@@ -1710,15 +1710,32 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, k=key: self._set_filter(k))
             self.filter_btns[key] = b
             hl.addWidget(b)
-        # 第二行中间以前是 addStretch 撑出来的死空白：窗口越宽洞越大，和第一行的洞
-        # 还不对齐，两行摆在一起显得参差。现在这块放一栏实时汇总（进行中几个、总速度、
-        # 排队/暂停/合并/失败/完成各几个），没任务时是一句引导文案 —— 空白变成有内容
-        # 的一栏。内容见 _update_summary()。
+        # 「检查更新」以前只藏在托盘菜单和右下角版本号里，想主动查一次得先找到暗门；
+        # 搜索框是任务多了以后「全部」页里翻文件的刚需。两个都放在筛选页签同一行 ——
+        # 左段全是「看哪几条任务」的控件。
+        btn_update = QPushButton("检查更新")
+        btn_update.setToolTip("向发布页查一次新版本（与右下角版本号点击等效）")
+        btn_update.clicked.connect(lambda: self._check_update(silent=False))
+        hl.addWidget(btn_update)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索文件名…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumWidth(120)
+        self.search_edit.setMaximumWidth(280)
+        self.search_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.search_edit.textChanged.connect(self._render)
+        # 空间紧张时 deficit 按 stretch 分摊：搜索框拿 2 份先缩（它少 40px 只是输入
+        # 区短点），汇总栏拿 1 份保底 —— 数字比输入框更值得留在第一视野。
+        # 宽窗口里搜索框封顶 280px，剩余全给汇总栏。
+        hl.addWidget(self.search_edit, 2)
+        # 汇总栏：有任务时报进行中几个、总速度、排队/暂停/合并/失败/完成各几个；
+        # 空列表时报下载盘剩余 —— 引导那句「粘贴链接回车」归输入框占位符管，这里不
+        # 复读（用户点名）。内容见 _update_summary()。
         self.summary_label = _ElidedLabel()
         self.summary_label.setObjectName("toolSummary")
         self.summary_label.setAlignment(Qt.AlignCenter)
         self.summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.summary_label.setMinimumWidth(80)
+        self.summary_label.setMinimumWidth(40)
         self.summary_label.setContentsMargins(10, 0, 10, 0)
         hl.addWidget(self.summary_label, 1)
         # 「清除已完成 / 打开目录 / 设置」从上面那行挪到这里。默认 1080 宽的窗口里
@@ -2077,9 +2094,17 @@ class MainWindow(QMainWindow):
         if counts.get("completed"):
             parts.append(f"已完成 {counts['completed']}")
         self.summary_label.setFullText(
-            " · ".join(parts) if parts
-            else "暂无任务 · 粘贴链接后回车，或拖链接进窗口"
+            " · ".join(parts) if parts else "暂无任务 · " + self._disk_free_text()
         )
+
+    def _disk_free_text(self) -> str:
+        # 空列表时中间栏报磁盘剩余：下载器最该盯的就是这个，也填住了留白。
+        import shutil
+        d = str(self.config.get("download_dir") or "").strip() or os.path.expanduser("~/Downloads")
+        try:
+            return f"下载盘剩余 {fmt_size(shutil.disk_usage(os.path.expanduser(d))[2])}"
+        except OSError:
+            return "下载盘剩余未知"
 
     def _status(self, msg: str, hold: float = 3.0):
         """Show a message in the status bar and keep the poller off it briefly."""
@@ -2163,14 +2188,20 @@ class MainWindow(QMainWindow):
         # reorder self.tasks (that used to make the table order and the row ->
         # task lookup disagree).
         if f == "all":
-            return list(self.tasks)
-        if f == "downloading":
-            return [t for t in self.tasks if t.get("status") in ("downloading", "queued", "merging")]
-        if f == "sniffer":
+            items = list(self.tasks)
+        elif f == "downloading":
+            items = [t for t in self.tasks if t.get("status") in ("downloading", "queued", "merging")]
+        elif f == "sniffer":
             # Media the browser extension found on a page. This is the only
             # filter that keys off provenance rather than status.
-            return [t for t in self.tasks if t.get("source") == "sniffer"]
-        return [t for t in self.tasks if t.get("status") == f]
+            items = [t for t in self.tasks if t.get("source") == "sniffer"]
+        else:
+            items = [t for t in self.tasks if t.get("status") == f]
+        # 搜索框叠在页签筛选之上：先选「看哪一类」，再按文件名缩小。
+        q = self.search_edit.text().strip().lower()
+        if q:
+            items = [t for t in items if q in str(t.get("filename") or "").lower()]
+        return items
 
     def _task_at_row(self, row: int):
         """Map a visual table row to the task it currently shows.
