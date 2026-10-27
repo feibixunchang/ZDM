@@ -1576,14 +1576,38 @@ class _ElidedLabel(QLabel):
     def __init__(self, *args):
         super().__init__(*args)
         self._full = ""
+        self._on_click = None
+        self._click_tip = ""
 
     def setFullText(self, text: str) -> None:
         self._full = text
         self._refit()
 
+    def set_clickable(self, fn, tip: str = "") -> None:
+        """fn=None 时恢复成纯文本：光标、提示都交还给父控件。
+
+        空态那一栏报的是「磁盘剩余」，点它要能开详情小窗；有任务时报的是统计数，
+        同一块文字含义就变了，所以两种状态分别开关，别拿统计数字当磁盘按钮。
+        """
+        self._on_click = fn
+        self._click_tip = tip if fn is not None else ""
+        if fn is None:
+            self.unsetCursor()
+        else:
+            self.setCursor(Qt.PointingHandCursor)
+        self._refit()
+
     def resizeEvent(self, event):
         self._refit()
         super().resizeEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if (self._on_click is not None and event.button() == Qt.LeftButton
+                and self.rect().contains(event.pos())):
+            event.accept()
+            self._on_click()
+            return
+        super().mouseReleaseEvent(event)
 
     def _refit(self) -> None:
         m = self.contentsMargins()
@@ -1593,7 +1617,80 @@ class _ElidedLabel(QLabel):
                      else (self.fontMetrics().elidedText(self._full, Qt.ElideRight, avail)
                            if avail > 0 else ""))
         # 被省略的那截靠悬停补全（用户点名）；整句放得下时不弹重复的提示。
-        self.setToolTip("" if fits else self._full)
+        tip = "" if fits else self._full
+        if self._click_tip:
+            tip = f"{tip}\n{self._click_tip}" if tip else self._click_tip
+        self.setToolTip(tip)
+
+
+class _DiskDialog(QDialog):
+    """下载盘容量详情：总量 / 已用 / 剩余 / 使用率。
+
+    工具条那一栏只塞得下一个「磁盘剩余 X」，看不出「总共多大、还剩几成」；
+    用户点名要点开一个小窗看准数，所以数字在这里一次列全，并留「刷新」——
+    下载中途空间是会一直在变的，打开时的快照几秒后就旧了。
+    """
+
+    def __init__(self, parent, read, open_dir):
+        super().__init__(parent)
+        self._read = read
+        self._open_dir = open_dir
+        self.setWindowTitle("磁盘空间")
+        self.setModal(False)
+        # 不加宽的话「下载目录」会折成两行、数字那列挤成一坨，读起来反而费劲。
+        self.setMinimumWidth(380)
+        outer = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        self.path_v = QLabel()
+        self.path_v.setWordWrap(True)
+        self.path_v.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.total_v = self._value()
+        self.used_v = self._value()
+        self.free_v = self._value()
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setFormat("已用 %p%")
+        form.addRow("下载目录", self.path_v)
+        form.addRow("总容量", self.total_v)
+        form.addRow("已用", self.used_v)
+        form.addRow("剩余", self.free_v)
+        form.addRow("使用率", self.bar)
+        outer.addLayout(form)
+        box = QDialogButtonBox()
+        btn_open = box.addButton("打开下载目录", QDialogButtonBox.ActionRole)
+        btn_refresh = box.addButton("刷新", QDialogButtonBox.ActionRole)
+        box.addButton("关闭", QDialogButtonBox.RejectRole)
+        btn_open.clicked.connect(lambda: self._open_dir())
+        btn_refresh.clicked.connect(self.reload)
+        outer.addWidget(box)
+        self.reload()
+
+    @staticmethod
+    def _value() -> QLabel:
+        v = QLabel()
+        v.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        return v
+
+    def reload(self) -> None:
+        path, total, used, free = self._read()
+        self.path_v.setText(path)
+        if total is None:
+            # 目录被删了/挪到没挂载的外置盘：明说读不到，别显示一堆 0。
+            for w in (self.total_v, self.used_v, self.free_v):
+                w.setText("读取失败")
+            self.bar.setValue(0)
+            self.bar.setFormat("不可用")
+            self.setToolTip("下载目录当前读不到容量：可能已被删除或所在卷未挂载")
+            return
+        self.bar.setFormat("已用 %p%")
+        self.setToolTip("")
+        # 只报一种单位：以前「228.3 GB（245.1 GB）」两串并排，看着像两个互相矛盾的数，
+        # 其实只是 GiB/GB 的口径差 —— 反而更费解。精确值留给「剩余」这一行。
+        self.total_v.setText(fmt_size(total))
+        self.used_v.setText(fmt_size(used))
+        self.free_v.setText(f"{fmt_size(free)}（{free:,} 字节）")
+        self.bar.setValue(int(round(used * 1000.0 / total)) if total else 0)
 
 
 def _vsep() -> "QWidget":
@@ -1721,16 +1818,18 @@ class MainWindow(QMainWindow):
         self.search_edit.setPlaceholderText("搜索文件名…")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setMinimumWidth(120)
-        self.search_edit.setMaximumWidth(280)
+        # 封顶从 280 抬到 420：用户点名「要么把搜索框加长」。宽窗口（1900）里这一栏
+        # 确实能一口气看全一长串文件名；窄窗口里没有它什么事，空态会整块收起
+        # （见 _update_summary），窄窗的宽度全留给磁盘那一串。
+        self.search_edit.setMaximumWidth(420)
         self.search_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.search_edit.textChanged.connect(self._render)
         # 空间紧张时 deficit 按 stretch 分摊：搜索框拿 2 份先缩（它少 40px 只是输入
         # 区短点），汇总栏拿 1 份保底 —— 数字比输入框更值得留在第一视野。
-        # 宽窗口里搜索框封顶 280px，剩余全给汇总栏。
         hl.addWidget(self.search_edit, 2)
         # 汇总栏：有任务时报进行中几个、总速度、排队/暂停/合并/失败/完成各几个；
-        # 空列表时报下载盘剩余 —— 引导那句「粘贴链接回车」归输入框占位符管，这里不
-        # 复读（用户点名）。内容见 _update_summary()。
+        # 空列表时只报磁盘剩余，点它开磁盘详情小窗。引导那句「粘贴链接回车」归输入框
+        # 占位符管，这里不复读（用户点名）。内容见 _update_summary()。
         self.summary_label = _ElidedLabel()
         self.summary_label.setObjectName("toolSummary")
         self.summary_label.setAlignment(Qt.AlignCenter)
@@ -2093,18 +2192,55 @@ class MainWindow(QMainWindow):
                 parts.append(f"{label} {counts[key]}")
         if counts.get("completed"):
             parts.append(f"已完成 {counts['completed']}")
-        self.summary_label.setFullText(
-            " · ".join(parts) if parts else "暂无任务 · " + self._disk_free_text()
-        )
+        if parts:
+            # 有任务时这一栏是统计数字，点它没有对应窗口 —— 把点击态收掉，
+            # 别让用户以为「进行中 2」也能弹出什么。搜索框这时有意义，放回来。
+            self.summary_label.set_clickable(None)
+            self.summary_label.setFullText(" · ".join(parts))
+            self.search_edit.setVisible(True)
+        else:
+            # 空列表不再报「暂无任务」：表格里一行都没有，这句话本身没信息量，
+            # 而且它把「磁盘剩余」挤成了长句（用户点名去掉）。这一栏只剩磁盘剩余，
+            # 点开是磁盘详情小窗。
+            #
+            # 同时把搜索框收起：默认窗口只有 1080，实测第二行中段一共只剩 200px，
+            # 「磁盘剩余 84.4 GB」自己就要 130px，跟搜索框抢的结果是两个一起截断，
+            # 用户看到的是「磁盘…」——等于没满足要求。列表空的本来就没有可搜的对象，
+            # 让它把位子腾出来最省，任务一回来搜索框自动出现。
+            self.summary_label.set_clickable(
+                self._show_disk_dialog, "点击查看磁盘空间详情")
+            self.summary_label.setFullText(self._disk_free_text())
+            if self.search_edit.isVisible():
+                # 收起前清空：留着隐形过滤条件，任务回来时会莫名其妙少几条。
+                self.search_edit.clear()
+            self.search_edit.setVisible(False)
+
+    def _disk_snapshot(self):
+        """(目录, 总量, 已用, 剩余)；目录读不到时后三项为 None。"""
+        import shutil
+        path = str((self.config or {}).get("download_dir") or "").strip()
+        path = os.path.expanduser(path or os.path.expanduser("~/Downloads"))
+        try:
+            # disk_usage 返回 (total, used, free)：剩余是第 [2] 项，不是 total-used。
+            u = shutil.disk_usage(path)
+            return path, u.total, u.used, u.free
+        except OSError:
+            return path, None, None, None
 
     def _disk_free_text(self) -> str:
-        # 空列表时中间栏报磁盘剩余：下载器最该盯的就是这个，也填住了留白。
-        import shutil
-        d = str(self.config.get("download_dir") or "").strip() or os.path.expanduser("~/Downloads")
-        try:
-            return f"下载盘剩余 {fmt_size(shutil.disk_usage(os.path.expanduser(d))[2])}"
-        except OSError:
-            return "下载盘剩余未知"
+        _, _, _, free = self._disk_snapshot()
+        return f"磁盘剩余 {fmt_size(free)}" if free is not None else "磁盘剩余未知"
+
+    def _show_disk_dialog(self):
+        dlg = getattr(self, "_disk_dlg", None)
+        if dlg is None:
+            dlg = _DiskDialog(self, self._disk_snapshot, self._open_dir)
+            self._disk_dlg = dlg
+        else:
+            dlg.reload()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _status(self, msg: str, hold: float = 3.0):
         """Show a message in the status bar and keep the poller off it briefly."""
