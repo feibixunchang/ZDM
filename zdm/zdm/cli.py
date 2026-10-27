@@ -48,6 +48,19 @@ def _api(method: str, path: str, payload: Optional[dict] = None, port: int = 0,
         return {"ok": False, "error": f"service not reachable: {e}"}
 
 
+def _err(r: dict, fallback: str = "服务没有说明原因") -> str:
+    """把 ok:false 响应里的理由取成一句人话。
+
+    直接 print(r.get('error')) 在服务端漏写理由时会打成「error: None」——
+    用户看到的是「程序坏了」，实际往往只是那条任务已经不在了。
+    """
+    e = r.get("error")
+    if isinstance(e, dict):
+        e = e.get("message") or json.dumps(e, ensure_ascii=False)
+    text = str(e).strip() if e is not None else ""
+    return text or fallback
+
+
 def _resolve_port(args) -> int:
     port = getattr(args, "port", 0) or 0
     if port:
@@ -141,7 +154,7 @@ def cmd_stop(args) -> int:
             os.remove(PID_FILE)
     except Exception:
         pass
-    print("stopped" if r.get("ok") else f"no running service ({r.get('error')})")
+    print("stopped" if r.get("ok") else f"no running service ({_err(r, 'not reachable')})")
     return 0
 
 
@@ -204,7 +217,7 @@ def cmd_add(args) -> int:
         return _add_playlist(args, port, payload)
     r = _api("POST", "tasks", payload, port=port)
     if not r.get("ok"):
-        print(f"error: {r.get('error')}")
+        print(f"error: {_err(r)}")
         return 1
     task = r.get("task") or {}
     note = ""
@@ -307,7 +320,7 @@ def cmd_playlist(args) -> int:
         print(json.dumps(r, ensure_ascii=False, indent=2))
         return 0 if r.get("ok") else 1
     if not (r.get("items") or []):
-        print(f"error: {r.get('error') or 'could not expand this link'}")
+        print(f"error: {_err(r, 'could not expand this link')}")
         return 1
     _print_playlist(r)
     print("add with:  zdm add \"%s\" --playlist 1-%d" % (args.url, len(r["items"])))
@@ -319,11 +332,11 @@ def _add_playlist(args, port: int, payload: dict) -> int:
     body = _playlist_body(args, payload, "add")
     r = _api("POST", "playlist/add", body, port=port, timeout=600)
     if not r.get("added"):
-        err = r.get("error") or "no task created"
+        err = _err(r, "no task created")
         print(f"error: {err}")
         if r.get("failed"):
             for f in r["failed"][:5]:
-                print(f"  #{f.get('index')}: {f.get('error')}", file=sys.stderr)
+                print(f"  #{f.get('index')}: {_err(f, '未知原因')}", file=sys.stderr)
         return 1
     print(f"queued {r['added']} task(s) from \"{r.get('title') or args.url}\""
           f" -> {r.get('directory')}")
@@ -332,7 +345,7 @@ def _add_playlist(args, port: int, payload: dict) -> int:
     if r.get("truncated"):
         print(f"  (list capped at {r.get('limit')} entries; raise --max-items for more)")
     for f in (r.get("failed") or [])[:5]:
-        print(f"  #{f.get('index')} failed: {f.get('error')}", file=sys.stderr)
+        print(f"  #{f.get('index')} failed: {_err(f, '未知原因')}", file=sys.stderr)
     if len(r.get("failed") or []) > 5:
         print(f"  ({len(r['failed'])} failures in total)", file=sys.stderr)
     if load_config().get("auto_show_gui", True):
@@ -344,7 +357,7 @@ def cmd_list(args) -> int:
     port = _resolve_port(args)
     r = _api("GET", "tasks", port=port)
     if not r.get("ok"):
-        print(f"error: {r.get('error')}")
+        print(f"error: {_err(r)}")
         return 1
     tasks = r["tasks"]
     if args.json:
@@ -365,7 +378,7 @@ def cmd_list(args) -> int:
 def _task_action(args, action: str) -> int:
     port = _resolve_port(args)
     r = _api("POST", f"tasks/{args.id}/{action}", {}, port=port)
-    print("ok" if r.get("ok") else f"error: {r.get('error')}")
+    print("ok" if r.get("ok") else f"error: {_err(r)}")
     return 0 if r.get("ok") else 1
 
 
@@ -373,7 +386,7 @@ def cmd_remove(args) -> int:
     port = _resolve_port(args)
     suffix = "?files=0" if args.keep_files else ""
     r = _api("DELETE", f"tasks/{args.id}{suffix}", port=port)
-    print("ok" if r.get("ok") else f"error: {r.get('error')}")
+    print("ok" if r.get("ok") else f"error: {_err(r)}")
     return 0 if r.get("ok") else 1
 
 
@@ -396,7 +409,7 @@ def cmd_config(args) -> int:
         if not r.get("ok"):
             # 写错一个字母却打印出一份原样配置，看上去像「改了没生效」，
             # 其实是请求被拒了。把服务端的理由直说。
-            print(f"error: {r.get('error')}")
+            print(f"error: {_err(r)}")
             return 1
         print(json.dumps(r.get("config", {}), ensure_ascii=False, indent=2))
         # 生效但没落盘（磁盘满 / 目录没权限）：不打印的话下次重启才发现设置全丢。

@@ -581,6 +581,7 @@ const T_RULES = [
   [/限速/g, 'Speed limit'],
   // 下面这些是服务端回的消息：认得出的翻成英文，认不出的原样显示中文
   [/任务不存在/g, 'Task not found'],
+  [/没有 ID 为 (\S+?) 的任务（可能已经删掉了）/g, 'No task with ID $1 (it may already be deleted)'],
   [/任务状态已变化，请稍后再试/g, 'The task changed underneath us — try again'],
   [/当前状态/g, 'The current state'],
   [/（(\S+?)）不能暂停/g, ' ($1) cannot be paused'],

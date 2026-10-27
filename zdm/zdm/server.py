@@ -658,8 +658,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_ok():
                 return self._error(401, "invalid token")
             keep = "files=0" not in self.path
-            ok = self.manager.remove(parts[2], remove_files=keep)
-            return self._json({"ok": ok})
+            tid = parts[2]
+            if not self.manager.remove(tid, remove_files=keep):
+                # 只回 {"ok": false} 的话，命令行打印出来是「error: None」，
+                # 像程序坏了；其实十有八九是这条任务已经不在列表里了。
+                return self._error(404, f"没有 ID 为 {tid} 的任务（可能已经删掉了）")
+            return self._json({"ok": True})
         return self._error(404, "not found")
 
     def _api_get(self, parts):
