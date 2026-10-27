@@ -11,6 +11,9 @@ ZDM 本机安装与使用说明
 - 命令行：`~/.local/bin/zdm`
 - 后台服务：launchd 代理 `~/Library/LaunchAgents/com.zdm.service.plist`（登录自启 + 崩溃自动重启）
 - 配置/状态：`~/Library/Application Support/ZDM/zdm.json`（默认下载目录 `~/Downloads`，端口 9000）
+- 流媒体引擎的运行痕迹：分片和它的日志都在 `~/Library/Application Support/ZDM/re-work/<任务 id>/`
+  （日志文件名 `engine.log`），删任务或清空列表就一起清掉。v1.18.13 起 `bin/` 目录不再往里写日志；
+  旧版本留下的 `bin/Logs/` 可以直接删。
 
 ## 三种使用入口
 

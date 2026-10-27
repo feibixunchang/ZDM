@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.12**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.13**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.12_amd64.deb` | `sudo apt install ./zdm_1.18.12_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.13_amd64.deb` | `sudo apt install ./zdm_1.18.13_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.12.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.13.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.12
+bash zdm/build_linux_app.sh ./linux-build 1.18.13
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -451,6 +451,16 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.13 = 引擎的日志不再写进装机目录** —— `N_m3u8DL-RE` 每次运行都会落一份 `Logs/<时间戳>.log`，
+而它写的位置是**自己那个可执行文件旁边**，不是调用方的工作目录（日志首行 `Save Path:` 就是这么写的）。
+这一版之前 ZDM 没传 `--log-file-path`，于是 `…/ZDM/bin/Logs/` 每下一次 HLS 或多录一段直播就多一个文件：
+本机两天攒出 191 个，删完立刻又长回来。现在命令里带上 `--log-file-path <分片目录>/engine.log`，
+跟着任务走：下载成功时引擎照旧清掉分片、日志留在原地且极小；删任务或清空列表时
+`drop_work_dir` 把它一起带走；失败时它和半截分片躺在同一个目录里，正是需要它的时候。
+不用 `--no-log` 关掉是有意的 —— 引擎的解析细节（选了哪条轨道、清单怎么读的还是空的）只在
+这份日志里，界面那份 `download-errors.log` 只有失败原因那一行。已装机的旧目录里如果还有
+`bin/Logs/`，删掉即可，程序不再往里写。
 
 **v1.18.12 = 整理认的是文件，不是路径的那串字符** —— 1.18.11 装到本机、拿真实服务跑第一遍时就抓到
 一个方向很坏的漏判：沙盒目录写成 `/tmp/...`，而 macOS 上它是 `/private/tmp/...` 的链接；任务记录里存的是

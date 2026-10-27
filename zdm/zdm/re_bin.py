@@ -286,6 +286,13 @@ def build_cmd(
         save_dir,
         "--save-name",
         save_name,
+        # 引擎默认往**当前工作目录**写 Logs/<时间戳>.log，一次一个、永不回收。服务
+        # 的工作目录是安装目录里的 bin/，所以不传这个参数的话，装机目录每下一次
+        # HLS 就多一个没人看的文件（两天能攒一百多个）。定向到任务自己的分片目录：
+        # 失败时日志和分片摆在一起，正是会去看它的时候；删任务时随目录一起清掉。
+        # 用户看到的失败原因另有去处（ZDM 自己的 download-errors.log），不依赖这份。
+        "--log-file-path",
+        os.path.join(tmp_dir, "engine.log"),
         "--disable-update-check",
         "--ui-language",
         "en-US",
