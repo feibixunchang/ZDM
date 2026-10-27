@@ -92,15 +92,13 @@ def cmd_start(args) -> int:
         print(f"started (pid {p.pid}), waiting for service... check {log}")
         return 0
     m = Manager()
-    server.serve(m, port=port, open_ui=not args.no_open)
-    return 0
+    return server.serve(m, port=port, open_ui=not args.no_open)
 
 
 def cmd_serve(args) -> int:
     m = Manager()
     port = int(getattr(args, "port", 0) or 0) or int(m.config.get("port") or 9000)
-    server.serve(m, port=port, open_ui=False)
-    return 0
+    return server.serve(m, port=port, open_ui=False)
 
 
 def _pid_is_zdm(pid: int) -> bool:

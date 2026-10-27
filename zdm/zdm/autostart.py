@@ -87,7 +87,14 @@ _MAC_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 {program_args}
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- 只在失败时重启。抢不到 9000 端口的那个实例是**正常**退出 0 的（桌面端和这个
+       agent 谁先绑上谁服务），无条件 KeepAlive 会让 launchd 每 10 秒重拉一个必然秒退
+       的 Python，用户侧表现为反复弹「Python 意外退出」。 -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>20</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>{log_path}</string>
   <key>StandardErrorPath</key><string>{log_path}</string>

@@ -401,6 +401,13 @@ EOF
   chmod +x "$HOME/.local/bin/zdm-gui"
 
   # launchd agent: starts on login and restarts on crash
+  #
+  # KeepAlive 必须是「只在失败时重启」，不能是无条件 true：桌面端 (.app) 和这个
+  # agent 都会想当那个「唯一占用 9000 端口的实例」，抢不到端口的那个进程是**正常**
+  # 退出 0 的。写成 true 就等于「退出 0 也再拉一次」，于是每 10 秒（launchd 默认
+  # 节流）重起一个必然立刻退出的 Python —— 实测一晚上攒出 191 次 spawn、日志刷满
+  # 「端口已被占用」，而且 launchd 会把这种「不是自己停的」退出记成 crashed，
+  # 用户侧的表现就是 macOS 反复弹「Python 意外退出」。
   cat > "$LA/com.zdm.service.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -414,7 +421,11 @@ EOF
     <string>serve</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>20</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>$APP_DIR/zdm.log</string>
   <key>StandardErrorPath</key><string>$APP_DIR/zdm.log</string>

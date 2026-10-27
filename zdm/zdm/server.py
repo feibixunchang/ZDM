@@ -1191,12 +1191,22 @@ def serve(
     port: int = 9000,
     token: Optional[str] = None,
     open_ui: bool = True,
-) -> None:
+) -> int:
+    """Run the service. Returns the process exit status.
+
+    端口被占时不能一律回 0。占着的是另一个健康的 ZDM，那本就该安静退出（桌面端
+    和 LaunchAgent 会同时想当那个「唯一实例」，谁先绑上谁服务）；占着的不是 ZDM，
+    那是真故障，必须非 0 退出 —— launchd/systemd 只在失败时重启，回 0 就等于让
+    服务永远起不来还没人知道。
+    """
     try:
         httpd = make_server(manager, host, port, token)
     except OSError as e:
-        print(f"端口 {port} 已被占用，服务可能已在运行（{e}）")
-        return
+        if ping(host, port):
+            print(f"端口 {port} 上已有 ZDM 在服务，本进程退出（{e}）")
+            return 0
+        print(f"端口 {port} 被其他程序占用，ZDM 起不来（{e}）")
+        return 1
     url = f"http://{host}:{port}/"
     print(f"ZDM service running at {url}  (Ctrl+C to stop)")
     if open_ui:
@@ -1208,6 +1218,7 @@ def serve(
     finally:
         manager.shutdown()
         httpd.server_close()
+    return 0
 
 
 def ping(host: str = "127.0.0.1", port: int = 9000) -> Optional[dict]:
