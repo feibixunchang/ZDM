@@ -3,7 +3,7 @@
 
 #define AppName "ZDM 下载管理器"
 #define AppNameEn "ZDM Download Manager"
-#define AppVersion "1.18.13"
+#define AppVersion "1.18.14"
 #define AppPublisher "ZDM"
 #define AppExeName "Zdm.exe"
 #define AppUrl "https://github.com/"
