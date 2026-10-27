@@ -1588,11 +1588,12 @@ class _ElidedLabel(QLabel):
     def _refit(self) -> None:
         m = self.contentsMargins()
         avail = self.width() - m.left() - m.right()
-        if avail <= 0:
-            self.setText("")
-            return
-        self.setText(self._full if self.fontMetrics().horizontalAdvance(self._full) <= avail
-                     else self.fontMetrics().elidedText(self._full, Qt.ElideRight, avail))
+        fits = avail > 0 and self.fontMetrics().horizontalAdvance(self._full) <= avail
+        self.setText(self._full if fits
+                     else (self.fontMetrics().elidedText(self._full, Qt.ElideRight, avail)
+                           if avail > 0 else ""))
+        # 被省略的那截靠悬停补全（用户点名）；整句放得下时不弹重复的提示。
+        self.setToolTip("" if fits else self._full)
 
 
 def _vsep() -> "QWidget":
