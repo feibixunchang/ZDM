@@ -1564,6 +1564,37 @@ class SingleApp:
         return bool(ok)
 
 
+class _ElidedLabel(QLabel):
+    """文字放不下时右边收一个省略号，而不是被两端各裁一刀。
+
+    QLabel 配 AlignCenter 只做「裁切」：文字比控件宽时长句的开头和结尾
+    同时被切掉，用户看到的就是「务 —— ……直接拖」这种两头都不完整的话
+    （v1.18.14 装机后用户截图点名）。完整句子留在 _full 里，每次变宽变窄
+    重新量一遍。
+    """
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._full = ""
+
+    def setFullText(self, text: str) -> None:
+        self._full = text
+        self._refit()
+
+    def resizeEvent(self, event):
+        self._refit()
+        super().resizeEvent(event)
+
+    def _refit(self) -> None:
+        m = self.contentsMargins()
+        avail = self.width() - m.left() - m.right()
+        if avail <= 0:
+            self.setText("")
+            return
+        self.setText(self._full if self.fontMetrics().horizontalAdvance(self._full) <= avail
+                     else self.fontMetrics().elidedText(self._full, Qt.ElideRight, avail))
+
+
 def _vsep() -> "QWidget":
     """工具条里两组按钮之间的细竖线：颜色走 theme.py 的 QSS（#vsep），跟主题走。"""
     w = QWidget()
@@ -1682,7 +1713,7 @@ class MainWindow(QMainWindow):
         # 还不对齐，两行摆在一起显得参差。现在这块放一栏实时汇总（进行中几个、总速度、
         # 排队/暂停/合并/失败/完成各几个），没任务时是一句引导文案 —— 空白变成有内容
         # 的一栏。内容见 _update_summary()。
-        self.summary_label = QLabel()
+        self.summary_label = _ElidedLabel()
         self.summary_label.setObjectName("toolSummary")
         self.summary_label.setAlignment(Qt.AlignCenter)
         self.summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2044,9 +2075,9 @@ class MainWindow(QMainWindow):
                 parts.append(f"{label} {counts[key]}")
         if counts.get("completed"):
             parts.append(f"已完成 {counts['completed']}")
-        self.summary_label.setText(
+        self.summary_label.setFullText(
             " · ".join(parts) if parts
-            else "暂无任务 —— 上面输入链接后回车，或把链接直接拖进窗口"
+            else "暂无任务 · 粘贴链接后回车，或拖链接进窗口"
         )
 
     def _status(self, msg: str, hold: float = 3.0):
