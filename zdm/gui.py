@@ -3134,9 +3134,29 @@ class MainWindow(QMainWindow):
         prio.setRange(-99, 99)
         prio.setValue(int(extra.get("priority") or 0))
         prio.setToolTip("数字越大越先下载；对这次选中的全部条目生效")
+        # 整份清单默认收进「设置里的下载目录 + 标题子目录」。几十集要落到别处
+        # （移动盘、按项目分的目录）时，只能先去改全局设置再下载，改完还得改回来
+        # —— 这里给一个只作用于本次的落点。
+        dir_edit = QLineEdit(str(extra.get("dir") or extra.get("directory") or ""))
+        dir_edit.setPlaceholderText(
+            str(self.config.get("download_dir") or "默认下载目录"))
+        dir_edit.setToolTip("只作用于这一次加入的条目；留空＝用「设置」里的下载目录。\n"
+                            "勾了下面的「收进子目录」时，会落到这里的目录再套一层清单标题。")
+        btn_dir = QPushButton("浏览…")
+        btn_dir.clicked.connect(lambda: dir_edit.setText(
+            QFileDialog.getExistingDirectory(dlg, "选择下载目录",
+                                             dir_edit.text()) or dir_edit.text()))
+        dir_row = QHBoxLayout()
+        dir_row.setContentsMargins(0, 0, 0, 0)
+        dir_row.addWidget(dir_edit)
+        dir_row.addWidget(btn_dir)
+        paused_cb = QCheckBox("先暂停，不自动开始下载")
+        paused_cb.setToolTip("整份清单先建成任务、等挑好要下哪几集再逐个继续；\n"
+                             "配合下面的「定时开始」就是到点自动全下")
         sub = QCheckBox("收进以清单标题命名的子目录")
         sub.setChecked(True)
-        sub.setToolTip("关掉就按「设置」里的下载目录原样存放，几十集会和别的文件混在一起")
+        sub.setToolTip("关掉就按上面的目录原样存放，没填则是「设置」里的下载目录；\n"
+                       "几十集会和别的文件混在一起")
         state = {"count": len(items)}  # 重新展开会换掉列表，校验要用当前这份的条数
         start_cb = QCheckBox("定时开始")
         start_edit = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
@@ -3203,7 +3223,16 @@ class MainWindow(QMainWindow):
             }
             if start_cb.isChecked():
                 body["start_at"] = int(start_edit.dateTime().toSecsSinceEpoch())
+            if paused_cb.isChecked():
+                body["paused"] = True
+            want_dir = dir_edit.text().strip()
+            if want_dir:
+                body["dir"] = want_dir
             for k in ("dir", "directory", "headers", "cookie"):
+                # 用户在对话框里选了落点，就以它为准 —— 带进来的旧目录（新键 dir
+                # 或老键 directory）不能再盖，两个键一起发更是让服务端自己猜。
+                if k in body or (want_dir and k in ("dir", "directory")):
+                    continue
                 if extra.get(k):
                     body[k] = extra[k]
             ok_btn.setEnabled(False)
@@ -3227,7 +3256,9 @@ class MainWindow(QMainWindow):
         form.addRow("", lst)
         form.addRow("选哪几条", rng)
         form.addRow("最多展开（条）", row)
+        form.addRow("存到", dir_row)
         form.addRow("", sub)
+        form.addRow("", paused_cb)
         form.addRow("优先级", prio)
         form.addRow("", start_cb)
         form.addRow("开始时间", start_edit)

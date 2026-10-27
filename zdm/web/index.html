@@ -333,6 +333,11 @@
       <label>定时开始（留空 = 立即开始，作用于本批全部条目）</label>
       <input id="listStart" type="datetime-local">
     </div>
+    <div class="field full">
+      <label>存到（留空 = 设置里的下载目录）</label>
+      <input id="listDir" placeholder="默认下载目录">
+    </div>
+    <div class="field full"><label><input type="checkbox" id="listPaused"> 先暂停，不自动开始下载</label></div>
     <div class="field full"><label><input type="checkbox" id="listSub" checked> 收进以清单标题命名的子目录</label></div>
   </div>
   <div class="dlg-f">
@@ -477,6 +482,9 @@ const T_EXACT = {
   '名单': 'Entries',
   '展开后在这里列出': 'The entries appear here once you expand',
   '收进以清单标题命名的子目录': 'Put them in a subfolder named after the playlist',
+  '存到（留空 = 设置里的下载目录）': 'Save to (blank = the download folder in Settings)',
+  '先暂停，不自动开始下载': 'Add paused — do not start downloading yet',
+  '默认下载目录': 'Default download folder',
   '定时开始（留空 = 立即开始，作用于本批全部条目）': 'Scheduled start (blank = start now; applies to every entry in this batch)',
   // 设置：按后缀归档
   '按后缀自动归档（每行「后缀 = 子目录」，留空=关闭）': 'Archive by extension (one “extension = subfolder” per line; blank = off)',
@@ -1252,6 +1260,8 @@ function openList(url){
   // 不显示就等于偷偷套用：主输入条上的优先级/定时要一起带进来
   $('#listPrio').value = $('#fprio').value;
   $('#listStart').value = $('#fstart').value;
+  // 留空 = 用设置里的下载目录，那就得让人看见「留空到底是哪儿」
+  $('#listDir').placeholder = config.download_dir || '默认下载目录';
   listData = null;
   $('#btnListAdd').disabled = true;
   renderList(null);
@@ -1278,6 +1288,10 @@ $('#btnListAdd').onclick = async () => {
   const max = Number($('#listMax').value) || 100;
   body.max_items = max;
   if (!$('#listSub').checked) body.subdir = false;
+  const wantDir = $('#listDir').value.trim();
+  if (wantDir) body.dir = wantDir;
+  // 几十条一起开跑会把带宽挤满；先建好记录，回头挑要下的再逐个继续。
+  if ($('#listPaused').checked) body.paused = true;
   if ($('#listPrio').value) body.priority = Number($('#listPrio').value);
   const startAt = fromLocalInput($('#listStart').value);
   if (startAt) body.start_at = startAt;
