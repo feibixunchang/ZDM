@@ -611,12 +611,14 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QStatusBar,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -3681,7 +3683,31 @@ class MainWindow(QMainWindow):
         cfg = self.config or {}
         dlg = QDialog(self)
         dlg.setWindowTitle("设置")
-        form = QFormLayout(dlg)
+        # 设置曾经是一整张 25 行的表单：窗口比屏幕高，底部那排「保存/取消」
+        # 被推到屏幕外，改完设置根本点不到保存 —— 这不是难看，是没法用。
+        # 现在按用途分成几页，每页自己可滚，窗口高度按可用屏幕封顶。
+        outer = QVBoxLayout(dlg)
+        tabs = QTabWidget()
+        outer.addWidget(tabs, 1)
+
+        def _page(title, *rows):
+            body = QWidget()
+            form = QFormLayout(body)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            for item in rows:
+                if isinstance(item, tuple):
+                    form.addRow(*item)
+                else:
+                    form.addRow(item)
+            # 横向策略设成 Ignored：否则页里那条长说明会把最小宽度顶起来，
+            # 滚动区跟着开一条横向滚动条 —— 设置页要能横向滚就说明排版坏了。
+            body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            scroller = QScrollArea()
+            scroller.setWidgetResizable(True)
+            scroller.setFrameShape(QFrame.NoFrame)
+            scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroller.setWidget(body)
+            tabs.addTab(scroller, title)
         directory = QLineEdit(str(cfg.get("download_dir") or ""))
         _zh_standard_menu(directory)
         btn_dir = QPushButton("选择")
@@ -3792,12 +3818,12 @@ class MainWindow(QMainWindow):
         rf.addRow("", rpc_cb)
         rf.addRow("RPC 地址", rpc_row)
         rf.addRow("RPC 令牌", rpc_trow)
-        rf.addRow(
-            QLabel(
-                "aria2 的令牌写法是 <code>token:令牌</code> 作为第一个参数；"
-                "AriaNg 里直接填 RPC Secret 即可。"
-            )
+        rpc_note = QLabel(
+            "aria2 的令牌写法是 <code>token:令牌</code> 作为第一个参数；"
+            "AriaNg 里直接填 RPC Secret 即可。"
         )
+        rpc_note.setWordWrap(True)
+        rf.addRow(rpc_note)
         # ---- HLS / DASH 引擎 ----
         stream_cb = QComboBox()
         for key, label in (
@@ -3852,12 +3878,14 @@ class MainWindow(QMainWindow):
             )
 
         arch_preset.clicked.connect(_fill_preset)
-        af.addRow(arch_text)
-        af.addRow("", arch_preset)
-        af.addRow(QLabel(
+        arch_note = QLabel(
             "字幕/音轨这类跟着视频的附带文件会留在成品旁边，不按 .srt 的规则单独挪走 —— "
             "播放器是在视频旁边找字幕的。"
-        ))
+        )
+        arch_note.setWordWrap(True)
+        af.addRow(arch_text)
+        af.addRow("", arch_preset)
+        af.addRow(arch_note)
         # ---- appearance: follow the OS appearance by default ----
         appearance = QComboBox()
         for key, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
@@ -3869,22 +3897,28 @@ class MainWindow(QMainWindow):
         appearance.currentIndexChanged.connect(
             lambda _i: self._preview_theme(appearance.currentData())
         )
-        form.addRow("下载目录", row)
-        form.addRow("单任务连接数", conns)
-        form.addRow("同时下载任务数", active)
-        form.addRow("全局限速", limit)
-        form.addRow("代理", proxy)
-        form.addRow("外观（深浅色）", appearance)
-        form.addRow("服务端口（重启服务后生效）", port)
-        form.addRow("", auto)
-        form.addRow("", autostart_cb)
-        form.addRow("", auto_gui_cb)
-        form.addRow("", close_tray_cb)
-        form.addRow("", clip_cb)
-        form.addRow("", mirror_cb)
-        form.addRow("流媒体（m3u8/mpd）引擎", stream_cb)
-        form.addRow(arch_box)
-        form.addRow(rpc_box)
+        _page(
+            "下载",
+            ("下载目录", row),
+            ("单任务连接数", conns),
+            ("同时下载任务数", active),
+            ("全局限速", limit),
+            auto,
+        )
+        _page(
+            "界面与启动",
+            ("外观（深浅色）", appearance),
+            autostart_cb,
+            auto_gui_cb,
+            close_tray_cb,
+            clip_cb,
+        )
+        _page(
+            "网络与加速",
+            ("代理", proxy),
+            ("服务端口（重启服务后生效）", port),
+            mirror_cb,
+        )
         # ---- site cookies (YouTube / Bilibili need a logged-in session) ----
         cookies_box = QGroupBox("站点 Cookie（用于需要登录的视频站）")
         cookies_box.setToolTip(
@@ -3908,7 +3942,6 @@ class MainWindow(QMainWindow):
         clear_btn = QPushButton("清空两个站点的 Cookie")
         clear_btn.clicked.connect(lambda: (yt_cookie.setPlainText(""), bili_cookie.setPlainText("")))
         cf.addRow("", clear_btn)
-        form.addRow(cookies_box)
         # ---- version + updates ----
         ver_row = QWidget()
         vh = QHBoxLayout(ver_row)
@@ -3918,8 +3951,8 @@ class MainWindow(QMainWindow):
         check_now.clicked.connect(lambda: self._check_update(silent=False))
         vh.addWidget(check_now)
         vh.addStretch(1)
-        form.addRow("版本", ver_row)
-        form.addRow("", update_cb)
+        _page("流媒体与归档", ("流媒体（m3u8/mpd）引擎", stream_cb), arch_box, cookies_box)
+        _page("外部接入与更新", rpc_box, ("版本", ver_row), update_cb)
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Save).setText("保存")
         box.button(QDialogButtonBox.Cancel).setText("取消")
@@ -3933,7 +3966,12 @@ class MainWindow(QMainWindow):
         bl.addWidget(quit_btn)
         bl.addStretch(1)
         bl.addWidget(box)
-        form.addRow(btn_row)
+        outer.addWidget(btn_row)
+        # 高度封顶在可用屏幕的 3/4：页里的内容再多也只会在自己那页里滚，
+        # 不会再把「保存/取消」挤出屏幕。
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry().height() if screen is not None else 800
+        dlg.resize(680, min(620, int(avail * 0.75)))
         if dlg.exec_() != QDialog.Accepted:
             # Discard the live preview and restore the persisted appearance.
             self._theme_preview = None

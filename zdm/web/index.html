@@ -80,7 +80,10 @@
   .s-merging{background:#ede9fe;color:#6d28d9}
   .actions{display:flex;gap:6px;justify-content:flex-end}
   .empty{padding:48px;text-align:center;color:var(--muted)}
-  dialog{border:none;border-radius:12px;padding:0;width:520px;box-shadow:0 20px 60px rgba(0,0,0,.2)}
+  /* 对话框必须自身可滚：笔记本屏幕上长表单会把「保存」推到屏幕外，
+     而模态框打开时页面本身不滚 —— 推出去就点不到了。 */
+  dialog{border:none;border-radius:12px;padding:0;width:520px;max-height:88vh;overflow:auto;
+    box-shadow:0 20px 60px rgba(0,0,0,.2)}
   dialog::backdrop{background:rgba(15,23,42,.35)}
   .dlg-h{padding:14px 18px;border-bottom:1px solid var(--border);font-weight:700}
   .dlg-b{padding:16px 18px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -102,6 +105,23 @@
   .hint{color:var(--muted);font-size:12px;padding:10px 14px;border-top:1px solid var(--border)}
   .hint a{color:var(--accent)}
   code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:12px}
+  /* 设置：项数只会越来越多，弹窗装不下 —— 改成主页面里的二级视图，
+     左列分组导航 + 右列分区卡片，顶栏吸住「保存」，窄屏折成一列。 */
+  #viewSettings{max-width:1180px;margin:0 auto;padding:16px 20px 60px}
+  .set-bar{position:sticky;top:0;z-index:12;display:flex;align-items:center;gap:10px;
+    padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--border)}
+  .set-bar .ttl{font-weight:700}
+  .set-body{display:grid;grid-template-columns:158px 1fr;gap:18px;align-items:start}
+  .set-nav{position:sticky;top:66px;display:flex;flex-direction:column;gap:2px}
+  .set-nav button{border:none;background:none;text-align:left;color:var(--muted);padding:6px 10px;
+    border-radius:8px;font-size:13px}
+  .set-nav button:hover{background:#f3f4f6}
+  .set-nav button.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .set-sec{scroll-margin-top:78px;margin-bottom:14px}
+  @media (max-width:760px){
+    .set-body{grid-template-columns:1fr}
+    .set-nav{position:static;flex-direction:row;flex-wrap:wrap}
+  }
 </style>
 </head>
 <body>
@@ -179,51 +199,86 @@
   </div>
 </main>
 
-<dialog id="dlgSettings">
-  <div class="dlg-h">设置</div>
-  <div class="dlg-b">
-    <div class="field full"><label>下载目录</label><input id="cfgDir"></div>
-    <div class="field"><label>单任务连接数</label><input id="cfgConn" type="number" min="1" max="32"></div>
-    <div class="field"><label>同时下载任务数</label><input id="cfgActive" type="number" min="1" max="16"></div>
-    <div class="field"><label>限速 (KB/s，0=不限)</label><input id="cfgSpeed" type="number" min="0"></div>
-    <div class="field"><label>失败重试次数</label><input id="cfgRetry" type="number" min="0" max="20"></div>
-    <div class="field"><label>代理 (http://host:port)</label><input id="cfgProxy" placeholder="留空则不使用代理"></div>
-    <div class="field"><label>服务端口</label><input id="cfgPort" type="number" min="1024" max="65535"></div>
-    <div class="field full"><label><input type="checkbox" id="cfgAuto"> 重启后自动继续未完成任务</label></div>
-    <div class="field full"><label><input type="checkbox" id="cfgMirror"> GitHub / Hugging Face 链接走镜像加速（失败自动退回直连）</label></div>
-    <div class="field"><label>流媒体（m3u8 / mpd）引擎</label>
-      <select id="cfgStream">
-        <option value="auto">自动：优先 N_m3u8DL-RE，找不到时用 ffmpeg</option>
-        <option value="re">只用 N_m3u8DL-RE（找不到可执行文件就报错）</option>
-        <option value="ffmpeg">只用 ffmpeg</option>
-      </select>
-    </div>
-    <div class="field full"><label>按后缀自动归档（每行「后缀 = 子目录」，留空=关闭）</label>
-      <textarea id="cfgArchive" rows="5" spellcheck="false"
-        placeholder="mp4,mkv,webm = Video&#10;mp3,m4a,flac = Music&#10;zip,7z,rar = Archives"></textarea>
-      <small>命中的成品落进「下载目录/子目录」，没命中的照旧；字幕/音轨这类附带文件留在成品旁边，不单独归档。只对之后的下载生效，不会搬已经下好的文件。</small>
-    </div>
-    <div class="field full"><label><input type="checkbox" id="cfgRpc"> 兼容 aria2 JSON-RPC（AriaNg 等客户端可直接驱动 ZDM）</label></div>
-    <div class="field full"><label>RPC 地址（aria2 客户端里填这个）</label>
-      <div style="display:flex;gap:6px">
-        <input id="cfgRpcAddr" readonly style="flex:1">
-        <button id="btnRpcCopyAddr" type="button">复制</button>
+<div class="set-bar" id="setBar" hidden>
+  <button id="btnSetBack">← 返回</button>
+  <span class="ttl">设置</span>
+  <div class="spacer"></div>
+  <button id="btnOpenDir">打开下载目录</button>
+  <button class="primary" id="btnSaveCfg">保存</button>
+</div>
+
+<section id="viewSettings" hidden>
+  <div class="set-body">
+    <nav class="set-nav" id="setNav">
+      <button class="active" data-sec="setDownload">下载与限速</button>
+      <button data-sec="setNetwork">网络与代理</button>
+      <button data-sec="setStream">流媒体与归档</button>
+      <button data-sec="setRpc">外部客户端接入</button>
+    </nav>
+    <div>
+      <div class="card set-sec" id="setDownload">
+        <div class="dlg-h">下载与限速</div>
+        <div class="dlg-b">
+          <div class="field full"><label>下载目录</label><input id="cfgDir"></div>
+          <div class="field"><label>单任务连接数</label><input id="cfgConn" type="number" min="1" max="32"></div>
+          <div class="field"><label>同时下载任务数</label><input id="cfgActive" type="number" min="1" max="16"></div>
+          <div class="field"><label>限速 (KB/s，0=不限)</label><input id="cfgSpeed" type="number" min="0"></div>
+          <div class="field"><label>失败重试次数</label><input id="cfgRetry" type="number" min="0" max="20"></div>
+          <div class="field full"><label><input type="checkbox" id="cfgAuto"> 重启后自动继续未完成任务</label></div>
+        </div>
       </div>
-      <small id="rpcAddrNote" style="color:#b45309;display:none"></small>
-    </div>
-    <div class="field full"><label>RPC 令牌（= 本机接口口令，别贴到网上）</label>
-      <div style="display:flex;gap:6px">
-        <input id="cfgRpcToken" type="password" readonly style="flex:1">
-        <button id="btnRpcShow" type="button">显示</button>
-        <button id="btnRpcCopy" type="button">复制</button>
+
+      <div class="card set-sec" id="setNetwork">
+        <div class="dlg-h">网络与代理</div>
+        <div class="dlg-b">
+          <div class="field full"><label>代理 (http://host:port)</label><input id="cfgProxy" placeholder="留空则不使用代理"></div>
+          <div class="field"><label>服务端口</label><input id="cfgPort" type="number" min="1024" max="65535"></div>
+          <div class="field full"><label><input type="checkbox" id="cfgMirror"> GitHub / Hugging Face 链接走镜像加速（失败自动退回直连）</label></div>
+        </div>
+      </div>
+
+      <div class="card set-sec" id="setStream">
+        <div class="dlg-h">流媒体与归档</div>
+        <div class="dlg-b">
+          <div class="field full"><label>流媒体（m3u8 / mpd）引擎</label>
+            <select id="cfgStream">
+              <option value="auto">自动：优先 N_m3u8DL-RE，找不到时用 ffmpeg</option>
+              <option value="re">只用 N_m3u8DL-RE（找不到可执行文件就报错）</option>
+              <option value="ffmpeg">只用 ffmpeg</option>
+            </select>
+          </div>
+          <div class="field full"><label>按后缀自动归档（每行「后缀 = 子目录」，留空=关闭）</label>
+            <textarea id="cfgArchive" rows="5" spellcheck="false"
+              placeholder="mp4,mkv,webm = Video&#10;mp3,m4a,flac = Music&#10;zip,7z,rar = Archives"></textarea>
+            <small>命中的成品落进「下载目录/子目录」，没命中的照旧；字幕/音轨这类附带文件留在成品旁边，不单独归档。只对之后的下载生效，不会搬已经下好的文件。</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="card set-sec" id="setRpc">
+        <div class="dlg-h">外部客户端接入</div>
+        <div class="dlg-b">
+          <div class="field full"><label><input type="checkbox" id="cfgRpc"> 兼容 aria2 JSON-RPC（AriaNg 等客户端可直接驱动 ZDM）</label></div>
+          <div class="field full"><label>RPC 地址（aria2 客户端里填这个）</label>
+            <div style="display:flex;gap:6px">
+              <input id="cfgRpcAddr" readonly style="flex:1">
+              <button id="btnRpcCopyAddr" type="button">复制</button>
+            </div>
+            <small id="rpcAddrNote" style="color:#b45309;display:none"></small>
+          </div>
+          <div class="field full"><label>RPC 令牌（= 本机接口口令，别贴到网上）</label>
+            <div style="display:flex;gap:6px">
+              <input id="cfgRpcToken" type="password" readonly style="flex:1">
+              <button id="btnRpcShow" type="button">显示</button>
+              <button id="btnRpcCopy" type="button">复制</button>
+            </div>
+          </div>
+          <div class="field full"><small>aria2 的令牌写法是第一个参数填 token:令牌；AriaNg 里直接填 RPC Secret 即可。服务只监听 127.0.0.1，关掉这项不影响 ZDM 自己的功能。</small></div>
+        </div>
       </div>
     </div>
   </div>
-  <div class="dlg-f">
-    <button id="btnOpenDir">打开下载目录</button>
-    <button class="primary" id="btnSaveCfg">保存</button>
-  </div>
-</dialog>
+</section>
 
 <dialog id="dlgBatch">
   <div class="dlg-h">批量导入</div>
@@ -396,6 +451,14 @@ const T_EXACT = {
   '显示': 'Show', '隐藏': 'Hide',
   '打开下载目录': 'Open download folder',
   '保存': 'Save',
+  // 设置页（二级视图）：顶栏 + 左列分组
+  '← 返回': '← Back',
+  '下载与限速': 'Downloads & speed',
+  '网络与代理': 'Network & proxy',
+  '流媒体与归档': 'Streaming & archiving',
+  '外部客户端接入': 'External client access',
+  'aria2 的令牌写法是第一个参数填 token:令牌；AriaNg 里直接填 RPC Secret 即可。服务只监听 127.0.0.1，关掉这项不影响 ZDM 自己的功能。':
+    'In aria2, put the token as the first argument in the form token:<your token>; in AriaNg just fill it in RPC Secret. The service listens on 127.0.0.1 only, and turning this off changes nothing else in ZDM.',
   '批量导入': 'Batch import',
   '每行一个链接（空行和 # 开头的注释会跳过）': 'One link per line (blank lines and # comments are skipped)',
   '优先级（数字越大越先下载，留空按 0）': 'Priority (higher numbers download first; blank = 0)',
@@ -1054,6 +1117,7 @@ async function refresh(){
     // 服务端把「历史文件读坏了 / 设置没写进磁盘」放在 warning 里；同一条只提醒一次。
     if (st.warning && st.warning !== stateWarn){ stateWarn = st.warning; toast(st.warning); }
     $('#svc').textContent = '本地服务已连接 · v' + (SVC_VERSION || '?') + ' · 端口 ' + (config.port || 9000);
+    syncSettingsForm();
     render();
   }catch(e){ $('#svc').textContent = '服务未连接'; }
 }
@@ -1278,7 +1342,8 @@ function checkArchiveRules(text) {
   return '';
 }
 
-$('#btnSettings').onclick = () => {
+let cfgDirty = false;
+function fillSettings(){
   $('#cfgDir').value = config.download_dir || '';
   $('#cfgConn').value = config.connections || 8;
   $('#cfgActive').value = config.max_active || 3;
@@ -1300,8 +1365,49 @@ $('#btnSettings').onclick = () => {
   $('#cfgRpc').checked = config.rpc_enabled !== false;
   syncRpcAddr();
   loadRpcToken();
-  $('#dlgSettings').showModal();
-};
+  cfgDirty = false;
+}
+// 服务端配置一变就同步进表单；用户已经在编辑了就不动他填的东西。
+function syncSettingsForm(){ if (!$('#viewSettings').hidden && !cfgDirty) fillSettings(); }
+
+// 设置是主页面里的二级视图，不是弹窗：项数一多，弹窗会把「保存」顶出屏幕，
+// 而模态框开着的时候页面根本不滚 —— 那个按钮就等于没有了。
+function showSettings(on){
+  $('#viewSettings').hidden = !on;
+  $('#setBar').hidden = !on;
+  $('main').hidden = on;
+  if (on){ fillSettings(); window.scrollTo(0, 0); activateNav('setDownload'); }
+}
+const atSettings = () => location.hash === '#settings';
+$('#btnSettings').onclick = () => { location.hash = '#settings'; };
+$('#btnSetBack').onclick = () => { location.hash = '#list'; };
+window.addEventListener('hashchange', () => showSettings(atSettings()));
+// Esc 以前是「关掉设置弹窗」，现在得自己接上，否则键盘用户只能去够鼠标。
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && atSettings() && !$('dialog[open]')) location.hash = '#list';
+});
+$('#viewSettings').addEventListener('input', () => { cfgDirty = true; });
+function activateNav(id){
+  document.querySelectorAll('#setNav button').forEach(b => b.classList.toggle('active', b.dataset.sec === id));
+}
+document.querySelectorAll('#setNav button').forEach(b => {
+  b.onclick = () => {
+    const sec = document.getElementById(b.dataset.sec);
+    if (sec) sec.scrollIntoView({behavior:'smooth', block:'start'});
+    activateNav(b.dataset.sec);
+  };
+});
+// 滚到哪儿就高亮哪儿：光靠点击，读着长表单往下滚时左列会指错地方。
+window.addEventListener('scroll', () => {
+  if (!atSettings()) return;
+  let cur = 'setDownload';
+  for (const b of document.querySelectorAll('#setNav button')) {
+    const sec = document.getElementById(b.dataset.sec);
+    if (sec && sec.getBoundingClientRect().top <= 90) cur = b.dataset.sec;
+  }
+  activateNav(cur);
+}, {passive: true});
+if (atSettings()) showSettings(true);
 function syncRpcAddr(){
   // 端口框改了，地址要跟着变：留着 9000 复制过去，客户端连的是一个没开的端口。
   const port = Number(($('#cfgPort').value || '').trim()) || config.port || 9000;
@@ -1381,7 +1487,7 @@ $('#btnSaveCfg').onclick = async () => {
     archive_rules: $('#cfgArchive').value.trim(),
     rpc_enabled: $('#cfgRpc').checked,
   });
-  if (r.ok){ toast(r.warning || '已保存（端口需重启服务生效）'); $('#dlgSettings').close(); refresh(); }
+  if (r.ok){ toast(r.warning || '已保存（端口需重启服务生效）'); location.hash = '#list'; refresh(); }
   else toast(r.error || '保存失败');
 };
 $('#btnOpenDir').onclick = async () => {
@@ -1402,6 +1508,7 @@ function connectEvents(){
     // A snapshot proves the stream is alive again: clear the "reconnecting"
     // banner that es.onerror left behind (it used to stay there forever).
     $('#svc').textContent = svcText();
+    syncSettingsForm();
     render();
   });
   es.addEventListener('task', e => {

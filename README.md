@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.6**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.7**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.6_amd64.deb` | `sudo apt install ./zdm_1.18.6_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.7_amd64.deb` | `sudo apt install ./zdm_1.18.7_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.6.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.7.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.6
+bash zdm/build_linux_app.sh ./linux-build 1.18.7
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -451,6 +451,16 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.7 = 设置页不再被顶出屏幕** —— 桌面端的「设置」是一整张 25 行的表单，窗口比屏幕高，
+底部那排「保存 / 取消」落在屏幕外面：改完设置点不到保存。这不是难看，是没法用。网页版的设置弹窗
+同理 —— `dialog` 没有 `max-height`，长表单一样会把按钮推出去，而模态框开着的时候页面根本不滚。
+桌面端按用途拆成 **下载 / 界面与启动 / 网络与加速 / 流媒体与归档 / 外部接入与更新** 五页，每页自己
+套滚动区，窗口高度封顶在可用屏幕的 3/4，「保存 / 取消」从页里挪出来常驻底部；网页版改成主页面里的
+一个二级视图（`#settings` 走 hash 路由，浏览器返回键和 Esc 都能回来，左列分组点哪儿滚哪儿、
+滚到哪儿高亮哪儿），其余对话框统一补上 `max-height:88vh; overflow:auto`。
+字段一项没增减：离线用例把保存的 15 个键、旧配置回填、「取消不发请求」「归档规则写错先本地拦住」
+钉住（23 条断言），网页端整页英文渲染零残留中文。
 
 **v1.18.6 = 删除已不在列表里的任务时，命令行回「error: None」** —— 本机实测里连着删两次同一条任务
 （第一次客户端超时、其实服务端已经删成），第二次屏幕上出来的是 `error: None`。理由只有一个：
