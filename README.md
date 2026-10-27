@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.4**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.5**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.4_amd64.deb` | `sudo apt install ./zdm_1.18.4_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.5_amd64.deb` | `sudo apt install ./zdm_1.18.5_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.4.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.5.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.4
+bash zdm/build_linux_app.sh ./linux-build 1.18.5
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -451,6 +451,18 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.5 = B站的收藏夹 / 合集 / 稍后再看没被当成清单** —— v1.18.4 说「清单地址会被拒绝并改走展开」，但那份
+判定表里 B站只认 `space.bilibili.com/<uid>`（投稿）、`/channels/…`、`medialist/`、`list/`、`favorite/`，
+用户实际从网页地址栏复制来的却是 `space.bilibili.com/<uid>/favlist?fid=…`（收藏夹）、
+`…/channel/collectiondetail?sid=…`（合集）和 `www.bilibili.com/watchlater/`（稍后再看）。
+这三类当时会被认成「普通网页」，建成一条任务后由 `[generic]` 提取器接住：要么整串失败，
+要么只拿到页面上第一集 —— 正是这次要消灭的那种「看起来成功了」。补法是按随包 yt-dlp
+2026.08.19 的提取器对齐：`BilibiliFavoritesList`（favlist）、`BilibiliCollectionList`（collectiondetail）、
+`BilibiliSeriesList`（seriesdetail）、`BilibiliWatchlater`（watchlater）四类形态都归进清单这一类
+（每条都用 `yt-dlp -v --simulate` 确认过落到哪个提取器上），`dynamic` / `homepage` 这些不是视频清单的
+标签页继续排除在外。判定表的用例（18 条形态 + 42 条地址的漂移检查）与展开实现一起跑，
+不改解析与建任务那条通路。
 
 **v1.18.4 = 一份清单只能下成一集** —— 以前把 YouTube 播放列表或 B站收藏夹地址交给「＋下载」，
 任务会「成功」，目录里只剩最后一个文件：yt-dlp 对播放列表输出的是**固定文件名**，一集盖一集。

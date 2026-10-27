@@ -123,10 +123,16 @@ _LIST_BILI = re.compile(
     r"(?:"
     # UP 主投稿列表（space.bilibili.com/<uid> 默认就是「视频」标签页；
     # /homepage、/dynamic 这些别的标签页不算清单，展开它们只会拿到一堆动态）
-    r"space\.bilibili\.com/\d+(?:/(?:video|videos|archive|channels/[^/?#]+))?(?:[?#]|$)"
+    r"space\.bilibili\.com/\d+(?:/(?:video|videos|archive|favlist"
+    # 收藏夹（favlist?fid=）与合集/系列（channel/collectiondetail?sid=、
+    # channel/seriesdetail?sid=）：随包 yt-dlp 2026.08.19 里分别对应
+    # BilibiliFavoritesList / BilibiliCollectionList / BilibiliSeriesList，
+    # 实测这三个地址都只会被 [generic] 接住或整串失败 —— 建成一条任务同样
+    # 只剩最后一集，所以必须归到清单这一类。
+    r"|channel/(?:collection|series)detail|channels/[^/?#]+))?(?:[?#]|$)"
     r"|m\.bilibili\.com/space/\d+"
-    # 合集 / 收藏夹 / 番剧**季**页（ss…=整季，ep…=单集，后者不算清单）
-    r"|(?:[a-z0-9-]+\.)*bilibili\.com/(?:medialist/|favorite/|list/|bangumi/play/ss)"
+    # 合集 / 收藏夹 / 稍后再看 / 番剧**季**页（ss…=整季，ep…=单集，后者不算清单）
+    r"|(?:[a-z0-9-]+\.)*bilibili\.com/(?:medialist/|favorite/|list/|watchlater|bangumi/play/ss)"
     r")",
     re.I,
 )
