@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.20**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.21**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.20_amd64.deb` | `sudo apt install ./zdm_1.18.20_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.21_amd64.deb` | `sudo apt install ./zdm_1.18.21_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.20.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.21.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.20
+bash zdm/build_linux_app.sh ./linux-build 1.18.21
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -451,6 +451,8 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.21 = 「进行中」统计整组挪进底部状态栏；视频页下载自动用真实标题当文件名** —— 两件事：①工具条中段的统计（进行中/速度/排队/暂停/合并/失败）在搜索框在场时仍被挤成「进行…」（用户截图点名），整组挪到底部状态栏常驻（排在「已完成」左边），工具条中段从此永远归搜索框，无任务时统计整段隐藏。②B站等视频页链接能下载但落盘叫 Video-BVxxx.mp4——服务端现在让 yt-dlp 顺手写旁车 info.json，完成改名时发现文件名命中兜底样式（Video-xxx / YouTube-xxx / Music-数字）就换成真实标题（实测 B站拿到「【官方 MV】Never Gonna Give You Up - Rick Astley.mp4」），旁车读完即删、用户手打的名字一律不动；规则在服务端，网页版/CLI/扩展同样受益。YouTube 实测走 tv_embedded 重试链可正常完成，个别失败多为 SABR 按请求拦截，重试或带浏览器 Cookie 即可。
 
 **v1.18.20 = 「已完成 N」从工具条汇总挪进底部状态栏** —— 搜索框常驻原位后，汇总里的「已完成 5」被挤成「已完…」（用户截图点名）。这次不是删显示而是挪位置：工具条汇总不再报完成数，底部状态栏在「磁盘剩余」左边常驻「已完成 N」，随轮询刷新；状态栏有富余空间，数字不再跟搜索框抢宽度，「已完成」页签本身不动。
 

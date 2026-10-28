@@ -2681,6 +2681,9 @@ class Download:
                     if self._stop.is_set():
                         break
                 extras = list(extra_args or [])
+                # 顺手让 yt-dlp 写出旁车 info.json：完成改名时用它把
+                # Video-BVxxx 这类通用兜底名换成真实标题（用户点名 B 站）。
+                extras += ["--write-info-json"]
                 if self.section:
                     # 例如 *00:01:00-00:05:00。yt-dlp 只取落在区间内的分片，
                     # 再用 ffmpeg 精准切掉两端。不带 ``*`` 的写法会被当成章节
@@ -2758,11 +2761,11 @@ class Download:
 
         # 换成用户看得懂的文件名（扩展已经按标题算好了）
         want = str(self.filename or "").strip()
-        if want.lower() in ("", "download"):
-            # The Download default. Without this a CLI/web video-page task was
-            # renamed to a file literally called "download" (no .mp4), which
-            # players cannot open by double-click.
-            want = os.path.basename(path)
+        if want.lower() in ("", "download") or _is_generic_video_name(want):
+            # 通用兜底名（Video-BVxxx / YouTube-xxx / Music-123，见
+            # videopage.video_page_filename）不是用户想看的：yt-dlp 已把真实
+            # 标题写进旁车 info.json，取来改名；拿不到再退回产出文件名。
+            want = self._yt_title_from_info(out_stem) or os.path.basename(path)
         # yt-dlp 产出的后缀才是真的：音乐页面（SoundCloud/Bandcamp）下的是
         # .m4a/.mp3，旧兜底名却是 .mp4；把 m4a 改名成 mp4 后部分播放器
         # 打不开。以实际文件为准，保留标题。
@@ -2806,6 +2809,29 @@ class Download:
         self.completed_at = time.time()
         self.error = None
         self._emit("completed")
+
+    def _yt_title_from_info(self, stem: str) -> str:
+        """读 yt-dlp 旁车 info.json 里的标题（用来替换通用兜底名），读完即删。
+
+        失败/没有旁车时返回空串，由调用方退回产出文件名；绝不让改名被旁车拖垮。
+        """
+        import glob
+        import json
+
+        from .http import sanitize_filename
+
+        name = ""
+        for p in glob.glob(os.path.join(self.directory, glob.escape(stem) + ".info.json")):
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    name = str(json.load(fh).get("title") or "").strip()
+            except (OSError, ValueError):
+                name = ""
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        return sanitize_filename(name) if name else ""
 
     def _yt_output(self, stem: str) -> Optional[str]:
         """找出 yt-dlp 真正产出的那个文件（合并后是 stem.mp4）。"""
@@ -3520,6 +3546,19 @@ def _section_tag(section: str) -> str:
     tag = str(section or "").lstrip("*").replace(":", ".")
     tag = _re.sub(r'[\\/:*?"<>|\s]+', "_", tag).strip("._")
     return (tag or "clip")[:40]
+
+
+def _is_generic_video_name(name: str) -> bool:
+    """videopage.video_page_filename 产出的通用兜底名（Video-xxx/YouTube-xxx/
+    Music-数字）——这些名字没有信息量，完成时该换成 info.json 里的真实标题。
+    只认这几个固定前缀，用户手打的名字（哪怕以 Video 开头）不动。"""
+    stem = os.path.splitext(name)[0]
+    if stem in ("YouTube", "download"):
+        return True
+    return bool(
+        _re.match(r"(?:YouTube(?:-Playlist)?|Video)-", stem)
+        or _re.match(r"Music-\d+$", stem)
+    )
 
 
 def _with_ext(filename: str, path_with_ext: str) -> str:

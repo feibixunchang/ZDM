@@ -1925,6 +1925,12 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("正在连接本地服务…")
+        # 「进行中 N · 速度」等实时统计从工具条汇总挪到底部状态栏（用户点名）：
+        # 搜索框在场时那一栏总被挤成「进行…」。无任务时整段隐藏，不占地方。
+        self.progress_label = QLabel("")
+        self.progress_label.setObjectName("progressStatus")
+        self.progress_label.setToolTip("任务统计：进行中/排队/暂停/合并/失败与总速度")
+        self.statusBar().addPermanentWidget(self.progress_label)
         # 「已完成 N」从工具条汇总挪到底部状态栏常驻（用户点名）：搜索框在场时
         # 汇总里的完成数总被挤成「已完…」，状态栏有富余空间，数字放这里不再抢宽度。
         self.done_label = QLabel("已完成 0")
@@ -2197,7 +2203,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_summary(self) -> None:
-        """工具条第二行中间的实时汇总：把以前那块死空白变成有内容的一栏。"""
+        """每轮轮询刷新三处底栏数字 + 工具条布局（统计/已完成/磁盘都在底部状态栏）。"""
         # 磁盘剩余已搬到底部状态栏常驻（见 disk_label），这里每轮轮询顺手刷新它一次；
         # 工具条腾出来的中段位置整块交给搜索框（用户点名）。
         if getattr(self, "disk_label", None) is not None:
@@ -2220,21 +2226,14 @@ class MainWindow(QMainWindow):
                 parts.append(f"{label} {counts[key]}")
         # 「已完成 N」不再占工具条汇总（用户点名）：搜索框在场时它总被挤成「已完…」。
         # 数字挪到底部状态栏常驻（见 done_label），那边有富余空间，随轮询刷新。
-        if parts:
-            # 有任务时这一栏是统计数字，点它没有对应窗口 —— 把点击态收掉，
-            # 别让用户以为「进行中 2」也能弹出什么。搜索框照常在场。
-            self.summary_label.set_clickable(None)
-            self.summary_label.setFullText(" · ".join(parts))
-            self.summary_label.setVisible(True)
-            self.search_edit.setVisible(True)
-        else:
-            # 空列表：这一栏不再报「磁盘剩余」——它已搬到底部状态栏常驻（用户点名），
-            # 腾出来的中段位置整块给「搜索文件名」输入框，搜索框常驻原位、随空位伸展，
-            # 不再像以前那样空态收起。
-            self.summary_label.set_clickable(None)
-            self.summary_label.setFullText("")
-            self.summary_label.setVisible(False)
-            self.search_edit.setVisible(True)
+        # 统计数整组（进行中/速度/排队/暂停/合并/失败）搬出工具条（用户点名）：
+        # 搜索框在场时汇总栏总被挤成「进行…」。现在工具条中段永远归搜索框，
+        # 数字在底部状态栏常驻（见 progress_label），无任务时整段隐藏。
+        if getattr(self, "progress_label", None) is not None:
+            self.progress_label.setText(" · ".join(parts))
+            self.progress_label.setVisible(bool(parts))
+        self.summary_label.setVisible(False)
+        self.search_edit.setVisible(True)
 
     def _disk_snapshot(self):
         """(目录, 总量, 已用, 剩余)；目录读不到时后三项为 None。"""
