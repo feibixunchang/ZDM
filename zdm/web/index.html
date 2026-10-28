@@ -82,7 +82,7 @@
   .empty{padding:48px;text-align:center;color:var(--muted)}
   /* 对话框必须自身可滚：笔记本屏幕上长表单会把「保存」推到屏幕外，
      而模态框打开时页面本身不滚 —— 推出去就点不到了。 */
-  dialog{border:none;border-radius:12px;padding:0;width:520px;max-height:88vh;overflow:auto;
+  dialog{border:none;border-radius:12px;padding:0;width:min(520px,calc(100vw - 20px));max-height:88vh;overflow:auto;
     box-shadow:0 20px 60px rgba(0,0,0,.2)}
   dialog::backdrop{background:rgba(15,23,42,.35)}
   .dlg-h{padding:14px 18px;border-bottom:1px solid var(--border);font-weight:700}
@@ -137,6 +137,10 @@
     td[data-label="大小"],td[data-label="速度"]{display:flex;justify-content:space-between;align-items:center;gap:10px}
     td[data-label="进度"] .bar{margin-top:4px}
     .actions{justify-content:flex-end;padding-top:2px}
+    /* 顶栏在窄屏收一收内边距并允许换行；弹窗表单从两列改单列。 */
+    header{padding:10px 12px;flex-wrap:wrap}
+    .dlg-b{grid-template-columns:1fr}
+    .trkbar input,.trkbar select{width:100%}
   }
 </style>
 </head>

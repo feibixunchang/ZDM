@@ -31,6 +31,11 @@ docker compose up -d
 | `ZDM_DOWNLOAD_DIR` | `/downloads` | 下载目录 |
 | `XDG_CONFIG_HOME` | `/config` | 配置目录 |
 
+## 媒体库联动（Emby / Navidrome / Jellyfin）
+
+把 compose 里 `/downloads` 的宿主路径直接写成你的影音目录（如 `/vol1/1000/影视`），
+媒体库扫同一目录即可「下完即入库」；注意目录属主要能被容器内进程写入（NAS 上一般无需改动）。
+
 ## 其它客户端接入
 
 - 网页版：直接开 `http://<NAS_IP>:9000`

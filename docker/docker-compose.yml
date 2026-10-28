@@ -8,3 +8,6 @@ services:
     volumes:
       - ./data/config:/config        # 任务状态、设置、api-token
       - ./data/downloads:/downloads  # 下载落盘目录（可换成 NAS 存储路径）
+      # 媒体库联动：直接把 /downloads 指到影音目录，Emby/Navidrome 扫同一目录，
+      # ZDM 下完即入库，不用二次搬运。例如：
+      # - /vol1/1000/影视:/downloads
