@@ -24,7 +24,7 @@ ARG YTDLP_VERSION=2026.08.19
 RUN mkdir -p /app/bin \
  && case "$TARGETARCH" in \
       amd64) YT_ASSET="yt-dlp_linux"; FB_ARCH="x86_64" ;; \
-      arm64) YT_ASSET="yt-dlp_linux_armv8"; FB_ARCH="aarch64" ;; \
+      arm64) YT_ASSET="yt-dlp_linux_aarch64"; FB_ARCH="aarch64" ;; \
       *) echo "不支持的架构: $TARGETARCH" && exit 1 ;; \
     esac \
  && curl -fL --retry 3 -o /app/bin/yt-dlp \
