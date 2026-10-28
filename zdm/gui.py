@@ -629,7 +629,6 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QMenu,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -1648,14 +1647,14 @@ class _DiskDialog(QDialog):
         self.total_v = self._value()
         self.used_v = self._value()
         self.free_v = self._value()
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1000)
-        self.bar.setFormat("已用 %p%")
+        # 使用率改报纯文字（用户点名）：蓝色进度条整块像背景色，
+        # 和左边标签又不在同一水平线上；百分比跟其它行同款，天然对齐。
+        self.pct_v = self._value()
         form.addRow("下载目录", self.path_v)
         form.addRow("总容量", self.total_v)
         form.addRow("已用", self.used_v)
         form.addRow("剩余", self.free_v)
-        form.addRow("使用率", self.bar)
+        form.addRow("使用率", self.pct_v)
         outer.addLayout(form)
         box = QDialogButtonBox()
         btn_open = box.addButton("打开下载目录", QDialogButtonBox.ActionRole)
@@ -1680,20 +1679,17 @@ class _DiskDialog(QDialog):
         self.path_v.setText(path)
         if total is None:
             # 目录被删了/挪到没挂载的外置盘：明说读不到，别显示一堆 0。
-            for w in (self.total_v, self.used_v, self.free_v):
+            for w in (self.total_v, self.used_v, self.free_v, self.pct_v):
                 w.setText("读取失败")
-            self.bar.setValue(0)
-            self.bar.setFormat("不可用")
             self.setToolTip("下载目录当前读不到容量：可能已被删除或所在卷未挂载")
             return
-        self.bar.setFormat("已用 %p%")
         self.setToolTip("")
         # 只报一种单位：以前「228.3 GB（245.1 GB）」两串并排，看着像两个互相矛盾的数，
         # 其实只是 GiB/GB 的口径差 —— 反而更费解。精确值留给「剩余」这一行。
         self.total_v.setText(fmt_size(total))
         self.used_v.setText(fmt_size(used))
         self.free_v.setText(f"{fmt_size(free)}（{free:,} 字节）")
-        self.bar.setValue(int(round(used * 1000.0 / total)) if total else 0)
+        self.pct_v.setText(f"{used * 100.0 / total:.1f}%" if total else "—")
 
 
 def _vsep() -> "QWidget":
@@ -1829,6 +1825,10 @@ class MainWindow(QMainWindow):
         # 确实能一口气看全一长串文件名；磁盘剩余搬到底部状态栏后（用户点名），
         # 原来那一串占的中段位置整块归它，空列表时也在原位常驻。
         self.search_edit.setMaximumWidth(420)
+        # 光收 padding 还是高一点点（用户截图点名）：行内清除按钮的图标
+        # （16px + 边距）把内容高度顶过了文字高度。直接把总高钉死成同行按钮的
+        # 构成：文字高 + 上下 padding 5px×2 + 边框 1px×2。
+        self.search_edit.setFixedHeight(self.search_edit.fontMetrics().height() + 12)
         self.search_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.search_edit.textChanged.connect(self._render)
         # 空间紧张时 deficit 按 stretch 分摊：搜索框拿 2 份先缩（它少 40px 只是输入

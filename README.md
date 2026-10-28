@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.18**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
+当前版本：**v1.18.19**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.x）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.18_amd64.deb` | `sudo apt install ./zdm_1.18.18_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.19_amd64.deb` | `sudo apt install ./zdm_1.18.19_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `ZDM-Setup-1.18.18.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `ZDM-Setup-1.18.19.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.18
+bash zdm/build_linux_app.sh ./linux-build 1.18.19
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -451,6 +451,8 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 - 验证方式：网页版是整页英文渲染 + 一份字符串表用例（95 条断言，残留中文 0）；扩展是把
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
+
+**v1.18.19 = 搜索框和按钮真正等高；磁盘小窗「使用率」改纯文字** —— 1.18.18 发完用户截图点名两处：搜索框仍比同行按钮高一点点，元凶不是 padding 而是行内清除按钮的图标（16px+边距）把内容高度顶过了文字高度，光收 padding 治不了，直接把总高钉死成和按钮同一个构成（文字高 + 上下 padding 5px×2 + 边框 1px×2）。磁盘详情小窗的「使用率」一行：蓝色进度条整块看着像背景色，而且和左边标签不在同一水平线上，改成与其它行同款的纯文字百分比（如 62.4%），读不到容量时照常写「读取失败」；Windows 原生客户端的磁盘小窗同步改法。
 
 **v1.18.18 = 「磁盘剩余」挪进底部状态栏，原位放常驻搜索框；修好磁盘小窗的「关闭」** —— 用户点名：工具条第二行那串「磁盘剩余 X」整组搬到底部状态栏常驻（点击照旧打开磁盘详情小窗，数字随轮询刷新），腾出来的中段位置交给「搜索文件名」输入框——不再空态收起，而是常驻原位、宽度 120–420 随空位伸展。搜索框与同行按钮等高：QPushButton 上下 padding 5px、QLineEdit 默认 6px，输入框会高出 2px，故加 `QLineEdit#toolbarSearch` 单收这一格，别处输入框不受牵连。磁盘详情小窗的「关闭」此前点了没反应——QDialogButtonBox 只发 rejected 信号不会自动关窗，显式接上 `box.rejected.connect(self.reject)`。三端同步：Mac/Linux 共用 gui.py；Windows 原生客户端（WPF）补上同一套——筛选行加搜索框（高度绑页签胶囊 ActualHeight，严格等高、压掉 AppTextBox 的 30px 下限），状态栏加可点「磁盘剩余」（DriveInfo 读下载目录所在卷），并新增磁盘详情小窗（打开下载目录/刷新/关闭，「关闭」显式接 dlg.Close()，不重蹈 Qt 那个坑）。
 

@@ -332,9 +332,9 @@ public partial class MainWindow : Window
         var totalV = AddDiskRow(panel, "总容量");
         var usedV = AddDiskRow(panel, "已用");
         var freeV = AddDiskRow(panel, "剩余");
-        panel.Children.Add(new TextBlock { Text = "使用率", Margin = new Thickness(0, 6, 0, 2) });
-        var bar = new ProgressBar { Minimum = 0, Maximum = 100, Height = 10 };
-        panel.Children.Add(bar);
+        // 使用率报纯文字（对齐 Mac 版 1.18.19）：蓝色进度条整块像背景色，
+        // 和左边标签又不在同一水平线上；百分比跟其它行同款，天然对齐。
+        var pctV = AddDiskRow(panel, "使用率");
 
         void Reload()
         {
@@ -343,14 +343,13 @@ public partial class MainWindow : Window
             if (total <= 0)
             {
                 // 目录被删 / 卷没挂载：明说读不到，别显示一堆 0（对齐 Mac 版）。
-                totalV.Text = usedV.Text = freeV.Text = "读取失败";
-                bar.Value = 0;
+                totalV.Text = usedV.Text = freeV.Text = pctV.Text = "读取失败";
                 return;
             }
             totalV.Text = Human.Size(total);
             usedV.Text = Human.Size(used);
             freeV.Text = $"{Human.Size(free)}（{free:N0} 字节）";
-            bar.Value = used * 100.0 / total;
+            pctV.Text = $"{used * 100.0 / total:F1}%";
         }
         _diskReload = Reload;
 
