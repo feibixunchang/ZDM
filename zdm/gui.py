@@ -1586,7 +1586,7 @@ class _ElidedLabel(QLabel):
     def set_clickable(self, fn, tip: str = "") -> None:
         """fn=None 时恢复成纯文本：光标、提示都交还给父控件。
 
-        空态那一栏报的是「磁盘剩余」，点它要能开详情小窗；有任务时报的是统计数，
+        需要点击行为的栏（如磁盘详情入口）开着；报的是统计数时没有对应窗口，
         同一块文字含义就变了，所以两种状态分别开关，别拿统计数字当磁盘按钮。
         """
         self._on_click = fn
@@ -1663,6 +1663,9 @@ class _DiskDialog(QDialog):
         box.addButton("关闭", QDialogButtonBox.RejectRole)
         btn_open.clicked.connect(lambda: self._open_dir())
         btn_refresh.clicked.connect(self.reload)
+        # 「关闭」以前点了没反应：QDialogButtonBox 只是发出 rejected 信号，
+        # 不显式接回 self.reject 的话窗口根本不会关（用户点名修复）。
+        box.rejected.connect(self.reject)
         outer.addWidget(box)
         self.reload()
 
@@ -1815,12 +1818,16 @@ class MainWindow(QMainWindow):
         btn_update.clicked.connect(lambda: self._check_update(silent=False))
         hl.addWidget(btn_update)
         self.search_edit = QLineEdit()
+        # 高度和同一行的按钮对齐（用户点名）：QPushButton 的 QSS 上下 padding 是
+        # 5px，QLineEdit 默认 6px，同一行里输入框就比按钮高出一截。objectName
+        # 交给 theme.py 单独把这一格的上下 padding 收进 5px，其它输入框不受牵连。
+        self.search_edit.setObjectName("toolbarSearch")
         self.search_edit.setPlaceholderText("搜索文件名…")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setMinimumWidth(120)
         # 封顶从 280 抬到 420：用户点名「要么把搜索框加长」。宽窗口（1900）里这一栏
-        # 确实能一口气看全一长串文件名；窄窗口里没有它什么事，空态会整块收起
-        # （见 _update_summary），窄窗的宽度全留给磁盘那一串。
+        # 确实能一口气看全一长串文件名；磁盘剩余搬到底部状态栏后（用户点名），
+        # 原来那一串占的中段位置整块归它，空列表时也在原位常驻。
         self.search_edit.setMaximumWidth(420)
         self.search_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.search_edit.textChanged.connect(self._render)
@@ -1828,8 +1835,8 @@ class MainWindow(QMainWindow):
         # 区短点），汇总栏拿 1 份保底 —— 数字比输入框更值得留在第一视野。
         hl.addWidget(self.search_edit, 2)
         # 汇总栏：有任务时报进行中几个、总速度、排队/暂停/合并/失败/完成各几个；
-        # 空列表时只报磁盘剩余，点它开磁盘详情小窗。引导那句「粘贴链接回车」归输入框
-        # 占位符管，这里不复读（用户点名）。内容见 _update_summary()。
+        # 空列表时整栏收起，位置让给搜索框（磁盘剩余已搬到底部状态栏，见 disk_label）。
+        # 内容见 _update_summary()。
         self.summary_label = _ElidedLabel()
         self.summary_label.setObjectName("toolSummary")
         self.summary_label.setAlignment(Qt.AlignCenter)
@@ -1918,6 +1925,14 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("正在连接本地服务…")
+        # 磁盘剩余从工具条中间那栏搬到底部状态栏常驻（用户点名），原位腾给搜索框。
+        # 点击仍然打开磁盘详情小窗，功能不变，只是换了个位置。
+        self.disk_label = QLabel("磁盘剩余…")
+        self.disk_label.setObjectName("diskStatus")
+        self.disk_label.setCursor(Qt.PointingHandCursor)
+        self.disk_label.setToolTip("下载目录所在磁盘的剩余空间（点击查看磁盘空间详情）")
+        self.disk_label.mousePressEvent = lambda _e: self._show_disk_dialog()
+        self.statusBar().addPermanentWidget(self.disk_label)
         # Always-visible version number, bottom right.
         # 扩展连接状态：常驻主界面（以前只在「浏览器扩展」对话框里看得到）。
         # 点一下打开详情；后台每 5 秒问一次 /api/extension。
@@ -2177,6 +2192,10 @@ class MainWindow(QMainWindow):
 
     def _update_summary(self) -> None:
         """工具条第二行中间的实时汇总：把以前那块死空白变成有内容的一栏。"""
+        # 磁盘剩余已搬到底部状态栏常驻（见 disk_label），这里每轮轮询顺手刷新它一次；
+        # 工具条腾出来的中段位置整块交给搜索框（用户点名）。
+        if getattr(self, "disk_label", None) is not None:
+            self.disk_label.setText(self._disk_free_text())
         counts = {}
         for t in self.tasks:
             k = t.get("status") or "queued"
@@ -2194,26 +2213,19 @@ class MainWindow(QMainWindow):
             parts.append(f"已完成 {counts['completed']}")
         if parts:
             # 有任务时这一栏是统计数字，点它没有对应窗口 —— 把点击态收掉，
-            # 别让用户以为「进行中 2」也能弹出什么。搜索框这时有意义，放回来。
+            # 别让用户以为「进行中 2」也能弹出什么。搜索框照常在场。
             self.summary_label.set_clickable(None)
             self.summary_label.setFullText(" · ".join(parts))
+            self.summary_label.setVisible(True)
             self.search_edit.setVisible(True)
         else:
-            # 空列表不再报「暂无任务」：表格里一行都没有，这句话本身没信息量，
-            # 而且它把「磁盘剩余」挤成了长句（用户点名去掉）。这一栏只剩磁盘剩余，
-            # 点开是磁盘详情小窗。
-            #
-            # 同时把搜索框收起：默认窗口只有 1080，实测第二行中段一共只剩 200px，
-            # 「磁盘剩余 84.4 GB」自己就要 130px，跟搜索框抢的结果是两个一起截断，
-            # 用户看到的是「磁盘…」——等于没满足要求。列表空的本来就没有可搜的对象，
-            # 让它把位子腾出来最省，任务一回来搜索框自动出现。
-            self.summary_label.set_clickable(
-                self._show_disk_dialog, "点击查看磁盘空间详情")
-            self.summary_label.setFullText(self._disk_free_text())
-            if self.search_edit.isVisible():
-                # 收起前清空：留着隐形过滤条件，任务回来时会莫名其妙少几条。
-                self.search_edit.clear()
-            self.search_edit.setVisible(False)
+            # 空列表：这一栏不再报「磁盘剩余」——它已搬到底部状态栏常驻（用户点名），
+            # 腾出来的中段位置整块给「搜索文件名」输入框，搜索框常驻原位、随空位伸展，
+            # 不再像以前那样空态收起。
+            self.summary_label.set_clickable(None)
+            self.summary_label.setFullText("")
+            self.summary_label.setVisible(False)
+            self.search_edit.setVisible(True)
 
     def _disk_snapshot(self):
         """(目录, 总量, 已用, 剩余)；目录读不到时后三项为 None。"""

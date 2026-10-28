@@ -24,6 +24,10 @@ public partial class MainWindow : Window
     private readonly Forms.NotifyIcon _tray = new();
     private readonly UpdateChecker _updates = new();
     private string _filter = "all";
+    // 搜索关键词：叠在页签筛选之上（对齐 Mac/Linux 1.18.18 的 search_edit）。
+    private string _search = "";
+    private Window? _diskDlg;
+    private Action? _diskReload;
     private bool _exiting;
 
     public MainWindow()
@@ -193,6 +197,19 @@ public partial class MainWindow : Window
             ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// 搜索框：按文件名过滤当前页签的结果（对齐 Mac/Linux 版）。占位覆盖层和
+    /// UrlHint 同理 —— 一有内容就要藏，否则灰字压在用户输入上。
+    /// </summary>
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (SearchHint is null) return;
+        SearchHint.Visibility = string.IsNullOrEmpty(SearchBox.Text)
+            ? Visibility.Visible : Visibility.Collapsed;
+        _search = SearchBox.Text.Trim();
+        Poll();
+    }
+
     private void OnAddClick(object sender, RoutedEventArgs e) => AddUrl();
 
     private void AddUrl()
@@ -281,6 +298,131 @@ public partial class MainWindow : Window
         if (!Core.Human.OpenInExplorer(dir))
             MessageBox.Show(this, $"无法打开目录：\n{dir}", "ZDM 下载管理器",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    private void OnDiskFreeClick(object sender, MouseButtonEventArgs e) => ShowDiskDialog();
+
+    /// <summary>
+    /// 磁盘容量详情小窗：总量 / 已用 / 剩余 / 使用率（对齐 Mac 版 _DiskDialog）。
+    /// 「关闭」显式接 dlg.Close() —— Mac 版 1.18.17 之前就是因为没接上
+    /// QDialogButtonBox 的 reject 信号，「关闭」成了死按钮（用户点名修复），这里不重蹈覆辙。
+    /// </summary>
+    private void ShowDiskDialog()
+    {
+        if (_diskDlg is { IsLoaded: true })
+        {
+            _diskDlg.Activate();
+            _diskReload?.Invoke();
+            return;
+        }
+
+        var dlg = new Window
+        {
+            Title = "磁盘空间",
+            Owner = this,
+            Width = 400,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ShowInTaskbar = false,
+            ResizeMode = ResizeMode.NoResize,
+        };
+
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        var pathV = AddDiskRow(panel, "下载目录");
+        var totalV = AddDiskRow(panel, "总容量");
+        var usedV = AddDiskRow(panel, "已用");
+        var freeV = AddDiskRow(panel, "剩余");
+        panel.Children.Add(new TextBlock { Text = "使用率", Margin = new Thickness(0, 6, 0, 2) });
+        var bar = new ProgressBar { Minimum = 0, Maximum = 100, Height = 10 };
+        panel.Children.Add(bar);
+
+        void Reload()
+        {
+            var (path, total, used, free) = DiskSnapshot();
+            pathV.Text = path;
+            if (total <= 0)
+            {
+                // 目录被删 / 卷没挂载：明说读不到，别显示一堆 0（对齐 Mac 版）。
+                totalV.Text = usedV.Text = freeV.Text = "读取失败";
+                bar.Value = 0;
+                return;
+            }
+            totalV.Text = Human.Size(total);
+            usedV.Text = Human.Size(used);
+            freeV.Text = $"{Human.Size(free)}（{free:N0} 字节）";
+            bar.Value = used * 100.0 / total;
+        }
+        _diskReload = Reload;
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 14, 0, 0),
+        };
+        var flat = (Style)FindResource("FlatButton");
+        var openBtn = new Button { Content = "打开下载目录", Style = flat, Margin = new Thickness(0, 0, 8, 0) };
+        openBtn.Click += (_, _) => OnOpenFolder(this, new RoutedEventArgs());
+        var refreshBtn = new Button { Content = "刷新", Style = flat, Margin = new Thickness(0, 0, 8, 0) };
+        refreshBtn.Click += (_, _) => Reload();
+        var closeBtn = new Button { Content = "关闭", Style = flat, MinWidth = 64 };
+        closeBtn.Click += (_, _) => dlg.Close();
+        buttons.Children.Add(openBtn);
+        buttons.Children.Add(refreshBtn);
+        buttons.Children.Add(closeBtn);
+        panel.Children.Add(buttons);
+        dlg.Content = panel;
+
+        Reload();
+        _diskDlg = dlg;
+        dlg.Show();
+    }
+
+    private static TextBlock AddDiskRow(Panel panel, string label)
+    {
+        var grid = new Grid { Margin = new Thickness(0, 2, 0, 2) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var name = new TextBlock
+        {
+            Text = label,
+            Margin = new Thickness(0, 0, 10, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var value = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        Grid.SetColumn(name, 0);
+        Grid.SetColumn(value, 1);
+        grid.Children.Add(name);
+        grid.Children.Add(value);
+        panel.Children.Add(grid);
+        return value;
+    }
+
+    /// <summary>(目录, 总量, 已用, 剩余)；卷读不到时总量为 0（对齐 Mac 版 _disk_snapshot）。</summary>
+    private (string Path, long Total, long Used, long Free) DiskSnapshot()
+    {
+        var dir = _manager.Config.DownloadDir;
+        try
+        {
+            var probe = string.IsNullOrWhiteSpace(dir)
+                ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                : dir;
+            var root = System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(probe));
+            if (string.IsNullOrEmpty(root)) return (dir, 0, 0, 0);
+            var di = new DriveInfo(root);
+            if (!di.IsReady) return (dir, 0, 0, 0);
+            var total = di.TotalSize;
+            var free = di.AvailableFreeSpace;
+            return (dir, total, total - free, free);
+        }
+        catch
+        {
+            return (dir, 0, 0, 0);
+        }
     }
 
     private void OnBrowseFolder(object sender, RoutedEventArgs e)
@@ -631,17 +773,24 @@ public partial class MainWindow : Window
     private void UpdateEmptyHint()
         => EmptyHint.Visibility = Rows.Items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-    private bool MatchesFilter(Download d) => _filter switch
+    private bool MatchesFilter(Download d)
     {
-        "active" => d.Status is Core.TaskStatus.Downloading or Core.TaskStatus.Queued
-                           or Core.TaskStatus.Merging,
-        "paused" => d.Status == Core.TaskStatus.Paused,
-        "completed" => d.Status == Core.TaskStatus.Completed,
-        // The only filter that keys off provenance rather than status: media the
-        // browser extension found on a page.
-        "sniffer" => d.Source == Core.TaskSources.Sniffer,
-        _ => true,
-    };
+        // 搜索叠在页签筛选之上：先「看哪一类」，再按文件名缩小（对齐 Mac 版 _render）。
+        if (_search.Length > 0 &&
+            d.Filename.IndexOf(_search, StringComparison.OrdinalIgnoreCase) < 0)
+            return false;
+        return _filter switch
+        {
+            "active" => d.Status is Core.TaskStatus.Downloading or Core.TaskStatus.Queued
+                               or Core.TaskStatus.Merging,
+            "paused" => d.Status == Core.TaskStatus.Paused,
+            "completed" => d.Status == Core.TaskStatus.Completed,
+            // The only filter that keys off provenance rather than status: media the
+            // browser extension found on a page.
+            "sniffer" => d.Source == Core.TaskSources.Sniffer,
+            _ => true,
+        };
+    }
 
     private void UpdateStatusBar()
     {
@@ -659,6 +808,10 @@ public partial class MainWindow : Window
             $"总速度 {Human.Speed(speed)}",
             $"共 {all.Count} 项",
         });
+
+        // 磁盘剩余常驻底部状态栏（对齐 Mac/Linux 1.18.18：从工具条那一行挪了过来）。
+        var (_, _, _, free) = DiskSnapshot();
+        DiskFreeText.Text = free > 0 ? $"磁盘剩余 {Human.Size(free)}" : "磁盘剩余未知";
     }
 
     /// <summary>Shown in the title bar and the status bar.</summary>

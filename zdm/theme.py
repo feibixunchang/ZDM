@@ -150,6 +150,9 @@ QLabel#toolSummary {{ color: {p.text_muted}; background: transparent; }}
 QLineEdit, QSpinBox {{ background: {p.surface}; border: 1px solid {p.border};
     border-radius: 7px; padding: 6px 9px; color: {p.text}; }}
 QLineEdit:focus, QSpinBox:focus {{ border-color: {p.accent}; }}
+/* 工具条搜索框与同行按钮等高（用户点名）：QPushButton 上下 padding 5px，
+   QLineEdit 默认 6px 会让输入框高出一截；只收这一格，别处输入框不受影响。 */
+QLineEdit#toolbarSearch {{ padding: 5px 9px; }}
 QPushButton {{ background: {p.surface}; border: 1px solid {p.border};
     border-radius: 7px; padding: 5px 12px; color: {p.text}; }}
 QPushButton:hover {{ background: {p.hover}; }}

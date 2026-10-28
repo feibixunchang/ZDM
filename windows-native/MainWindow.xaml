@@ -106,33 +106,57 @@
         -->
         <!-- Surface, not AppBg: the whole top block reads as one continuous panel -->
         <Border Grid.Row="1" Background="{DynamicResource Surface}">
-            <StackPanel Orientation="Horizontal" Margin="14,10,14,8">
-                <Border x:Name="FilterAll" Tag="all" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
-                        MouseLeftButtonDown="OnFilterTabClick">
-                    <ToggleButton Content="全部" Style="{StaticResource FilterTab}"
-                                  IsHitTestVisible="False"/>
-                </Border>
-                <Border x:Name="FilterActive" Tag="active" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
-                        MouseLeftButtonDown="OnFilterTabClick">
-                    <ToggleButton Content="进行中" Style="{StaticResource FilterTab}"
-                                  IsHitTestVisible="False"/>
-                </Border>
-                <Border x:Name="FilterPaused" Tag="paused" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
-                        MouseLeftButtonDown="OnFilterTabClick">
-                    <ToggleButton Content="已暂停" Style="{StaticResource FilterTab}"
-                                  IsHitTestVisible="False"/>
-                </Border>
-                <Border x:Name="FilterDone" Tag="completed" Background="Transparent" CornerRadius="999"
-                        MouseLeftButtonDown="OnFilterTabClick">
-                    <ToggleButton Content="已完成" Style="{StaticResource FilterTab}"
-                                  IsHitTestVisible="False"/>
-                </Border>
-                <Border x:Name="FilterSniffed" Tag="sniffer" Background="Transparent" CornerRadius="999"
-                        MouseLeftButtonDown="OnFilterTabClick">
-                    <ToggleButton Content="嗅探" Style="{StaticResource FilterTab}"
-                                  IsHitTestVisible="False"/>
-                </Border>
-            </StackPanel>
+            <Grid Margin="14,10,14,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <Border x:Name="FilterAll" Tag="all" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
+                            MouseLeftButtonDown="OnFilterTabClick">
+                        <ToggleButton Content="全部" Style="{StaticResource FilterTab}"
+                                      IsHitTestVisible="False"/>
+                    </Border>
+                    <Border x:Name="FilterActive" Tag="active" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
+                            MouseLeftButtonDown="OnFilterTabClick">
+                        <ToggleButton Content="进行中" Style="{StaticResource FilterTab}"
+                                      IsHitTestVisible="False"/>
+                    </Border>
+                    <Border x:Name="FilterPaused" Tag="paused" Background="Transparent" CornerRadius="999" Margin="0,0,6,0"
+                            MouseLeftButtonDown="OnFilterTabClick">
+                        <ToggleButton Content="已暂停" Style="{StaticResource FilterTab}"
+                                      IsHitTestVisible="False"/>
+                    </Border>
+                    <Border x:Name="FilterDone" Tag="completed" Background="Transparent" CornerRadius="999"
+                            MouseLeftButtonDown="OnFilterTabClick">
+                        <ToggleButton Content="已完成" Style="{StaticResource FilterTab}"
+                                      IsHitTestVisible="False"/>
+                    </Border>
+                    <Border x:Name="FilterSniffed" Tag="sniffer" Background="Transparent" CornerRadius="999"
+                            MouseLeftButtonDown="OnFilterTabClick">
+                        <ToggleButton Content="嗅探" Style="{StaticResource FilterTab}"
+                                      IsHitTestVisible="False"/>
+                    </Border>
+                </StackPanel>
+
+                <!--
+                  搜索文件名（对齐 Mac/Linux 1.18.18：磁盘剩余挪到底部状态栏后，
+                  这一行中段空位归搜索框）。占位符沿用 UrlBox 的覆盖层做法。
+                  Height 绑到页签胶囊的 ActualHeight —— 用户点名「高度和其它按钮
+                  一致」；MinHeight=0 压掉 AppTextBox 的 30px 下限，否则比胶囊高。
+                -->
+                <Grid Grid.Column="1" Margin="12,0,0,0" MinWidth="120" MaxWidth="420">
+                    <TextBox x:Name="SearchBox" Style="{StaticResource AppTextBox}"
+                             MinHeight="0"
+                             Height="{Binding ActualHeight, ElementName=FilterAll}"
+                             TextChanged="OnSearchTextChanged"
+                             ToolTip="按文件名过滤当前列表"/>
+                    <TextBlock x:Name="SearchHint" Text="搜索文件名…"
+                               Foreground="{DynamicResource TextMuted}"
+                               VerticalAlignment="Center" Margin="11,0,0,0"
+                               IsHitTestVisible="False" Opacity="0.75"/>
+                </Grid>
+            </Grid>
         </Border>
 
         <!-- ================= task grid ================= -->
@@ -420,6 +444,14 @@
                     <TextBlock x:Name="StatusText" VerticalAlignment="Center"
                                Foreground="{DynamicResource TextMuted}"
                                FontSize="{StaticResource UiFontSize}"/>
+                    <!-- 磁盘剩余常驻底部状态栏（对齐 Mac/Linux 1.18.18），点开磁盘详情小窗 -->
+                    <TextBlock x:Name="DiskFreeText" Margin="12,0,0,0"
+                               VerticalAlignment="Center"
+                               FontSize="{StaticResource UiFontSize}"
+                               Foreground="{DynamicResource TextMuted}"
+                               Cursor="Hand"
+                               ToolTip="下载目录所在磁盘的剩余空间（点击查看磁盘空间详情）"
+                               MouseLeftButtonUp="OnDiskFreeClick"/>
                     <TextBlock x:Name="StatusHint" Margin="12,0,0,0"
                                VerticalAlignment="Center" FontSize="12"
                                Foreground="{DynamicResource Accent}"
