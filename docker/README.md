@@ -1,7 +1,7 @@
 # ZDM 容器版（NAS / 服务器）
 
 无桌面 GUI 的 ZDM 服务端：网页版界面 + REST API + aria2 兼容 JSON-RPC。
-镜像由 CI 自动构建推送：**`ghcr.io/feibixunchang/zdm-server`**（amd64）。
+镜像由 CI 自动构建推送：**`ghcr.io/feibixunchang/zdm-server`**（amd64 + arm64 双架构）。
 
 ## 一键部署
 

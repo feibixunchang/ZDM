@@ -16,13 +16,19 @@ COPY zdm/zdm.py /app/zdm.py
 COPY zdm/web /app/web
 COPY zdm/fetch_bin.py /app/fetch_bin.py
 
-# 随包工具与桌面端同版本；--version 自检失败就让构建当场红。
+# 随包工具与桌面端同版本；多架构（amd64/arm64）按 TARGETARCH 选资产。
+# --version 自检失败就让构建当场红。
 ARG YTDLP_VERSION=2026.08.19
 RUN mkdir -p /app/bin \
+ && case "$TARGETARCH" in \
+      amd64) YT_ASSET="yt-dlp_linux"; FB_ARCH="x86_64" ;; \
+      arm64) YT_ASSET="yt-dlp_linux_armv8"; FB_ARCH="aarch64" ;; \
+      *) echo "不支持的架构: $TARGETARCH" && exit 1 ;; \
+    esac \
  && curl -fL --retry 3 -o /app/bin/yt-dlp \
-      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux" \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${YT_ASSET}" \
  && chmod +x /app/bin/yt-dlp \
- && python3 /app/fetch_bin.py --dest /app/bin --os linux --arch x86_64 --tool all \
+ && python3 /app/fetch_bin.py --dest /app/bin --os linux --arch "$FB_ARCH" --tool all \
  && /app/bin/yt-dlp --version \
  && /app/bin/deno --version \
  && /app/bin/N_m3u8DL-RE --version \

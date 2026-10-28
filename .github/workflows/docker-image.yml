@@ -1,7 +1,7 @@
 name: docker-image
 
 # 构建并推送 ZDM 服务端镜像到 GHCR（打 v* 标签或手动触发时）。
-# 镜像：ghcr.io/feibixunchang/zdm-server:<tag|latest>（amd64，供 NAS/Docker 用）。
+# 镜像：ghcr.io/feibixunchang/zdm-server:<tag|latest>（amd64 + arm64 双架构，覆盖 x86 与 ARM 的 NAS）。
 
 on:
   push:
@@ -32,7 +32,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/feibixunchang/zdm-server:latest
