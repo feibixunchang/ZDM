@@ -1217,6 +1217,53 @@ class Handler(BaseHTTPRequestHandler):
                 body["kind"] = "video"
                 if not (body.get("filename") or body.get("name")):
                     body["filename"] = video_page_filename(url)
+        # B站页面链接优先「解析直链 + 内置多线程引擎」（用户点名：粘贴下载太慢）。
+        # yt-dlp 是单连接，而 B站 CDN 支持并行 Range，多线程快数倍；文件名顺带
+        # 用真实标题。选段/纯音频任务不走这条路；解析失败静默保留 yt-dlp 通道。
+        _page = str(body.get("yt_page") or body.get("page_url") or "")
+        if (
+            _page
+            and "bilibili.com" in (urlparse(_page).hostname or "").lower()
+            and not body.get("audio_only")
+            and not body.get("section")
+        ):
+            try:
+                from . import yt_resolve
+                from .core import _is_generic_video_name
+
+                res = yt_resolve.resolve(
+                    _page,
+                    cookie=str(headers.get("Cookie") or "")
+                    or self._site_cookie_for(_page)
+                    or "",
+                    proxy=body.get("proxy") or self.manager.config.get("proxy") or None,
+                )
+                best = None
+                if res and res.get("ok"):
+                    want = int(body.get("yt_height") or body.get("height") or 0)
+                    for f in res.get("formats") or []:
+                        if not f or not f.get("url"):
+                            continue
+                        if f.get("kind") not in ("video", "video+muxed"):
+                            continue
+                        h = int(f.get("height") or 0)
+                        if want and h > want:
+                            continue
+                        if best is None or h >= int(best.get("height") or 0):
+                            best = f
+                if best is not None:
+                    body["url"] = best["url"]
+                    if best.get("audio_url"):
+                        body["audio_url"] = best["audio_url"]
+                    body.pop("yt_page", None)
+                    body.pop("page_url", None)
+                    title = str(res.get("title") or "").strip()
+                    cur = str(body.get("filename") or "")
+                    if title and (not cur or _is_generic_video_name(cur)):
+                        body["filename"] = title + ".mp4"
+                    url = best["url"]
+            except Exception:  # noqa: BLE001 解析挂了就走原 yt_page 通道，不拦
+                pass
         # 扩展推的是**媒体直链**（googlevideo…）且带 kind，上面的页面
         # 链接推导（要求 not kind）不会命中 —— 但 Referer 里就有
         # YouTube 页面地址。直链只能顺序读，部分网络（TUN/Fake-IP）下

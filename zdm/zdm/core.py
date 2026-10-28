@@ -2663,12 +2663,16 @@ class Download:
         #                  不在换客户端特征里，重试链当场 break —— 这就是
         #                  「有些机器上永远下不动」的根因之一。
         # YouTube 的拦截是**按请求**随机判的（同一台机器同一视频，解析能过、
-        # 下载被拦，隔几分钟又自愈），所以两个客户端各试两次、中间隔 3 秒。
+        # 下载被拦，隔几分钟又自愈），所以三个客户端各试两次、中间隔 3 秒。
+        # 1.18.22 追加 web_embedded：Windows/Linux 实测 default+tv_embedded
+        # 双双「Sign in to confirm you're not a bot」的出口 IP，还有它一张牌可打。
         attempts = [
             (None, 0.0),
             (("--extractor-args", "youtube:player_client=tv_embedded"), 0.0),
+            (("--extractor-args", "youtube:player_client=web_embedded"), 0.0),
             (None, 3.0),
             (("--extractor-args", "youtube:player_client=tv_embedded"), 3.0),
+            (("--extractor-args", "youtube:player_client=web_embedded"), 3.0),
         ]
         rc, err = 1, ""
         try:
