@@ -17,6 +17,8 @@ COPY zdm/web /app/web
 COPY zdm/fetch_bin.py /app/fetch_bin.py
 
 # 随包工具与桌面端同版本；多架构（amd64/arm64）按 TARGETARCH 选资产。
+# buildx 的预置变量必须先 ARG 声明才可见（漏了就是空串，架构判定直接失效）。
+ARG TARGETARCH
 # --version 自检失败就让构建当场红。
 ARG YTDLP_VERSION=2026.08.19
 RUN mkdir -p /app/bin \
