@@ -121,6 +121,22 @@
   @media (max-width:760px){
     .set-body{grid-template-columns:1fr}
     .set-nav{position:static;flex-direction:row;flex-wrap:wrap}
+    /* 移动端：五列表格拆成卡片（用户点名补齐的短板）。表头藏掉，
+       大小/速度/操作变成「标签左、值右」的行；进度整行给进度条。 */
+    main{padding:10px 10px 70px}
+    .addbar{padding:10px}
+    .addbar input.url{min-width:0}
+    .stats{margin-left:0;width:100%}
+    table{display:block}
+    thead{display:none}
+    tbody,tr{display:block}
+    tr{border:1px solid var(--border);border-radius:12px;background:var(--panel);
+       margin:0 0 10px;padding:6px 12px;box-shadow:var(--shadow)}
+    td{display:block;border-bottom:none;padding:5px 0}
+    td[data-label]::before{content:attr(data-label);color:var(--muted);font-size:12px}
+    td[data-label="大小"],td[data-label="速度"]{display:flex;justify-content:space-between;align-items:center;gap:10px}
+    td[data-label="进度"] .bar{margin-top:4px}
+    .actions{justify-content:flex-end;padding-top:2px}
   }
 </style>
 </head>
@@ -992,16 +1008,16 @@ function render(){
         <div class="fname">${esc(t.filename || '未命名')}${badge(t)}</div>
         <div class="sub">${esc(t.url || '')}${t.error ? ' · <span style="color:var(--err)">'+esc(t.error)+'</span>' : ''}${t.stream_note ? ' · <span style="color:var(--warn)" title="换引擎的理由">'+esc(t.stream_note)+'</span>' : ''}${t.archive_note ? ' · <span style="color:var(--warn)" title="按后缀归档没生效的原因">'+esc(t.archive_note)+'</span>' : ''}${tracksSummary(t) ? ' · <span class="trkline">'+esc(tracksSummary(t))+'</span>' : ''}</div>
       </td>
-      <td>${fmtSize(num(t.downloaded))} / ${t.size ? fmtSize(num(t.size)) : '未知'}</td>
-      <td>
+      <td data-label="大小">${fmtSize(num(t.downloaded))} / ${t.size ? fmtSize(num(t.size)) : '未知'}</td>
+      <td data-label="进度">
         <div class="bar"><i style="width:${pct}%;background:${done?'var(--ok)':'var(--accent)'}"></i></div>
         <div class="sub">${liveOn ? '' : pct.toFixed(1)+'% · '}<span class="pill s-${esc(t.status)}">${pillText}</span>
         ${liveOn && !liveWait ? '· 已录 '+fmtRecorded(t.live_recorded)+(num(t.stream_live_limit)?' / '+fmtRecorded(t.stream_live_limit):'') : ''}
         ${t.status==='downloading' && !liveOn ? '· 剩余 '+fmtTime(t.eta) : ''}
         ${liveOn && num(t.stream_live_limit) && t.status==='downloading' ? '· 剩 '+fmtTime(Math.max(0, num(t.stream_live_limit)-num(t.live_recorded))) : ''}${schedText(t)}${t.priority ? ' · 优先级 '+num(t.priority) : ''}</div>
       </td>
-      <td>${t.status==='downloading' ? fmtSize(num(t.speed))+'/s' : '—'}</td>
-      <td><div class="actions">
+      <td data-label="速度">${t.status==='downloading' ? fmtSize(num(t.speed))+'/s' : '—'}</td>
+      <td data-label="操作"><div class="actions">
         ${canPause ? `<button class="icon" data-a="pause" data-id="${esc(t.id)}" title="${t.live && t.status==='downloading' ? '停止录制（已录的部分会保存下来）' : '暂停'}">⏸</button>` : ''}
         ${canResume ? `<button class="icon" data-a="resume" data-id="${esc(t.id)}" title="继续">▶</button>` : ''}
         ${!done && !merging ? `<button class="icon" data-a="edit" data-id="${esc(t.id)}" title="修改链接/请求头/代理/定时">✎</button>` : ''}
