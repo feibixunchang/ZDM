@@ -4,6 +4,9 @@ const DEFAULTS = {
   connections: 8,
   directory: "",
   notify: true,
+  // 网页里「嗅探」按钮的贴边收纳：松手吸到左右边缘 + 闲置后收成小圆点。
+  // 关掉就是纯自由摆放（不吸边、不收起），老用户可以直接关。
+  sniff_dock: true,
   // 界面语言：auto = 跟随浏览器。存 sync，内容脚本起来时读同一个键，
   // 不然「设置里选了 English，网页上的按钮还是中文」。
   ui_lang: "auto",
@@ -16,6 +19,7 @@ chrome.storage.sync.get(DEFAULTS, (cfg) => {
   $("#connections").value = cfg.connections;
   $("#intercept").checked = cfg.intercept;
   $("#notify").checked = cfg.notify;
+  $("#dock").checked = cfg.sniff_dock !== false;
   $("#uiLang").value = ["auto", "zh", "en"].includes(cfg.ui_lang) ? cfg.ui_lang : "auto";
 });
 
@@ -34,6 +38,7 @@ $("#save").onclick = () => {
     connections: Number($("#connections").value) || 8,
     intercept: $("#intercept").checked,
     notify: $("#notify").checked,
+    sniff_dock: $("#dock").checked,
     ui_lang: $("#uiLang").value,
   }, () => { $("#msg").textContent = "已保存"; });
 };

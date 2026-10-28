@@ -37,6 +37,10 @@
     "/home/你的用户名/Downloads": "/home/you/Downloads",
     "每个任务的连接数": "Connections per task",
     "显示通知": "Show notifications",
+    // 贴边收纳开关（options）
+    "网页里的嗅探按钮贴边后自动收纳": "Dock the in-page sniffer button against the screen edge",
+    "把「嗅探」按钮拖到屏幕左边或右边，松手会吸到边上；一会儿不碰它就收成一颗半透明小圆点（有媒体时带个绿点），鼠标移上去或点一下就展开。关掉这里就是自由摆放，不吸边也不收起。":
+      "Drag the “Sniff” button to the left or right edge and it snaps there; after a moment it shrinks into a translucent dot (green when media was found). Hover or click to expand it again. Turn this off for free placement — no snapping, no shrinking.",
     "保存": "Save",
     "测试连接": "Test connection",
     "已保存": "Saved",
@@ -54,6 +58,10 @@
     "图库站可以点右上角「扫图片」": "On image sites, use “Scan images” at the top right",
     "ZDM 嗅探到的媒体": "Media found by ZDM",
     "ZDM 嗅探（暂无媒体）": "ZDM sniffer (no media yet)",
+    // 按钮本体那两个字（<span>嗅探</span>）以前表里没有，英文界面下会露出中文
+    "嗅探": "Sniff",
+    "检测到媒体": "Media detected",
+    "把嗅探按钮移回默认位置（右下角）": "Move the sniffer button back to its default place (bottom right)",
     "暂无媒体": "No media yet",
     "媒体": "Media",
     "图片": "Images",
@@ -65,6 +73,8 @@
     "音频流（HLS）": "Audio stream (HLS)",
     "扫图片": "Scan images",
     "扫描页面里的大图（图库/壁纸/漫画站）": "Scan this page for large images (gallery / wallpaper / comic sites)",
+    // 面板底部那句是纯静态文案，之前没进表，英文界面下整句是中文
+    "HLS / DASH 整条推送，后端自动取分片并合并": "HLS / DASH is sent as a whole — the backend fetches and merges the segments",
     "图片 · 本页扫描": "Images · scanned from this page",
     "推送": "Send",
     "推整条": "Send the whole stream",
@@ -187,6 +197,24 @@
     [/扩展 ID (\S+)/g, "extension ID $1"],
     [/端口 (\d+)/g, "Port $1"],
     [/还没有嗅探到媒体/g, "No media sniffed yet"],
+    // 嗅探按钮改成可拖动之后，提示语是拼在计数文案后面的（「ZDM 嗅探到 3 个媒体
+    // （可拖动，双击复位）」），整句在 T_EXACT 里配不上，只能前缀和尾巴各认一条。
+    [/ZDM 嗅探到的媒体/g, "Media found by ZDM"],
+    [/ZDM 嗅探（暂无媒体）/g, "ZDM sniffer (no media yet)"],
+    [/（可拖动，双击复位）/g, " (drag to move · double-click to reset)"],
+    // 列表那一行是「类型 · 大小」拼进同一个文本节点（「视频 · 2.0 MB」），整句配不上
+    // T_EXACT，只能认前缀。全部用 ^ 锚住，避免把别处的句子从中间切开；
+    // 「图片 · 本页扫描 · 1.0 MB」是三段拼的，必须排在通用的 图片 · 那条之前。
+    [/^图片 · 本页扫描 · /g, "Images · scanned from this page · "],
+    [/^视频 · /g, "Video · "],
+    [/^音频 · /g, "Audio · "],
+    [/^图片 · /g, "Images · "],
+    [/^HLS 流 · /g, "HLS stream · "],
+    [/^DASH 流 · /g, "DASH stream · "],
+    [/^播放列表分片 · /g, "Playlist segment · "],
+    [/^媒体 · /g, "Media · "],
+    // 大小未知也只会出现在拼好的那一行尾巴上（整句有自己的 T_EXACT 条目）
+    [/大小未知/g, "size unknown"],
     [/播放列表的分片/g, "playlist segments"],
     // 拼出来的整句（中间夹着站点返回的错误文本），整句匹配不了，只能按两段认。
     [/解析失败：([^\n]*?)，可改用上面的「流媒体」/g, 'Parsing failed: $1 — use “Streaming” above'],

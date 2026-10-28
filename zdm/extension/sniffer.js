@@ -24,7 +24,64 @@
   let badge = null;
   let listEl = null;
   let titleEl = null;
+  let panelEl = null;
   let lastDomScan = 0;
+
+  /* ---------- 浮动按钮的位置（可拖动） ----------
+   *
+   * 旧版把按钮钉死在 right:18/bottom:18，右下角是页面自己的控件最爱待的
+   * 地方（播放器控制条、客服浮窗、Cookie 提示、「返回顶部」），一颗钉死的
+   * 按钮会成片地挡住它们。现在按住按钮就能拖到任意位置，松手记住。
+   *
+   * 存的不是绝对 left/top，而是「靠哪条边的距离」：
+   *   { ax: "left"|"right", x: 距该边的像素, ay: "top"|"bottom", y: 距该边的像素 }
+   * 这样窗口缩放、分辨率变化、字体放大让按钮宽度变了（角标从 9 变成 100+
+   * 就有几像素差）时，它仍然贴着用户当初放的那条边，而不是被挤到屏幕外。
+   * pos = null 表示默认位置（右下角，与旧版一致）。 */
+  const POS_KEY = "sniff_pos";
+  const MARGIN = 18; // 默认位置离右边的距离，沿用旧版
+  const EDGE = 8; // 自由拖动时允许贴到离边多近
+  let pos = null;
+  let lastPosJson = "";
+  let suppressClick = false; // 拖完松手会补一个 click，那颗按钮不能被它开关面板
+  /* 当前这次拖动的状态（起点、抓取偏移、是否已越过死区）。声明在模块作用域：
+     build() 里写它，start() 里的 storage.onChanged 也要读它（正按着按钮的时候
+     别让别的标签页抢位置），藏在 build() 内部就是引用不到的变量。 */
+  let drag = null;
+  // 用户在本页面上已经动过位置（拖过或复位过）：异步读回来的旧存档就不能再抢位置
+  let touchedByUser = false;
+
+  /* ---------- 贴边收纳 ----------
+   *
+   * 松手时把按钮吸到最近的那条竖边，闲置一会儿收成「只剩图标 + 一个小圆点」的
+   * 半透明圆胶囊，鼠标经过、点击或打开面板立刻展开。这一条才是「别挡页面」的
+   * 正解：光靠能拖走，下次打开页面它还是钉在右下角。
+   *
+   * 为什么不做「一半伸出屏幕外」的悬浮球样式：触屏上没有 hover，伸出去的那半
+   * 既点不到也没法拖回来，用户会觉得按钮丢了。收成圆点后整颗都在屏内，
+   * 手指点一下就展开，鼠标和触屏的行为是一致的。
+   *
+   * 开关是设置页的「贴边收纳」（sniff_dock，默认开）。关掉就退回纯自由摆放。 */
+  const DOCK_KEY = "sniff_dock";
+  const SNAP_X = 6; // 吸附之后离边的距离
+  const DOCK_TOL = 12; // 离边不超过这个距离才算「贴在边上」，只有贴边才允许收起
+  const DOCK_DELAY = 900; // 松手 / 鼠标离开之后多久收起
+  const DOCK_GUARD = 1500; // 刚交互过这么久之内不收（光标停在按钮上时不会一缩又弹回）
+  let dockOn = false; // 读回设置之前先按「不收」走，免得默认位置也跟着改动态
+  let docked = false;
+  let hovering = false; // 光标是不是正压在按钮上（含 shadow 内部）
+  let dockTimer = null;
+  let lastInteract = 0;
+  // 光标是不是停在按钮附近（mousemove 记账，离开时才补一次「可以开始倒计时了」）
+  let touching = false;
+
+  /* 面板展开方向由按钮所在位置决定（见 placePanel）：按钮被拖到屏幕上半部
+     时，面板往下开；拖到左边时，面板往右开。写死 bottom:48px 的话，
+     按钮一放到顶部，面板就直接开出可视区了。 */
+
+  /* 面板展开方向由按钮所在位置决定（见 placePanel）：按钮被拖到屏幕上半部
+     时，面板往下开；拖到左边时，面板往右开。写死 bottom:48px 的话，
+     按钮一放到顶部，面板就直接开出可视区了。 */
 
   const esc = (s) =>
     String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
@@ -203,44 +260,305 @@
     items = out;
   }
 
+  /* ---------- 位置：算、存、取、复位 ---------- */
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+
+  function viewport() {
+    const de = document.documentElement || {};
+    const vw = Math.max(
+      Number(de.clientWidth) || 0,
+      Number(window.innerWidth) || 0,
+      160
+    );
+    const vh = Math.max(
+      Number(de.clientHeight) || 0,
+      Number(window.innerHeight) || 0,
+      160
+    );
+    return { vw, vh };
+  }
+
+  /* 宿主盒子只包住那颗按钮（面板是 absolute，不占流），所以它的尺寸就是按钮的尺寸。
+     收起态是 42px 的圆胶囊 —— 不跟上这个变化的话，「离边距离」会按展开时的宽度算，
+     收起来之后就等于把按钮推进屏幕里一截。 */
+  function hostSize() {
+    if (host && host.offsetWidth) return { w: host.offsetWidth, h: host.offsetHeight || 40 };
+    const w = docked && fab && fab.classList.contains("docked") ? 42 : 96;
+    return { w, h: w === 42 ? 42 : 40 };
+  }
+
+  /* 读回来的值必须先看一眼是不是合法形状：手改过 storage、或者旧版本存过
+     别的东西（键名撞车）都不能让它把按钮丢到屏幕外。非法值一律退回默认。 */
+  function normPos(p) {
+    if (!p || typeof p !== "object") return null;
+    const ax = p.ax === "left" || p.ax === "right" ? p.ax : null;
+    const ay = p.ay === "top" || p.ay === "bottom" ? p.ay : null;
+    const x = Number(p.x);
+    const y = Number(p.y);
+    if (!ax || !ay || !isFinite(x) || !isFinite(y) || x < 0 || y < 0 || x > 20000 || y > 20000) {
+      return null;
+    }
+    return { ax, x: Math.round(x), ay, y: Math.round(y) };
+  }
+
+  const posJson = (p) => (p ? `${p.ax}:${p.x}:${p.ay}:${p.y}` : "");
+
+  /* 由「靠左/右、靠上/下的距离」算出视口坐标并夹紧，然后写回 host。
+     拖动过程中、恢复存档、窗口 resize 之后都走这里，行为只有一套。 */
+  function applyPos(p) {
+    if (!host) return;
+    const { vw, vh } = viewport();
+    const s = hostSize();
+    let left = !p ? vw - s.w - MARGIN : p.ax === "right" ? vw - s.w - p.x : p.x;
+    let top = !p ? vh - s.h - MARGIN : p.ay === "bottom" ? vh - s.h - p.y : p.y;
+    left = clamp(left, EDGE, vw - s.w - EDGE);
+    top = clamp(top, EDGE, vh - s.h - EDGE);
+    host.style.left = Math.round(left) + "px";
+    host.style.top = Math.round(top) + "px";
+    if (panelOpen) placePanel();
+  }
+
+  /* 松手时把当前视口坐标换算回「靠边的距离」。以按钮中心落在哪一半屏幕来
+     决定锚定哪条边：放在右半边就记「离右多远」，缩放窗口时它跟着右边走。 */
+  function posFromBox(left, top) {
+    const { vw, vh } = viewport();
+    const s = hostSize();
+    const ax = left + s.w / 2 <= vw / 2 ? "left" : "right";
+    const ay = top + s.h / 2 <= vh / 2 ? "top" : "bottom";
+    return {
+      ax,
+      x: Math.round(ax === "left" ? left : vw - s.w - left),
+      ay,
+      y: Math.round(ay === "top" ? top : vh - s.h - top),
+    };
+  }
+
+  /* 只在松手/复位那一次写盘：chrome.storage.sync 有每秒写入配额，
+     跟着 pointermove 每帧存会把配额打光并触发 onWriteQuotaExceeded。 */
+  function savePos(p) {
+    lastPosJson = posJson(p);
+    try {
+      const box = {};
+      box[POS_KEY] = p || null;
+      chrome.storage.sync.set(box, () => {
+        void chrome.runtime.lastError; // 无痕窗口 / 配额满：位置留在本页面即可，别把按钮拖坏
+      });
+    } catch (_) {}
+  }
+
+  /* 位置和「贴边收纳」开关是同一次 get 读回来的：两个键各读一次会多一个来回，
+     而且出现「位置已应用、开关还没到」的中间态更难解释。 */
+  function loadPos() {
+    try {
+      const def = {};
+      def[POS_KEY] = null;
+      def[DOCK_KEY] = true;
+      chrome.storage.sync.get(def, (r) => {
+        void chrome.runtime.lastError;
+        dockOn = r && r[DOCK_KEY] !== false;
+        const p = normPos(r && r[POS_KEY]);
+        // 读盘是异步的：万一用户已经拖过（或正按住）这颗按钮，不能拿旧存档把他摆好的位置抢回去
+        if (!p || touchedByUser || drag) {
+          if (dockOn && !pos) armDock(1500); // 默认位置不算贴边，这里只是把计时器备好
+          return;
+        }
+        pos = p;
+        lastPosJson = posJson(p);
+        applyPos(pos);
+        if (canDock()) armDock(1600); // 摆在上次贴边的位置上，页面开一会儿之后自己收起来
+      });
+    } catch (_) {}
+  }
+
+  function resetPos() {
+    touchedByUser = true;
+    lastInteract = Date.now();
+    pos = null;
+    setDocked(false); // 复位之后离边 18px，不再是「贴边」状态
+    applyPos(pos);
+    savePos(pos);
+    // 让按钮轻轻弹一下，表示「是这里」，不然归位没有任何反馈
+    if (fab) {
+      fab.classList.remove("pop");
+      void fab.offsetWidth;
+      fab.classList.add("pop");
+      setTimeout(() => fab && fab.classList.remove("pop"), 260);
+    }
+  }
+
+  /* ---------- 面板：跟着按钮所在位置决定往哪边开 ---------- */
+  function placePanel() {
+    if (!panelEl || !host || panelEl.hidden) return;
+    const r = host.getBoundingClientRect();
+    const { vw, vh } = viewport();
+    const GAP = 8;
+    // 窄屏（分屏、iPad 竖屏）时按视口收窄，别让面板自己先溢出
+    panelEl.style.width = Math.round(clamp(336, 240, vw - EDGE * 2)) + "px";
+
+    // 纵向：哪边空间大就朝哪边开
+    const below = vh - r.bottom - GAP - EDGE;
+    const above = r.top - GAP - EDGE;
+    const openUp = below < above;
+    const maxH = Math.round(clamp(openUp ? above : below, 150, 460));
+    panelEl.style.maxHeight = maxH + "px";
+
+    const ph = panelEl.offsetHeight || maxH;
+    let top = openUp ? -ph - GAP : (host.offsetHeight || r.height) + GAP;
+    // 上面实在放不下（按钮被拖到很靠上的位置）时翻回下面
+    if (openUp && r.top - ph - GAP < EDGE) top = (host.offsetHeight || r.height) + GAP;
+    panelEl.style.top = Math.round(top) + "px";
+    panelEl.style.bottom = "auto";
+
+    // 横向：面板右边缘对齐按钮右边缘（旧版观感），放不下再整体夹回视口
+    const pw = panelEl.offsetWidth || 336;
+    const left = clamp(r.right - pw, EDGE, Math.max(EDGE, vw - EDGE - pw));
+    panelEl.style.right = "auto";
+    panelEl.style.left = Math.round(left - r.left) + "px";
+  }
+
+  /* 离边多近才算「贴在边上」：默认位置离边 18px，不算贴边，所以刚装上时不会乱收 */
+  const flushEdge = (p) => !!p && p.x <= DOCK_TOL;
+
+  function canDock() {
+    if (!dockOn || !flushEdge(pos) || panelOpen || drag || hovering || touching) return false;
+    // 光标常正停在按钮上（松手时它就在那儿），刚交互过就收会「一缩又弹回」
+    return Date.now() - lastInteract >= DOCK_GUARD;
+  }
+
+  /* 收起/展开的唯一入口。canDock() 带着全部前提（开关、贴边、面板没开、没在拖、
+     光标不在按钮上、刚没交互过），任何一条不成立都拍回 false，调用方不用各自判。 */
+  function setDocked(on) {
+    if (!fab) return;
+    const want = !!on && canDock();
+    if (want === docked) {
+      if (want) applyPos(pos); // 已经收起但视口/尺寸变了：重新贴一次边
+      return;
+    }
+    docked = want;
+    fab.classList.toggle("docked", want);
+    // 收起后按钮窄了一截（CSS 收成 42px 圆胶囊）。存的是「离边多远」，
+    // 所以重算一次坐标它就继续贴边 —— 换成存绝对 left 这一步就会跑偏。
+    applyPos(pos);
+  }
+
+  function armDock(ms) {
+    stopDockTimer();
+    if (!dockOn || panelOpen || drag) {
+      setDocked(false);
+      return;
+    }
+    dockTimer = setTimeout(() => {
+      dockTimer = null;
+      setDocked(true);
+      // 只差「刚交互过」这一条时（光标就停在按钮上），等守卫期过了自己再试一次。
+      // 不补这一刀的话，定时器一次落空就没人再叫它 —— 除非用户又动了一下鼠标。
+      if (!docked && canDockSoon()) armDock(DOCK_GUARD + 150);
+    }, ms == null ? DOCK_DELAY : ms);
+  }
+
+  /* 除了「刚没交互过」之外都成立：给定时器自己续一次命用 */
+  function canDockSoon() {
+    return dockOn && flushEdge(pos) && !panelOpen && !drag && !hovering && !touching;
+  }
+
+  function stopDockTimer() {
+    if (dockTimer) clearTimeout(dockTimer);
+    dockTimer = null;
+  }
+
+  /* 任何一次真实交互都记一笔：收纳计时得从「手真正离开」开始算。
+     只靠 pointerleave 不够 —— 用户不会特地把光标移出那颗小按钮。 */
+  function touch() {
+    lastInteract = Date.now();
+    stopDockTimer();
+  }
+
+  /* 松手时把横向位置吸到最近的那条竖边（纵向仍然由用户自己摆）。 */
+  function snapToEdge() {
+    const { vw } = viewport();
+    const s = hostSize();
+    const r = host.getBoundingClientRect();
+    const toLeft = r.left + s.w / 2 <= vw / 2;
+    const left = clamp(toLeft ? SNAP_X : vw - s.w - SNAP_X, EDGE, Math.max(EDGE, vw - s.w - EDGE));
+    host.style.left = Math.round(left) + "px";
+    return posFromBox(left, parseFloat(host.style.top) || r.top);
+  }
+
+  function openPanel() {
+    if (!panelEl) return;
+    panelOpen = true;
+    touch();
+    setDocked(false); // 面板要贴着一颗看得清的按钮展开
+    panelEl.hidden = false;
+    renderList(); // renderList 末尾会再 placePanel 一次（列表变长，高度也变）
+    placePanel();
+  }
+
+  function closePanel() {
+    panelOpen = false;
+    if (panelEl) panelEl.hidden = true;
+    lastInteract = Date.now();
+    armDock(); // 面板关掉之后过一会儿再收回去
+  }
+
   function build() {
     host = document.createElement("div");
     host.id = "zdm-sniffer-host";
-    // 固定定位但挂在 body 上：avoid position:fixed 与站点 transform/contain
-    // 的包含块陷阱（那颗按钮会跟着某个容器一起被裁掉）。
+    // 固定定位 + 挂在 documentElement 上：避开 position:fixed 与站点
+    // transform/contain 的包含块陷阱（那颗按钮会跟着某个容器一起被裁掉）。
+    // 左右坐标由 applyPos 按「靠哪条边多远」算出来，初始给右下角。
     host.style.cssText =
-      "all:initial;position:fixed;right:18px;bottom:18px;z-index:2147483647;";
+      "all:initial;position:fixed;left:0;top:0;z-index:2147483647;";
     shadow = host.attachShadow({ mode: "open" });
     // 界面语言（ui18n.js）：只观察自己这棵 shadow 树，不去遍历宿主页面的 DOM。
     try { if (typeof ZDMUI !== "undefined") ZDMUI.watch(shadow); } catch (_) {}
     shadow.innerHTML = `
       <style>
         :host{all:initial}
-        .fab{all:initial;display:flex;align-items:center;gap:6px;height:40px;
-          padding:0 14px 0 12px;border-radius:999px;cursor:pointer;
+        .fab{all:initial;position:relative;display:flex;align-items:center;gap:6px;height:40px;
+          padding:0 14px 0 12px;border-radius:999px;cursor:grab;
           background:#2563eb;color:#fff;font:600 13px/1 -apple-system,BlinkMacSystemFont,
           "Segoe UI","Noto Sans CJK SC",sans-serif;border:none;
-          box-shadow:0 4px 14px rgba(37,99,235,.4);transition:.15s;font-family:inherit}
+          box-shadow:0 4px 14px rgba(37,99,235,.4);transition:.15s;font-family:inherit;
+          touch-action:none;user-select:none;-webkit-user-select:none;
+          -webkit-user-drag:none}
         .fab:hover{background:#1d4fd8}
+        .fab.grabbing{cursor:grabbing;transition:none;
+          box-shadow:0 10px 26px rgba(15,23,42,.38)}
+        .fab.pop{animation:zdm-pop .22s ease-out}
+        @keyframes zdm-pop{0%{transform:scale(1)}40%{transform:scale(1.14)}100%{transform:scale(1)}}
         .fab svg{width:17px;height:17px;flex:none}
+        /* 贴边收纳态：收成一颗半透明圆点，文字与计数徽标让位，
+           有媒体时用一个绿点代替（整颗都还在屏内，触屏也点得到）。 */
+        .fab.docked{width:42px;height:42px;padding:0;gap:0;justify-content:center;
+          border-radius:50%;opacity:.55;box-shadow:0 2px 10px rgba(15,23,42,.22);
+          transition:opacity .18s,width .18s,height .18s}
+        .fab.docked:hover,.fab.docked:focus-visible{opacity:1}
+        .fab.docked .lbl{display:none}
+        .fab.docked .badge{position:absolute;top:-3px;right:-3px;min-width:10px;height:10px;
+          padding:0;border-radius:999px;border:2px solid #fff;background:#22c55e;
+          color:transparent;font-size:0;line-height:10px}
+        .fab.docked[data-empty="1"] .badge{display:none}
         .badge{all:initial;min-width:18px;height:18px;padding:0 5px;border-radius:999px;
           background:#fff;color:#2563eb;font:700 11px/18px -apple-system,sans-serif;
           text-align:center;font-family:inherit}
         .fab[data-empty="1"]{background:#475569;box-shadow:0 4px 14px rgba(15,23,42,.28)}
         .fab[data-empty="1"] .badge{background:transparent;color:#fff}
-        .panel{all:initial;display:block;position:absolute;right:0;bottom:48px;width:336px;
+        .panel{all:initial;display:flex;flex-direction:column;position:absolute;width:336px;
           max-height:min(62vh,460px);overflow:hidden;border-radius:12px;background:#fff;
           border:1px solid #e3e8ef;box-shadow:0 18px 50px rgba(15,23,42,.22);
           font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC",sans-serif;
           color:#1f2937;font-family:inherit}
         .panel[hidden]{display:none}
-        .hd{display:flex;align-items:center;gap:8px;padding:11px 13px;
+        .hd{display:flex;align-items:center;gap:8px;padding:11px 13px;flex:none;
           border-bottom:1px solid #eef1f5;font-weight:700;font-size:13px}
         .hd .dot{width:7px;height:7px;border-radius:50%;background:#2563eb;flex:none}
         .hd .x{margin-left:auto;all:initial;cursor:pointer;color:#94a3b8;font-size:16px;
           line-height:1;padding:2px 4px;border-radius:6px;font-family:inherit}
         .hd .x:hover{background:#f1f5f9;color:#475569}
-        .list{max-height:min(46vh,340px);overflow-y:auto;margin:0;padding:0;list-style:none}
+        .list{flex:1 1 auto;min-height:0;max-height:min(46vh,340px);overflow-y:auto;
+          margin:0;padding:0;list-style:none}
         .row{display:flex;align-items:center;gap:9px;padding:9px 13px;
           border-bottom:1px solid #f4f6f9}
         .row:last-child{border-bottom:none}
@@ -268,6 +586,10 @@
           background:#eef2ff;color:#3730a3;font:600 11px/1 -apple-system,sans-serif;
           padding:5px 9px;font-family:inherit}
         .hd .imgb:hover{background:#e0e7ff}
+        .hd .rst{all:initial;cursor:pointer;border:none;border-radius:6px;
+          background:#f1f5f9;color:#64748b;font:600 13px/1 -apple-system,sans-serif;
+          padding:5px 8px;flex:none;font-family:inherit}
+        .hd .rst:hover{background:#e2e8f0;color:#334155}
         .cb{all:initial;flex:none;width:15px;height:15px;cursor:pointer;accent-color:#2563eb}
         .thumb{all:initial;width:30px;height:30px;border-radius:6px;object-fit:cover;
           background:#eef2f7;flex:none}
@@ -281,19 +603,22 @@
           .nm{color:#e2e8f0}
           .sub{color:#94a3b8}
           .ft{background:#172033;border-top-color:#334155;color:#64748b}
+          .hd .rst{background:#243244;color:#94a3b8}
+          .hd .rst:hover{background:#334155;color:#e2e8f0}
           .fab[data-empty="1"]{background:#334155}
         }
       </style>
-      <button class="fab" type="button" title="ZDM 嗅探到的媒体">
+      <button class="fab" type="button" title="ZDM 嗅探到的媒体（可拖动，双击复位）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
           <path d="m10 8 6 4-6 4V8z"/><rect x="2" y="4" width="20" height="16" rx="2"/>
         </svg>
-        <span>嗅探</span><span class="badge">0</span>
+        <span class="lbl">嗅探</span><span class="badge">0</span>
       </button>
       <div class="panel" hidden>
         <div class="hd"><span class="dot"></span><span class="t">检测到媒体</span>
           <button class="imgb" type="button" title="扫描页面里的大图（图库/壁纸/漫画站）">扫图片</button>
+          <button class="rst" type="button" title="把嗅探按钮移回默认位置（右下角）">↺</button>
           <button class="x" type="button" title="关闭">✕</button></div>
         <ul class="list"></ul>
         <div class="ft">
@@ -307,38 +632,184 @@
     badge = shadow.querySelector(".badge");
     listEl = shadow.querySelector(".list");
     titleEl = shadow.querySelector(".hd .t");
-    const panel = shadow.querySelector(".panel");
+    panelEl = shadow.querySelector(".panel");
+    // 先按默认位置落位（旧版同样是右下角），存档里有的话由 loadPos 覆盖
+    applyPos(pos);
+
+    /* ---- 点击和拖动怎么分家 ----
+       起点记下，移动超过 4px 才算拖动（手抖不该让面板闪一下）；真拖过之后
+       浏览器还会补发一次 click，那颗按钮不能被它顺手开关面板。
+       触屏靠 .fab 上的 touch-action:none 挡掉页面滚动，这里不调
+       preventDefault —— 一旦 cancel 掉 pointerdown，触摸路径上的 click 可能
+       就不再派发，按钮会变成「只能拖、点不开」。 */
+    const DRAG_SLOP = 4;
+
+    fab.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      touch();
+      // 手指/光标都已经按在按钮上了，收起状态必须先展开再谈拖动
+      if (docked) setDocked(false);
+      const r = host.getBoundingClientRect();
+      drag = {
+        id: e.pointerId,
+        dx: e.clientX - r.left,
+        dy: e.clientY - r.top,
+        sx: e.clientX,
+        sy: e.clientY,
+        moved: false,
+      };
+      try {
+        fab.setPointerCapture(e.pointerId);
+      } catch (_) {}
+    });
+
+    fab.addEventListener("pointermove", (e) => {
+      touch();
+      if (!drag || drag.id !== e.pointerId) return;
+      if (!drag.moved) {
+        if (
+          Math.abs(e.clientX - drag.sx) < DRAG_SLOP &&
+          Math.abs(e.clientY - drag.sy) < DRAG_SLOP
+        ) {
+          return;
+        }
+        drag.moved = true;
+        fab.classList.add("grabbing");
+        if (panelOpen) closePanel(); // 拖的时候面板只会挡视线
+      }
+      const { vw, vh } = viewport();
+      const s = hostSize();
+      host.style.left =
+        Math.round(clamp(e.clientX - drag.dx, EDGE, vw - s.w - EDGE)) + "px";
+      host.style.top =
+        Math.round(clamp(e.clientY - drag.dy, EDGE, vh - s.h - EDGE)) + "px";
+      e.preventDefault(); // 只在真拖起来之后调用：挡住选中文字/图片拖拽
+    });
+
+    const endDrag = (e) => {
+      if (!drag || (e && drag.id !== e.pointerId)) return;
+      const moved = drag.moved;
+      drag = null;
+      fab.classList.remove("grabbing");
+      touch();
+      if (!moved) return;
+      suppressClick = true;
+      // 正常情况这次 click 紧跟着就来；400ms 兜底，免得异常路径上吞掉下次真点击
+      setTimeout(() => {
+        suppressClick = false;
+      }, 400);
+      const r = host.getBoundingClientRect();
+      // 收纳开着就把手横向吸到最近的那条边（纵向仍按用户摆的位置存）；
+      // 关掉收纳时这里是纯自由摆放，一个像素都不动。
+      pos = dockOn ? snapToEdge() : posFromBox(r.left, r.top);
+      touchedByUser = true;
+      savePos(pos); // 松手才写盘：pointermove 每帧写会把 storage.sync 的配额打光
+      armDock();
+    };
+    fab.addEventListener("pointerup", endDrag);
+    fab.addEventListener("pointercancel", endDrag);
+    fab.addEventListener("lostpointercapture", endDrag);
+
+    /* 光标在不在按钮上，直接决定「该不该收」。松手那一刻光标通常还压在按钮上，
+       pointerleave 不来就永远不该收。 */
+    fab.addEventListener("pointerenter", () => {
+      hovering = true;
+      touching = true;
+      touch();
+      if (docked) setDocked(false);
+    });
+    fab.addEventListener("pointerleave", () => {
+      hovering = false;
+      // pointerleave 是「光标确实离开了」最可靠的信号：mousemove 记账的 touching
+      // 必须在这里一起清掉，否则收过一次之后 touching 会永远卡在 true，再也收不回来。
+      touching = false;
+      touch();
+      armDock();
+    });
+    fab.addEventListener("focus", () => {
+      touch();
+      if (docked) setDocked(false);
+    });
+    fab.addEventListener("blur", () => {
+      touch();
+      armDock();
+    });
+
+    /* 鼠标停在按钮上不动时 pointerleave 永远不会来（松手时它就在原地），而全局
+       mousemove 每帧去读按钮矩形又太贵（浏览器要算布局）。只在「确实收到了
+       mousemove」时记账一次，配合 canDock() 里的 DOCK_GUARD，行为就稳了。 */
+    window.addEventListener(
+      "mousemove",
+      (e) => {
+        if (!dockOn || docked) return;
+        const r = fab.getBoundingClientRect();
+        if (!r || !r.width) return;
+        const inside =
+          e.clientX >= r.left - 12 && e.clientX <= r.right + 12 &&
+          e.clientY >= r.top - 12 && e.clientY <= r.bottom + 12;
+        if (inside && !touching) {
+          touching = true;
+          touch();            // 光标在按钮上：别收
+        } else if (!inside && touching) {
+          // 这是「鼠标确实在按钮上待过、现在真的移开了」的那一刻 —— 重新计时。
+          // 只靠 pointerleave 不够：松手时 pointer capture 把 enter/leave 的路径打乱了。
+          touching = false;
+          touch();
+          armDock();
+        }
+      },
+      true
+    );
+    document.addEventListener("keydown", () => touch(), true);
 
     fab.addEventListener("click", () => {
-      panelOpen = !panelOpen;
-      panel.hidden = !panelOpen;
-      if (panelOpen) renderList();
+      touch();
+      if (suppressClick) {
+        suppressClick = false;
+        return;
+      }
+      if (drag) return; // 还按着（长按未松）时不响应键盘 click
+      if (docked) setDocked(false); // 收起态点第一下先展开，别让人以为按不动
+      if (panelOpen) closePanel();
+      else openPanel();
     });
-    shadow.querySelector(".hd .x").addEventListener("click", () => {
-      panelOpen = false;
-      panel.hidden = true;
+    // 双击复位：不搬键盘也能把按钮放回默认右下角
+    fab.addEventListener("dblclick", () => {
+      suppressClick = false;
+      resetPos();
     });
+    panelEl.querySelector(".hd .x").addEventListener("click", closePanel);
+    panelEl
+      .querySelector(".hd .rst")
+      .addEventListener("click", () => {
+        resetPos(); // 面板仍然开着，只是整组跟着按钮回到右下角
+      });
     document.addEventListener("click", (e) => {
       if (!panelOpen) return;
       if (host.contains(e.target)) return;
-      panelOpen = false;
-      panel.hidden = true;
+      closePanel();
     });
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && panelOpen) {
-        panelOpen = false;
-        panel.hidden = true;
-      }
+      if (e.key === "Escape" && panelOpen) closePanel();
     });
   }
+
+  /* 按钮现在能拖动、贴边还会自己收小，光看图标猜不出来，所以把用法写进悬停提示。
+     英文界面由 ui18n.js 的 T_RULES 认这句尾巴（它是拼在计数文案后面的，
+     整句 T_EXACT 匹配不上）。 */
+  const DRAG_HINT = "（可拖动，双击复位）";
 
   function renderFab() {
     if (!fab) return;
     const n = items.length;
     badge.textContent = n > 99 ? "99+" : String(n);
     fab.dataset.empty = n ? "0" : "1";
-    fab.title = n ? `ZDM 嗅探到 ${n} 个媒体` : "ZDM 嗅探（暂无媒体）";
+    fab.title =
+      (n ? `ZDM 嗅探到 ${n} 个媒体` : "ZDM 嗅探（暂无媒体）") + DRAG_HINT;
     if (titleEl) titleEl.textContent = n ? `检测到 ${n} 个媒体` : "暂无媒体";
+    // 角标变宽（0 → 100+）会让按钮宽度变几像素；靠「贴哪条边」存的位置
+    // 由 applyPos 重新对齐，这里只需在面板开着时把它挪回来。
+    if (panelOpen) placePanel();
   }
 
   const KIND_LABEL = {
@@ -372,6 +843,7 @@
       listEl.innerHTML =
         '<div class="empty">还没有嗅探到媒体<br>播放或刷新页面后会自动出现<br>图库站可以点右上角「扫图片」</div>';
       syncBatch();
+      if (panelOpen) placePanel(); // 内容变了高度就变了，展开方向要重算
       return;
     }
     listEl.innerHTML = items
@@ -399,6 +871,7 @@
       )
       .join("");
     syncBatch();
+    if (panelOpen) placePanel();
   }
 
   /* 底部批量按钮的显隐与计数。图片站一页几百张，逐条点「推送」不现实。 */
@@ -563,6 +1036,9 @@
     merge((r && r.items) || [], dom, imgItems);
     renderFab();
     if (panelOpen) renderList();
+    /* 贴边收纳补一刀：旧版本存下的贴边位置（没有经过这次的松手事件）也要能收。
+       已经有计时器在等就什么都不做，别把倒计时重置成永远轮不到。 */
+    if (dockOn && !docked && !dockTimer && !panelOpen && canDock()) armDock(1500);
   }
 
   /* 从 URL 猜图片扩展名：优先真实后缀；其次 query 里的 format= 参数
@@ -810,14 +1286,11 @@
       listEl.addEventListener("click", listClick);
       listEl.addEventListener("change", listChange);
     }
-    const panel = shadow.querySelector(".panel");
     const imgb = shadow.querySelector(".hd .imgb");
     if (imgb) {
       imgb.addEventListener("click", () => {
         const n = addImages();
-        panelOpen = true;
-        panel.hidden = false;
-        renderList();
+        openPanel();
         imgb.textContent = n ? `图片 +${n}` : "无新图片";
         setTimeout(() => {
           imgb.textContent = "扫图片";
@@ -844,6 +1317,56 @@
     renderFab();
     refresh(true);
     observe();
+
+    /* ---------- 位置：读存档、跟着窗口变化夹紧、跨标签页同步 ---------- */
+
+    // 存档是异步读回来的：先按默认右下角出现，读到之后立刻挪到用户放的位置。
+    loadPos();
+
+    /* 视口变了（缩放窗口、F11 全屏、手机转屏、分屏拖动）就把按钮夹回可视区。
+       不加这一条，拖到右下角的按钮在窗口变窄之后会留在屏幕外，再也拖不回来 ——
+       那是「可拖动」最容易被投诉成的那种翻车。 */
+    let placeTimer = null;
+    const onViewportChange = () => {
+      if (placeTimer) clearTimeout(placeTimer);
+      placeTimer = setTimeout(() => {
+        applyPos(pos);
+        // 视口变了之后按钮还贴不贴边可能就不一样了，重新评估一次
+        if (docked && !canDock()) setDocked(false);
+        else if (canDock()) setDocked(true);
+      }, 120);
+    };
+    window.addEventListener("resize", onViewportChange, true);
+    window.addEventListener("orientationchange", onViewportChange);
+
+    // 同一浏览器多个标签页里那颗按钮应当待在同一个地方（A 站、B 站来回切时尤其明显）
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "sync" || !changes) return;
+        // 设置页刚把「贴边收纳」关掉 → 立刻展开并停止计时；打开 → 该收就收
+        if (changes[DOCK_KEY]) {
+          const on = changes[DOCK_KEY].newValue !== false;
+          if (on !== dockOn) {
+            dockOn = on;
+            touching = false;
+            if (!on) {
+              stopDockTimer();
+              setDocked(false);
+            } else if (canDock()) armDock(2000);
+          }
+        }
+        if (!changes[POS_KEY]) return;
+        const p = normPos(changes[POS_KEY].newValue);
+        const j = posJson(p);
+        if (j === lastPosJson) return; // 自己刚写的那一份，不用再应用一遍
+        lastPosJson = j;
+        pos = p;
+        if (drag) return; // 正按着按钮的时候别抢位置
+        applyPos(pos);
+        if (!canDock()) setDocked(false);
+        else armDock(2500);
+      });
+    } catch (_) {}
 
     /* 给通用播放器按钮（playerbtn.js）用：它要读当前嗅探列表来配对音轨、
        也要能把面板调出来。两个文件是同一批 content script，同在 isolated
@@ -1091,15 +1614,10 @@
     images: () => imgItems.slice(),
     title: (media) => smartTitle(media),
     pickStreamPair: (list) => pickStreamPair(list),
-      open: () => {
-        panelOpen = true;
-        panel.hidden = false;
-        renderList();
-      },
-      close: () => {
-        panelOpen = false;
-        panel.hidden = true;
-      },
+      open: () => openPanel(),
+      close: () => closePanel(),
+      // 位置对外露一手，将来「设置页」想做「重置按钮位置」可以直接调
+      resetPosition: () => resetPos(),
       refresh: () => refresh(true).catch(() => {}),
       scanImages: () => addImages(),
     };
