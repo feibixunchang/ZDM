@@ -5,7 +5,7 @@
 支持 **Linux / macOS / Windows** 三端，零依赖（仅标准库 + 桌面端 PyQt5；`sftp://` 通道另需
 `paramiko`，安装包已内置），安装后重装系统重装仍可用。下载协议覆盖 **http/https/ftp/ftps/sftp**。
 
-当前版本：**v1.18.27**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.44）
+当前版本：**v1.18.28**（桌面端与后端同一套版本号；浏览器扩展独立为 1.5.44，自本版本起随安装包发布）
 
 ## 仓库结构
 
@@ -24,9 +24,9 @@
 |---|---|---|
 | macOS | `ZDM-<version>-arm64.dmg` | 双击挂载，把 `ZDM.app` 拖进 Applications（内含扩展与中文说明）。**每个 Release 只构建 Apple Silicon 那一份**；Intel 机器请用下面那行从仓库安装 |
 | macOS（Intel / 源码） | 仓库里的 `zdm/install.sh` | `git clone` 后 `cd zdm && bash install.sh`，自动生成 `ZDM.app` + 登录自启。这个脚本**不随任何安装包发布**，只从仓库取 |
-| Linux | `zdm_1.18.27_amd64.deb` | `sudo apt install ./zdm_1.18.27_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
+| Linux | `zdm_1.18.28_amd64.deb` | `sudo apt install ./zdm_1.18.28_amd64.deb`（自带 Python + PyQt5，无需联网装依赖） |
 | Linux | `zdm-linux-amd64.tar.gz` | 免 root：解压后 `./install.sh`，装到 `~/.local` |
-| Windows | `zdm-Setup-1.18.27.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
+| Windows | `zdm-Setup-1.18.28.exe` | 双击安装（用户级、无需管理员、不依赖本机 Python，与 mac/Linux 同一份界面）；**软件内可直接一键更新** |
 | 浏览器扩展 | 随上面各包附带 | Windows 装在 `{app}\extension`；macOS 在 `~/Library/Application Support/ZDM/extension`；装好后在 `chrome://extensions` 加载已解压的扩展程序 |
 
 > **完全自动构建**：`.deb` / `zdm-linux.tar.gz` 在 `ubuntu-22.04` 上构建，
@@ -56,7 +56,7 @@ Firefox 也吃这同一份源码：桌面端「浏览器扩展」对话框里点
 python3 build_dist.py   # Linux .deb / tar.gz + macOS zip + （在 Windows 上）ZDM-Setup-*.exe
 
 # 只做 Linux 原生包（自带 CPython + PyQt5 的 ZDM onedir + .deb + 免 root tar.gz）
-bash zdm/build_linux_app.sh ./linux-build 1.18.27
+bash zdm/build_linux_app.sh ./linux-build 1.18.28
 ```
 
 > Windows 只有一个安装包：**`ZDM-Setup-*.exe`**（约 100 MB，自带 CPython 与 PyQt5，
@@ -452,7 +452,7 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
   165 条文案同时喂进普通 DOM、shadow root 和 `title` 属性三条路（内容脚本挂的就是 shadow 树），
   断言零残留、切回中文逐字还原、以及观察器能把「界面代码后来才写进去的中文」也翻掉。
 
-**扩展 1.5.44（v1.18.27 之后、随下一个安装包一起出）= 网页里的「嗅探」按钮可以拖走、能贴边收纳** —— 那颗按钮原先钉死在 `right:18px;bottom:18px`，而右下角正是页面自己的控件最爱扎堆的地方（播放器控制条、客服浮窗、Cookie 提示、返回顶部），一颗钉死的按钮会成片地挡住它们。现在：按住能拖到任意位置，松手记住；**贴边收纳**（设置页开关 `sniff_dock`，默认开）让松手时横向吸到最近的那条竖边，闲置约两秒收成一颗半透明 42×42 圆胶囊（有媒体时带绿点，空列表不显示绿点），鼠标经过、点击、开面板、拖动都立刻展开；开关关掉就是纯自由摆放，不吸也不收。双击按钮或面板标题栏的「↺」回到默认右下角。
+**扩展 1.5.44（自 v1.18.28 安装包起随包发布）= 网页里的「嗅探」按钮可以拖走、能贴边收纳** —— 那颗按钮原先钉死在 `right:18px;bottom:18px`，而右下角正是页面自己的控件最爱扎堆的地方（播放器控制条、客服浮窗、Cookie 提示、返回顶部），一颗钉死的按钮会成片地挡住它们。现在：按住能拖到任意位置，松手记住；**贴边收纳**（设置页开关 `sniff_dock`，默认开）让松手时横向吸到最近的那条竖边，闲置约两秒收成一颗半透明 42×42 圆胶囊（有媒体时带绿点，空列表不显示绿点），鼠标经过、点击、开面板、拖动都立刻展开；开关关掉就是纯自由摆放，不吸也不收。双击按钮或面板标题栏的「↺」回到默认右下角。
 
 实现要点（几条都是踩过才知道的）：
 
@@ -468,6 +468,8 @@ v1.17.0 的 mac / Linux 包和 v1.17.1 完全一致。
 顺带补了几处英文界面漏词（同一个面板里的）：按钮本体「嗅探」、面板标题栏复位提示、底部那句「HLS / DASH 整条推送…」，以及**列表行那种「类型 · 大小」拼在一个文本节点里的写法**（原来整句配不上 `T_EXACT`，英文界面留中文）——按前缀加规则时必须 `^` 锚住，且「图片 · 本页扫描 · 1.0 MB」这种三段拼的要排在通用的「图片 · 」之前。自测把 8 种类型行全渲染一遍后断言整棵 shadow 树零中文残留。
 
 验证：`_selftest/sniffer-drag.test.js`（jsdom，78 条断言）覆盖默认落位、死区、拖动落点与存档形状、写盘次数、补发 click、面板四向展开与夹回屏内、跨标签同步、越界/坏存档退回默认、两种复位入口、贴边吸附/收起/展开/开关/重载自动收、英文零残留与切回中文逐字还原、manifest 权限与版本。jsdom 没有排版引擎，用例给宿主盒子补了「跟着 inline style + 是否收起」反算矩形的替身，坐标才算得出来。
+
+**v1.18.28 = 全平台安装包随包发布浏览器扩展 1.5.44** —— 这版本身不改桌面端任何行为，目的就是让「嗅探按钮可拖动 + 贴边收纳」（见上面「扩展 1.5.44」一节）顺着各平台的安装路径推到所有电脑：Windows `ZDM-Setup-1.18.28.exe` 把扩展装进安装目录 `extension\`（Chrome 开发者模式加载的就是这份，重装/一键更新后自动换成新版）；macOS `.dmg` 装到 `~/Library/Application Support/ZDM/extension`；Linux `.deb` / tar.gz 同样打包。扩展文件与 1.5.44 正式版逐字节一致，桌面端代码与 v1.18.27 相同。另把扩展自测 `zdm/_selftest/sniffer-drag.test.js`（jsdom，78 条断言）一并入库，方便以后回归。
 
 **v1.18.27 = 移动端第二轮（弹窗/表单/顶栏）+ 媒体库联动文档** —— 第一轮改了任务卡片，这轮收拾窄屏上会翻车的边角：弹窗原固定 520px 在手机上横向溢出，改 `min(520px, 100vw-20px)`；「修改任务」弹窗的表单两列在窄屏改单列；顶栏允许换行并收窄内边距；m3u8 轨道选择输入框窄屏占满整行。compose 与文档补上媒体库联动写法：/downloads 直接挂影音目录（如 /vol1/1000/影视），Emby/Navidrome 扫同一目录，下完即入库。
 

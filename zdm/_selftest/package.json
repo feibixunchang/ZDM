@@ -1,0 +1,11 @@
+{
+  "name": "zdm-selftest",
+  "private": true,
+  "description": "无排版环境的回归自测（jsdom）。先在本目录 npm install，再 node sniffer-drag.test.js",
+  "scripts": {
+    "test": "node sniffer-drag.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
