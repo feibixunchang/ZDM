@@ -1834,7 +1834,7 @@ class MainWindow(QMainWindow):
         # 空间紧张时 deficit 按 stretch 分摊：搜索框拿 2 份先缩（它少 40px 只是输入
         # 区短点），汇总栏拿 1 份保底 —— 数字比输入框更值得留在第一视野。
         hl.addWidget(self.search_edit, 2)
-        # 汇总栏：有任务时报进行中几个、总速度、排队/暂停/合并/失败/完成各几个；
+        # 汇总栏：有任务时报进行中几个、总速度、排队/暂停/合并/失败各几个；
         # 空列表时整栏收起，位置让给搜索框（磁盘剩余已搬到底部状态栏，见 disk_label）。
         # 内容见 _update_summary()。
         self.summary_label = _ElidedLabel()
@@ -1925,6 +1925,12 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("正在连接本地服务…")
+        # 「已完成 N」从工具条汇总挪到底部状态栏常驻（用户点名）：搜索框在场时
+        # 汇总里的完成数总被挤成「已完…」，状态栏有富余空间，数字放这里不再抢宽度。
+        self.done_label = QLabel("已完成 0")
+        self.done_label.setObjectName("doneStatus")
+        self.done_label.setToolTip("已完成任务数（随轮询刷新）")
+        self.statusBar().addPermanentWidget(self.done_label)
         # 磁盘剩余从工具条中间那栏搬到底部状态栏常驻（用户点名），原位腾给搜索框。
         # 点击仍然打开磁盘详情小窗，功能不变，只是换了个位置。
         self.disk_label = QLabel("磁盘剩余…")
@@ -2200,6 +2206,9 @@ class MainWindow(QMainWindow):
         for t in self.tasks:
             k = t.get("status") or "queued"
             counts[k] = counts.get(k, 0) + 1
+        # 完成数在底部状态栏常驻（见 done_label），随这轮计数一起刷新。
+        if getattr(self, "done_label", None) is not None:
+            self.done_label.setText(f"已完成 {counts.get('completed', 0)}")
         parts = []
         if counts.get("downloading"):
             speed = sum(_num(t.get("speed")) for t in self.tasks
@@ -2209,8 +2218,8 @@ class MainWindow(QMainWindow):
                            ("merging", "合并"), ("error", "失败")):
             if counts.get(key):
                 parts.append(f"{label} {counts[key]}")
-        if counts.get("completed"):
-            parts.append(f"已完成 {counts['completed']}")
+        # 「已完成 N」不再占工具条汇总（用户点名）：搜索框在场时它总被挤成「已完…」。
+        # 数字挪到底部状态栏常驻（见 done_label），那边有富余空间，随轮询刷新。
         if parts:
             # 有任务时这一栏是统计数字，点它没有对应窗口 —— 把点击态收掉，
             # 别让用户以为「进行中 2」也能弹出什么。搜索框照常在场。
