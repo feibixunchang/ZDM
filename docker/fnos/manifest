@@ -1,0 +1,10 @@
+appname               = zdm
+version               = 1.18.24
+display_name          = ZDM 下载管理器
+desc                  = 多线程下载管理器：网页版界面 + 嗅探推送 + B站/YouTube 等视频解析，内置 yt-dlp/ffmpeg 工具链
+platform              = all
+source                = thirdparty
+maintainer            = feibixunchang
+distributor           = feibixunchang
+desktop_uidir         = ui
+desktop_applaunchname = zdm.Application

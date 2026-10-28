@@ -1,0 +1,10 @@
+services:
+  zdm:
+    image: ghcr.io/feibixunchang/zdm-server:latest
+    container_name: zdm-server
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - "/var/apps/zdm/shares/zdm/config:/config"
+      - "/var/apps/zdm/shares/zdm/downloads:/downloads"

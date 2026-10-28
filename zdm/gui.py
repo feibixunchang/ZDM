@@ -1053,8 +1053,11 @@ class ExtensionDialog(QDialog):
         fh = QHBoxLayout(ff_row)
         fh.setContentsMargins(0, 0, 0, 0)
         ff_label = QLabel(
-            "Firefox：没有「加载已解压的扩展程序」，需要先导出 .xpi，再到地址栏打开\n"
-            "about:debugging#/runtime/this-firefox，点「加载临时附加组件…」选那个文件。"
+            "Firefox 正式版不认未签名扩展：双击/拖入 .xpi 必报「无法验证安全性」，这不是打包坏了。\n"
+            "两条正路：① 临时加载（立即生效，重启浏览器后要重做）：导出 .xpi → 地址栏打开\n"
+            "about:debugging#/runtime/this-firefox → 「加载临时附加组件…」选中该文件；\n"
+            "② 永久安装（推荐，免费）：到 addons.mozilla.org 注册账号 →「提交未列出（unlisted）\n"
+            "附加组件」上传导出的 .xpi → 自动审核通过后下载已签名文件，安装后永久保留。"
         )
         ff_label.setWordWrap(True)
         fh.addWidget(ff_label, 1)
@@ -1198,8 +1201,10 @@ class ExtensionDialog(QDialog):
             return
         self.status.setText(
             f"已导出：{path}\n"
-            "Firefox 地址栏打开 about:debugging#/runtime/this-firefox → "
-            "「加载临时附加组件…」选这个文件。（临时加载的扩展在浏览器重启后会被移除）"
+            "临时生效：Firefox 地址栏打开 about:debugging#/runtime/this-firefox → "
+            "「加载临时附加组件…」选这个文件（浏览器重启后会被移除）。\n"
+            "永久安装：把这个 .xpi 提交到 addons.mozilla.org（未列出渠道，免费自动审核），"
+            "装回签名后的文件即可。"
         )
 
     def _copy_path(self):

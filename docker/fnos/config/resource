@@ -1,0 +1,23 @@
+{
+  "docker-project": {
+    "projects": [
+      {
+        "name": "zdm",
+        "path": "docker"
+      }
+    ]
+  },
+  "data-share": {
+    "shares": [
+      {
+        "name": "zdm"
+      },
+      {
+        "name": "zdm/config"
+      },
+      {
+        "name": "zdm/downloads"
+      }
+    ]
+  }
+}
