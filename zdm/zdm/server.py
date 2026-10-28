@@ -1264,6 +1264,15 @@ class Handler(BaseHTTPRequestHandler):
                         body["audio_url"] = best["audio_url"]
                     body.pop("yt_page", None)
                     body.pop("page_url", None)
+                    # 直链是 yt-dlp（浏览器 UA）签发的：B站音轨 CDN 对无 Cookie
+                    # 且 UA 是 Python-urllib 的请求直接 503（NAS 容器实测）。
+                    # 补一个通用浏览器 UA，视频/音轨两条轨都按签发时的口径取。
+                    if not any(str(k).lower() == "user-agent" for k in headers):
+                        headers["User-Agent"] = (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/126.0.0.0 Safari/537.36"
+                        )
                     title = str(res.get("title") or "").strip()
                     cur = str(body.get("filename") or "")
                     if title and (not cur or _is_generic_video_name(cur)):
