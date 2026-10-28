@@ -120,7 +120,15 @@ def cmd_start(args) -> int:
 def cmd_serve(args) -> int:
     m = Manager()
     port = int(getattr(args, "port", 0) or 0) or int(m.config.get("port") or 9000)
-    return server.serve(m, port=port, open_ui=False)
+    # 容器/NAS 部署：--host 0.0.0.0 + --allow-lan（或同名环境变量 ZDM_HOST /
+    # ZDM_ALLOW_LAN）。allow_lan 只放宽 Host 校验，写操作照旧逐条验令牌。
+    host = str(getattr(args, "host", "") or os.environ.get("ZDM_HOST") or "127.0.0.1")
+    allow_lan = bool(getattr(args, "allow_lan", False)) or str(
+        os.environ.get("ZDM_ALLOW_LAN") or ""
+    ).lower() in ("1", "true", "yes", "on")
+    if allow_lan:
+        m.config["allow_lan"] = True
+    return server.serve(m, host=host, port=port, open_ui=False)
 
 
 def _pid_is_zdm(pid: int) -> bool:
@@ -735,6 +743,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("serve", help="run service in foreground (internal)")
     s.add_argument("--port", type=int, default=argparse.SUPPRESS)
+    s.add_argument("--host", default="", help="绑定地址（容器/NAS 用 0.0.0.0）")
+    s.add_argument("--allow-lan", action="store_true",
+                   help="放行局域网 Host（写操作仍需令牌；配合 --host 0.0.0.0 用）")
     s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("stop", help="stop the service")

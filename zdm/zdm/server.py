@@ -447,7 +447,12 @@ class Handler(BaseHTTPRequestHandler):
         return (self.headers.get("X-ZDM-Extension") or "") == EXTENSION_ID
 
     def _host_ok(self) -> bool:
-        """Reject DNS-rebinding requests that kept a non-local Host header."""
+        """Reject DNS-rebinding requests that kept a non-local Host header.
+
+        开了「局域网访问」（allow_lan：容器/NAS 部署的入口开关）后 Host 可以是
+        局域网地址：DNS rebinding 的防线改由令牌承担（写操作全要 token），
+        网页版由本服务自己发 cookie，链路不变。
+        """
         raw = self.headers.get("Host") or ""
         if not raw:
             return True
@@ -455,7 +460,9 @@ class Handler(BaseHTTPRequestHandler):
             host = (urlparse("//" + raw).hostname or "").lower()
         except Exception:
             return False
-        return host in ("127.0.0.1", "localhost", "::1")
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return True
+        return bool(self.manager.config.get("allow_lan"))
 
     def _send(self, code: int, body: bytes, ctype: str, extra=None, any_origin: bool = False) -> None:
         self.send_response(code)

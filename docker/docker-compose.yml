@@ -1,0 +1,10 @@
+services:
+  zdm:
+    image: ghcr.io/feibixunchang/zdm-server:latest
+    container_name: zdm
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./data/config:/config        # 任务状态、设置、api-token
+      - ./data/downloads:/downloads  # 下载落盘目录（可换成 NAS 存储路径）

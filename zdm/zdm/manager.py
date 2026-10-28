@@ -186,6 +186,10 @@ def config_dir() -> str:
 
 
 def default_download_dir() -> str:
+    # 容器/NAS 部署用 ZDM_DOWNLOAD_DIR 指定落盘目录（compose 里挂出来）。
+    env = os.environ.get("ZDM_DOWNLOAD_DIR")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
     home = os.path.expanduser("~")
     for cand in (os.path.join(home, "Downloads"), os.path.join(home, "下载")):
         if os.path.isdir(cand):

@@ -46,3 +46,7 @@ zdm/zdm/yt_dlp_pkg/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 构建产物目录（本地打包/dmg 输出，不入库）
+dist/macos-build/
+dist/linux-build/
